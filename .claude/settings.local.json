@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(tree:*)",
+      "Bash(python:*)",
+      "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip list:*)",
+      "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip install:*)",
+      "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip freeze:*)",
+      "Bash(\"G:/Python/my/.venv/Scripts/python.exe\":*)",
+      "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip download -r \"G:/Python/my/requirements.txt\" -d \"G:/Python/my/packages\")"
+    ]
+  },
+  "model": "claude-opus-4-6"
+}
