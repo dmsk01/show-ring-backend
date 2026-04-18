@@ -18,7 +18,15 @@
       "WebFetch(domain:darsamocveta.ru)",
       "WebFetch(domain:smart-dogs.ru)",
       "Bash(mkdir -p offline_packages)",
-      "Bash(pip download:*)"
+      "Bash(pip download:*)",
+      "Bash(pip --version)",
+      "Bash(docker --version)",
+      "Bash(docker run *)",
+      "Bash(docker exec postgres *)",
+      "Bash(docker stop *)",
+      "Bash(docker rm *)",
+      "Bash(docker image rm *)",
+      "Bash(git rm *)"
     ]
   },
   "model": "claude-opus-4-6"
