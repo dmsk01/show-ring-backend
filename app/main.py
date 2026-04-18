@@ -3,7 +3,8 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.config import settings
 from app.services.rabbit import rabbit_service
-from app.routers import books, tasks
+from app.routers import books, tasks, events
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -13,6 +14,8 @@ async def lifespan(app: FastAPI):
     await rabbit_service.close()
     print("Disconnected from RabbitMQ")
 
+
 app = FastAPI(lifespan=lifespan)
 app.include_router(tasks.router)
 app.include_router(books.router)
+app.include_router(events.router)

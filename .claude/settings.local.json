@@ -8,7 +8,17 @@
       "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip install:*)",
       "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip freeze:*)",
       "Bash(\"G:/Python/my/.venv/Scripts/python.exe\":*)",
-      "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip download -r \"G:/Python/my/requirements.txt\" -d \"G:/Python/my/packages\")"
+      "Bash(\"G:/Python/my/.venv/Scripts/python.exe\" -m pip download -r \"G:/Python/my/requirements.txt\" -d \"G:/Python/my/packages\")",
+      "WebFetch(domain:rkf.org.ru)",
+      "WebFetch(domain:zooportal.pro)",
+      "WebFetch(domain:kashtanka.ru)",
+      "WebSearch",
+      "WebFetch(domain:dog-profi.info)",
+      "WebFetch(domain:info.rkf.online)",
+      "WebFetch(domain:darsamocveta.ru)",
+      "WebFetch(domain:smart-dogs.ru)",
+      "Bash(mkdir -p offline_packages)",
+      "Bash(pip download:*)"
     ]
   },
   "model": "claude-opus-4-6"

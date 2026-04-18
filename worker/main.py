@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 
 import aio_pika
@@ -5,6 +6,7 @@ import aio_pika
 from worker.handlers.book_handler import process_book
 
 import json
+
 
 async def process_message(message: aio_pika.IncomingMessage):
     async with message.process():
@@ -19,10 +21,35 @@ async def process_message(message: aio_pika.IncomingMessage):
         # Вызываем обработчик
         await process_book(task_id, payload)
 
+
+async def on_event(message: aio_pika.IncomingMessage):
+    async with message.process():
+        print(f"Обработано событие: {message.body.decode()}")
+
+
+async def subscribe_to_events():
+    connection = await aio_pika.connect_robust("amqp://guest:guest@localhost/")
+    channel = await connection.channel()
+    exchange = await channel.declare_exchange(
+        "events", aio_pika.ExchangeType.FANOUT, durable=True
+    )
+    queue = await channel.declare_queue("", exclusive=True, auto_delete=True)
+
+    await queue.bind(exchange)
+
+    await queue.consume(on_event)
+
+    print("Подписан на fanout-события")
+    try:
+        await asyncio.Future()
+    finally:
+        await connection.close()
+
+
 async def main():
     connection = await aio_pika.connect_robust("amqp://guest:guest@localhost/")
     channel = await connection.channel()
-    
+
     await channel.set_qos(prefetch_count=1)
     queue = await channel.declare_queue("book_task", durable=True)
     await queue.consume(process_message)
@@ -33,5 +60,13 @@ async def main():
     finally:
         await connection.close()
 
+
 if __name__ == "__main__":
-    asyncio.run(main())    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["queue", "fanout"], default="queue")
+    args = parser.parse_args()
+
+    if args.mode == "fanout":
+        asyncio.run(subscribe_to_events())
+    else:
+        asyncio.run(main())
