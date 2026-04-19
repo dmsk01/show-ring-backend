@@ -52,12 +52,13 @@
 
 | Компонент | Технология | Зачем |
 |-----------|-----------|-------|
+| Frontend | Next.js (App Router) + TypeScript | SSR/SSG для SEO, CSR для интерактива |
 | API | FastAPI (async) | Async HTTP + WebSocket |
-| БД | PostgreSQL + asyncpg | Основное хранилище |
+| БД | PostgreSQL 17 + asyncpg | Основное хранилище |
 | ORM | SQLAlchemy 2.0 (async) | CRUD + миграции |
 | Миграции | Alembic | Версионирование схемы |
 | Очереди | RabbitMQ + aio-pika | Task Queue + Events |
-| Кэш / Rate Limit | Redis + redis-py (async) | Кэш справочников, progressive ban, WS pub/sub |
+| Кэш / Rate Limit | Redis 8 + redis-py (async) | Кэш справочников, progressive ban, WS pub/sub |
 | Валидация | Pydantic v2 | Схемы запросов/ответов |
 | Аутентификация | JWT (access + refresh) | Refresh tokens в БД |
 | Генерация PDF | ReportLab / WeasyPrint | Каталоги, дипломы |
