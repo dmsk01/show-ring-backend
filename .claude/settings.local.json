@@ -26,7 +26,22 @@
       "Bash(docker stop *)",
       "Bash(docker rm *)",
       "Bash(docker image rm *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(venv/Scripts/python.exe -c \"import asyncpg; print\\(asyncpg.__version__\\)\")",
+      "Bash(venv/Scripts/python.exe --version)",
+      "Bash(venv/Scripts/python.exe -c ' *)",
+      "Bash(venv/Scripts/pip install *)",
+      "Bash(venv/Scripts/pip show *)",
+      "Bash(venv/Scripts/python.exe -c \"import socket; s=socket.create_connection\\(\\('127.0.0.1',5432\\),timeout=3\\); print\\('TCP OK'\\); s.close\\(\\)\")",
+      "Bash(psql --version)",
+      "Bash(grep -v \"^$\")",
+      "Bash(docker restart *)",
+      "Bash(netstat -ano)",
+      "Bash(tasklist /FI \"PID eq 6000\" /FO LIST)",
+      "Bash(tasklist /FI \"PID eq 12004\" /FO LIST)",
+      "Bash(powershell *)",
+      "Bash(venv/Scripts/alembic.exe revision *)",
+      "Bash(venv/Scripts/alembic.exe upgrade *)"
     ]
   },
   "model": "claude-opus-4-6"
