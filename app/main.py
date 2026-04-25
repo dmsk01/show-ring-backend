@@ -1,21 +1,22 @@
 from fastapi import FastAPI
 
 from contextlib import asynccontextmanager
-from app.config import settings
-from app.services.rabbit import rabbit_service
-from app.routers import books, tasks, events
+from sqlalchemy import text
+from app.database import engine
+from app.routers import health
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await rabbit_service.connect(settings.rabbitmq_url)
-    print("Connected to RabbitMQ")
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        print("DB connection OK")
+    except Exception as e:
+        print(f"WARNING: DB unavailable at startup: {e}")
     yield
-    await rabbit_service.close()
-    print("Disconnected from RabbitMQ")
+    await engine.dispose()
 
 
 app = FastAPI(lifespan=lifespan)
-app.include_router(tasks.router)
-app.include_router(books.router)
-app.include_router(events.router)
+app.include_router(health.router)
