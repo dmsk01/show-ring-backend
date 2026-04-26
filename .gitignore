@@ -41,3 +41,5 @@ htmlcov/
 
 # Docker
 *.override.yml
+
+hints/
