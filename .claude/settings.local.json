@@ -41,7 +41,8 @@
       "Bash(tasklist /FI \"PID eq 12004\" /FO LIST)",
       "Bash(powershell *)",
       "Bash(venv/Scripts/alembic.exe revision *)",
-      "Bash(venv/Scripts/alembic.exe upgrade *)"
+      "Bash(venv/Scripts/alembic.exe upgrade *)",
+      "Bash(alembic current *)"
     ]
   },
   "model": "claude-opus-4-6"
