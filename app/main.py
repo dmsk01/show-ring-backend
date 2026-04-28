@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text
 from app.database import engine
 from app.routers import health
+from app.redis import init_redis, close_redis
 
 
 @asynccontextmanager
@@ -14,8 +15,10 @@ async def lifespan(app: FastAPI):
         print("DB connection OK")
     except Exception as e:
         print(f"WARNING: DB unavailable at startup: {e}")
+    await init_redis()
     yield
     await engine.dispose()
+    await close_redis()
 
 
 app = FastAPI(lifespan=lifespan)
