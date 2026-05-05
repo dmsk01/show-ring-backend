@@ -42,7 +42,10 @@
       "Bash(powershell *)",
       "Bash(venv/Scripts/alembic.exe revision *)",
       "Bash(venv/Scripts/alembic.exe upgrade *)",
-      "Bash(alembic current *)"
+      "Bash(alembic current *)",
+      "PowerShell(cmd /c \"dir E:\\\\Coding\\\\python-animal-platform\\\\hints /b /s\")",
+      "PowerShell(cmd /c \"dir E:\\\\Coding\\\\python-animal-platform\\\\hints\\\\stage-14 /b /s && echo --- && dir E:\\\\Coding\\\\python-animal-platform\\\\hints\\\\stage-15 /b /s\")",
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import app.main\")"
     ]
   }
 }

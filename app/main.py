@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 from app.database import engine
-from app.routers import health
+from app.routers import health, auth, users
 from app.redis import init_redis, close_redis
 
 
@@ -23,3 +23,5 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(health.router)
+app.include_router(auth.router)
+app.include_router(users.router)
