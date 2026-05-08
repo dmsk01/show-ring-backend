@@ -1,0 +1,10 @@
+venv/
+**/__pycache__/
+*.pyc
+*.pyo
+.git/
+node_modules/
+dist/
+build/
+*.log
+migrations/versions/*.py
