@@ -15,3 +15,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return {"status": "ok", "db": "connected"}
     except:
         return {"status": "ok", "db": "unavailable"}
+
+
+@router.get("/test-error")
+async def test_error():
+    raise ValueError("test unhandled exception")

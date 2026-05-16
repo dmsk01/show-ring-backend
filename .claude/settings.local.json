@@ -45,7 +45,18 @@
       "Bash(alembic current *)",
       "PowerShell(cmd /c \"dir E:\\\\Coding\\\\python-animal-platform\\\\hints /b /s\")",
       "PowerShell(cmd /c \"dir E:\\\\Coding\\\\python-animal-platform\\\\hints\\\\stage-14 /b /s && echo --- && dir E:\\\\Coding\\\\python-animal-platform\\\\hints\\\\stage-15 /b /s\")",
-      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import app.main\")"
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import app.main\")",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\" -Recurse -Force | ForEach-Object { $_.FullName })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\" -Force | ForEach-Object { $_.Name })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\" | ForEach-Object { $_.Name })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\skills\" | ForEach-Object { $_.Name })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\.claude-plugin\" | ForEach-Object { $_.Name })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\data\" -Recurse | ForEach-Object { $_.FullName.Replace\\(\"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\data\\\\\", \"\"\\) })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\skills\" -Force | ForEach-Object { $_.FullName })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\hooks\\\\session-start\" | ForEach-Object { $_.Name })",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\hooks\\\\session-start\" -Recurse | ForEach-Object { $_.FullName })",
+      "Skill(update-config)",
+      "Skill(task-format)"
     ]
   }
 }
