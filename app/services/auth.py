@@ -104,5 +104,9 @@ async def refresh_access_token(db: AsyncSession, raw_refresh_token: str):
 async def logout_user(db: AsyncSession, raw_refresh_token: str):
     token_hash = hash_token(raw_refresh_token)
 
+    token = await user_repo.get_refresh_token_by_hash(db, token_hash)
+    if token is None:
+        raise ValueError("Refresh token не найден")
+
     await user_repo.revoke_refresh_token(db, token_hash)
     await db.commit()

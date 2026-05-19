@@ -72,7 +72,9 @@ async def revoke_refresh_token(db: AsyncSession, token_hash: str) -> None:
 async def create_email_verification_token(
     db: AsyncSession, user_id: UUID, token_hash: str, expires_at: datetime
 ) -> EmailVerificationToken:
-    token = EmailVerificationToken(user_id=user_id, token_hash=token_hash, expires_at=expires_at)
+    token = EmailVerificationToken(
+        user_id=user_id, token_hash=token_hash, expires_at=expires_at
+    )
 
     db.add(token)
     await db.flush()
@@ -82,9 +84,8 @@ async def create_email_verification_token(
 async def get_email_verification_token_by_hash(
     db: AsyncSession, token_hash: str
 ) -> EmailVerificationToken | None:
-    stmt = (
-        select(EmailVerificationToken)
-        .where(EmailVerificationToken.token_hash == token_hash)
+    stmt = select(EmailVerificationToken).where(
+        EmailVerificationToken.token_hash == token_hash
     )
 
     result = await db.execute(stmt)
