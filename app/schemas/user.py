@@ -36,6 +36,17 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
+# ИСПРАВЛЕНО: отдельная схема для публичного GET /users/{id} — без email
+# и без флага is_email_verified, чтобы не раскрывать PII неавторизованным.
+class PublicUserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    is_active: bool
+    roles: list[RoleResponse]
+    created_at: datetime
+
+
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
 

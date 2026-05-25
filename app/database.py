@@ -5,9 +5,12 @@ from .config import settings
 
 # 1. Создание асинхронного движка
 # Формат URL: dialect+driver://user:password@host/dbname
+# ИСПРАВЛЕНО: echo=True писало все SQL-запросы и параметры (включая
+# хеши паролей и токенов) в stdout — утечка чувствительных данных в логи.
+# Управляется флагом debug из настроек, по умолчанию выключено.
 engine = create_async_engine(
     settings.database_url,
-    echo=True,  # Логирование SQL-запросов
+    echo=settings.debug,
 )
 
 # 2. Создание фабрики сессий

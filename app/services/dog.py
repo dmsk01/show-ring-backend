@@ -1,0 +1,172 @@
+"""
+Сервис собак и родословной (этап 4).
+
+Бизнес-правила:
+- Добавлять собаку может владелец питомника (где собака будет числиться)
+  или admin. Если kennel_id=None — любой авторизованный заводчик.
+- Пол родителей должен соответствовать роли (отец=male, мать=female) —
+  иначе родословная теряет смысл.
+- Собака не может быть собственным предком (защита от цикла в self-ref).
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.dog import Dog, SexEnum
+from app.models.kennel import Kennel
+from app.repositories import dog as repo
+from app.repositories import kennel as kennel_repo
+from app.schemas.dog import PedigreeNode
+
+
+async def _validate_parents(
+    db: AsyncSession,
+    father_id: uuid.UUID | None,
+    mother_id: uuid.UUID | None,
+    self_id: uuid.UUID | None = None,
+) -> None:
+    if father_id is not None:
+        father = await repo.get_dog(db, father_id)
+        if father is None:
+            raise ValueError("father_not_found")
+        if father.sex != SexEnum.male:
+            raise ValueError("father_must_be_male")
+        if self_id is not None and father.id == self_id:
+            raise ValueError("self_parent_forbidden")
+    if mother_id is not None:
+        mother = await repo.get_dog(db, mother_id)
+        if mother is None:
+            raise ValueError("mother_not_found")
+        if mother.sex != SexEnum.female:
+            raise ValueError("mother_must_be_female")
+        if self_id is not None and mother.id == self_id:
+            raise ValueError("self_parent_forbidden")
+
+
+async def _check_kennel_owner(
+    db: AsyncSession,
+    kennel_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> Kennel:
+    kennel = await kennel_repo.get_kennel(db, kennel_id)
+    if kennel is None:
+        raise ValueError("kennel_not_found")
+    if kennel.owner_id != requester_id and not is_admin:
+        raise ValueError("forbidden")
+    return kennel
+
+
+async def create_dog(
+    db: AsyncSession,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+    fields: dict,
+) -> Dog:
+    # Если собаку привязывают к питомнику — проверяем, что заводчик
+    # имеет на это право (его питомник). Без питомника — пропускаем.
+    if fields.get("kennel_id"):
+        await _check_kennel_owner(
+            db, fields["kennel_id"], requester_id, is_admin
+        )
+    await _validate_parents(
+        db, fields.get("father_id"), fields.get("mother_id")
+    )
+    try:
+        obj = await repo.create_dog(db, **fields)
+        await db.commit()
+        await db.refresh(obj)
+        return obj
+    except IntegrityError:
+        await db.rollback()
+        # Скорее всего UNIQUE rkf_number. Не указываем точно поле в
+        # detail, чтобы не раскрывать структуру БД лишний раз.
+        raise ValueError("duplicate_unique_field")
+
+
+async def update_dog(
+    db: AsyncSession,
+    dog_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+    fields: dict,
+) -> Dog:
+    obj = await repo.get_dog(db, dog_id)
+    if obj is None:
+        raise ValueError("not_found")
+    # Право на правку: владелец питомника, к которому привязана собака,
+    # либо admin. Если собака без питомника — только admin (т.к. у нас
+    # нет прямого FK dog → user).
+    if obj.kennel_id is not None:
+        await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
+    elif not is_admin:
+        raise ValueError("forbidden")
+
+    if "kennel_id" in fields and fields["kennel_id"] is not None:
+        # Перенос в другой питомник — нужно право на новый питомник тоже.
+        await _check_kennel_owner(
+            db, fields["kennel_id"], requester_id, is_admin
+        )
+
+    await _validate_parents(
+        db,
+        fields.get("father_id"),
+        fields.get("mother_id"),
+        self_id=obj.id,
+    )
+
+    for k, v in fields.items():
+        setattr(obj, k, v)
+    try:
+        await db.commit()
+        await db.refresh(obj)
+        return obj
+    except IntegrityError:
+        await db.rollback()
+        raise ValueError("duplicate_unique_field")
+
+
+# ---------------------------------------------------------------------
+# Родословная
+# ---------------------------------------------------------------------
+
+
+async def build_pedigree(
+    db: AsyncSession, root_id: uuid.UUID, generations: int = 3
+) -> PedigreeNode | None:
+    """
+    Тянет родословную одним запросом (CTE) и собирает дерево в Python.
+
+    Без CTE мы бы делали 2^N запросов (на N поколений), что
+    неприемлемо даже для 3 уровней.
+    """
+    flat = await repo.load_pedigree_flat(db, root_id, generations)
+    if not flat:
+        return None
+
+    by_id: dict[uuid.UUID, dict] = {row["id"]: row for row in flat}
+    # Корень — собака с generation=0.
+    root_row = next(r for r in flat if r["generation"] == 0)
+
+    def _make(node_row) -> PedigreeNode:
+        # Рекурсивно собираем PedigreeNode из плоских строк.
+        # node_row["father_id"] может ссылаться на узел, которого нет
+        # в выборке (он за пределами generations) — тогда оставляем None.
+        father_row = by_id.get(node_row["father_id"]) if node_row["father_id"] else None
+        mother_row = by_id.get(node_row["mother_id"]) if node_row["mother_id"] else None
+        return PedigreeNode(
+            id=node_row["id"],
+            name=node_row["name"],
+            sex=node_row["sex"],
+            date_of_birth=node_row["date_of_birth"],
+            breed_id=node_row["breed_id"],
+            rkf_number=node_row["rkf_number"],
+            father=_make(father_row) if father_row else None,
+            mother=_make(mother_row) if mother_row else None,
+        )
+
+    return _make(root_row)

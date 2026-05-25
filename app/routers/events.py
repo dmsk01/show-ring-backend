@@ -1,9 +1,17 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+
+from app.dependencies import require_any_role
 from app.schemas.event import Event
 from app.services.rabbit import rabbit_service
 from app.config import settings
 
-router = APIRouter(prefix="/events", tags=["events"])
+# ИСПРАВЛЕНО: эндпоинты публикуют сообщения в RabbitMQ — закрыты ролью admin,
+# иначе любой клиент мог рассылать broadcast или инвалидировать кеш.
+router = APIRouter(
+    prefix="/events",
+    tags=["events"],
+    dependencies=[Depends(require_any_role("admin"))],
+)
 
 
 @router.post("/broadcast", summary="Отправить произвольное событие всем подписчикам")

@@ -11,6 +11,11 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = settings.secret_key
 ALGORITHM = "HS256"
 
+# ИСПРАВЛЕНО: фиксированный bcrypt-хеш для constant-time проверки в login,
+# когда пользователь не найден. Без него длительность ответа выдавала
+# существование email (timing attack → user enumeration).
+_DUMMY_BCRYPT_HASH = pwd_context.hash("dummy-password-for-timing")
+
 
 # Группа 1 — Пароли
 def hash_password(plain: str) -> str:
@@ -19,6 +24,12 @@ def hash_password(plain: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
+
+
+def dummy_verify_password() -> None:
+    # ИСПРАВЛЕНО: вызывается, когда юзер не найден, чтобы выровнять
+    # время ответа с реальной bcrypt-верификацией.
+    pwd_context.verify("dummy-password-for-timing", _DUMMY_BCRYPT_HASH)
 
 
 def validate_password(password: str) -> None:
@@ -36,7 +47,20 @@ def create_access_token(user_id: str, roles: list[str]) -> str:
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    # ИСПРАВЛЕНО: явные опции декодирования. require_exp + require_sub
+    # отрезают токены без обязательных полей. verify_signature=True по
+    # умолчанию, но прописываем явно для прозрачности.
+    return jwt.decode(
+        token,
+        SECRET_KEY,
+        algorithms=[ALGORITHM],
+        options={
+            "verify_signature": True,
+            "verify_exp": True,
+            "require_exp": True,
+            "require_sub": True,
+        },
+    )
 
 
 # Группа 3 — Случайные токены

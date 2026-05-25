@@ -37,7 +37,14 @@ class User(Base, TimestampMixin):
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(default=True)
     is_email_verified: Mapped[bool] = mapped_column(default=False)
-    avatar_file_id: Mapped[str | None] = mapped_column(String(255))
+    # Этап 4: переход с String-плейсхолдера на реальный FK → files.id.
+    # SET NULL — если аватар удалён из хранилища, юзер остаётся без
+    # аватара, а не "ломается" с висячей ссылкой.
+    avatar_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("files.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     roles: Mapped[list["UserRole"]] = relationship(
         back_populates="user",
@@ -80,9 +87,11 @@ class UserRole(Base):
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
+    # ИСПРАВЛЕНО: убран дублирующий Index("ix_refresh_tokens_token_hash") —
+    # unique=True на token_hash уже создаёт unique index. Двойной индекс
+    # давал лишнюю работу на INSERT без выигрыша на чтении.
     __table_args__ = (
         Index("ix_refresh_tokens_user_id", "user_id"),
-        Index("ix_refresh_tokens_token_hash", "token_hash"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

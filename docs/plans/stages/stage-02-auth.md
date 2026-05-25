@@ -44,12 +44,13 @@
 |-------|------|----------|--------|
 | POST | `/auth/register` | Регистрация → отправка verification email | Public |
 | POST | `/auth/verify-email` | Подтверждение email по токену | Public |
-| POST | `/auth/login` | Логин → JWT (access + refresh) | Public |
-| POST | `/auth/refresh` | Обновить access token | Authenticated |
-| POST | `/auth/logout` | Отозвать refresh token | Authenticated |
-| GET | `/users/me` | Свой профиль + роли | Authenticated |
+| POST | `/auth/login` | Логин (JSON) → JWT (access + refresh) | Public |
+| POST | `/auth/token` | OAuth2 form login (для Swagger Authorize) | Public |
+| POST | `/auth/refresh` | Обновить access + refresh (rotation) | Public с refresh-токеном |
+| POST | `/auth/logout` | Отозвать refresh token | Public с refresh-токеном |
+| GET | `/users/me` | Свой профиль + email + роли | Authenticated |
 | PUT | `/users/me` | Обновить профиль | Authenticated |
-| GET | `/users/{id}` | Публичный профиль | Public |
+| GET | `/users/{id}` | Публичный профиль (БЕЗ email) | Public |
 
 ### Progressive Rate Limiting
 
@@ -107,6 +108,93 @@ def validate_password(password: str) -> None:
 
 > Начинаем с минимума (длина). Сложные правила (цифры, спецсимволы) добавляются позже при необходимости.
 
+### Защита от user enumeration и timing attacks
+
+- **`/auth/register`** возвращает **одинаковое** сообщение независимо от того,
+  существует email или нет: `{"message": "Проверьте email для подтверждения"}`.
+  Никаких 400 «email уже занят». При race-condition на UNIQUE-constraint
+  сервис ловит `IntegrityError` и тоже возвращает успех.
+- **`/auth/login`** при отсутствии пользователя выполняет dummy bcrypt
+  verify (`utils.security.dummy_verify_password`), чтобы время ответа было
+  сопоставимо с реальной проверкой пароля. Сообщение ошибки одно и то же
+  для «нет такого юзера» и «неверный пароль» — `401 Неверный email или пароль`.
+- **`/auth/login` и `/auth/refresh`** проверяют `user.is_active` — забаненный
+  пользователь не получит токенов.
+
+### Sanitization Middleware — список исключений
+
+Глобальный `SanitizationMiddleware` пропускает чувствительные поля без
+изменений (`password`, `current_password`, `new_password`, `old_password`,
+`token`, `access_token`, `refresh_token`, `hashed_password`, `api_key`,
+`secret`). Иначе bleach изменяет значение (`"ab<x>cd"` → `"abcd"`), и хеш
+при регистрации не совпадает с хешем при логине.
+
+### Атомарность одноразовых токенов
+
+- **email verification:** `mark_email_token_used` — атомарный
+  `UPDATE ... WHERE used_at IS NULL` и проверка `rowcount`. Без этого
+  два параллельных запроса с одним токеном могли пройти оба.
+- **refresh token revoke:** `revoke_refresh_token` —
+  `UPDATE ... WHERE is_revoked = FALSE` с проверкой `rowcount`,
+  чтобы отличать «не нашли» от «уже отозван».
+
+### Refresh Token Rotation + Reuse Detection
+
+- При **успешном `/auth/refresh`** старый refresh-токен **атомарно**
+  отзывается (`UPDATE ... WHERE is_revoked = FALSE`), и пользователю
+  выдаётся **новый** access + **новый** refresh (формат — `TokenResponse`).
+- **Reuse detection (defense-in-depth):** если `/auth/refresh` получил
+  токен, который **существует в БД, но уже отозван** — это потенциальная
+  утечка refresh (атакующий повторно использует украденный токен).
+  В этом случае:
+  - отзываются **ВСЕ** активные refresh этого user_id;
+  - событие `refresh_token_reuse` пишется в `app.security`;
+  - пользователю возвращается 401, ему нужен заново `/auth/login`.
+- Семантика **`/auth/logout`** не меняется: вход тот же `RefreshRequest`,
+  атомарный revoke по `token_hash`.
+- **Trade-off:** при сетевых сбоях клиент может потерять новый refresh.
+  Принято: клиент обязан атомарно сохранять новую пару, иначе делает
+  заново `/auth/login`. Без сложных схем grace-window.
+
+### Security-логирование
+
+- Отдельный логгер `app.security` для security-relevant событий.
+  Никогда не пишет пароли/raw токены — только `email`/`user_id` и тип.
+- Сейчас пишутся события:
+  - `login_failed reason=no_user|bad_password`
+  - `login_blocked`
+  - `register_existing_email`, `register_race_collision`
+  - `email_verify_race`
+  - `refresh_token_reuse`
+- На стейдже 14 (production) этот логгер направляется в отдельный sink
+  (отдельный файл / SIEM), чтобы security-события можно было отдельно
+  алертить и хранить дольше application-логов.
+
+### Публичная схема `/users/{id}`
+
+- Возвращает `PublicUserResponse` — **без `email`** и **без
+  `is_email_verified`**, иначе любой неавторизованный клиент мог собирать
+  email'ы перебором UUID.
+- `/users/me` (за `Depends(get_current_user)`) по-прежнему возвращает
+  `UserResponse` с email — сам себе юзер может видеть свои PII.
+
+### OAuth2 form-эндпоинт для Swagger
+
+- `OAuth2PasswordBearer(tokenUrl=...)` указывает на эндпоинт, который
+  по спецификации **обязан** принимать form-data (`username`, `password`).
+- Решение: оставить `/auth/login` JSON-ным (контракт прикладных клиентов
+  не меняется) и добавить отдельный `/auth/token`, который принимает
+  `OAuth2PasswordRequestForm` и возвращает тот же `TokenResponse`.
+- `tokenUrl` в `dependencies.py` переключён на `/auth/token` — кнопка
+  «Authorize» в Swagger UI теперь работает.
+
+### Заметка про CORS (стейдж 2 → стейдж 14)
+
+- `CORSMiddleware` подключается в `app/main.py` только если
+  `CORS_ALLOW_ORIGINS` непустой.
+- На стейдже 14 (production) сюда добавляется список реальных фронт-доменов
+  (фронт + админка). До этого `[]` — никакой обёртки CORS, никакого `*`.
+
 ### Email Verification Flow
 
 ```
@@ -153,6 +241,9 @@ def validate_password(password: str) -> None:
 - **Email verification** — токен в БД (не в JWT), SHA-256 хеш
 - **Depends()** — цепочка зависимостей: `get_db → get_current_user → require_any_role`
 - **Middleware** — request/response pipeline в FastAPI
+- **JWT type guard** — `get_current_user` проверяет `payload["type"] == "access"`,
+  чтобы будущая выдача JWT-refresh не открывала уязвимость подмены
+- **Constant-time compare** — `secrets.compare_digest` для внутренних API-ключей
 
 ### SQL-фокус
 
@@ -168,11 +259,22 @@ def validate_password(password: str) -> None:
 ### Как проверить
 
 1. `POST /auth/register` — создаёт пользователя, возвращает "проверьте email"
-2. `POST /auth/verify-email?token=...` — подтверждает email
-3. `POST /auth/login` — возвращает access + refresh token
-4. `GET /users/me` с `Authorization: Bearer <token>` — профиль с ролями
-5. `GET /users/me` без токена — 401
-6. `POST /auth/logout` — refresh token отозван, повторный refresh → 401
-7. Эндпоинт с `require_any_role("admin")` — 403 для обычного пользователя
-8. 6 быстрых запросов на `/auth/login` — 429 с Retry-After: 2
-9. Повторная попытка сразу — 429 с Retry-After: 4 (экспоненциальный рост)
+2. `POST /auth/register` с **тем же** email — тот же 200 "проверьте email"
+   (нет user enumeration)
+3. `POST /auth/verify-email?token=...` — подтверждает email
+4. Повторный `POST /auth/verify-email` с тем же токеном → 400
+   (атомарный mark used)
+5. `POST /auth/login` — возвращает access + refresh token
+6. `POST /auth/login` с несуществующим email — 401 с тем же временем
+   ответа, что и с неверным паролем (dummy bcrypt verify)
+7. `GET /users/me` с `Authorization: Bearer <token>` — профиль с email и ролями
+8. `GET /users/me` без токена — 401
+9. `GET /users/{id}` чужого юзера → 200, но **без `email`** в ответе
+10. `POST /auth/refresh` — возвращает **новый** access + **новый** refresh,
+    старый refresh после этого → 401 (rotation)
+11. `POST /auth/logout` — refresh token отозван, повторный refresh → 401
+12. Эндпоинт с `require_any_role("admin")` — 403 для обычного пользователя
+13. 6 быстрых запросов на `/auth/login` — 429 с Retry-After: 2
+14. Повторная попытка сразу — 429 с Retry-After: 4 (экспоненциальный рост)
+15. В Swagger UI кнопка «Authorize» (через `/auth/token`) выдаёт токен
+    и подставляет его в защищённые эндпоинты

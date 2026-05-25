@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.redis import get_redis
 from redis.asyncio import Redis
@@ -15,6 +16,9 @@ from app.schemas.user import RefreshRequest, TokenResponse, UserCreate
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# ИСПРАВЛЕНО: единое сообщение для register, чтобы не было user enumeration.
+_REGISTER_RESPONSE = {"message": "Проверьте email для подтверждения"}
+
 
 @router.post(
     "/register",
@@ -29,15 +33,15 @@ async def register(
 ):
     await check_rate_limit(
         request,
-        limit=5,
-        window=60,
+        limit=3,
+        window=3600,
         redis=redis,
     )
-    try:
-        await register_user(db, body.email, body.password)
-        return {"message": "Проверьте email для подтверждения"}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    # ИСПРАВЛЕНО: ответ одинаков и для нового, и для уже существующего
+    # email — это защита от перечисления учётных записей. Сервис
+    # возвращает None в случае коллизии, мы это не светим наружу.
+    await register_user(db, body.email, body.password)
+    return _REGISTER_RESPONSE
 
 
 @router.post(
@@ -53,7 +57,7 @@ async def verify_user_email(
 ):
     await check_rate_limit(
         request,
-        limit=5,
+        limit=10,
         window=60,
         redis=redis,
     )
@@ -88,16 +92,45 @@ async def login(
 
 
 @router.post(
+    "/token",
+    summary="OAuth2-совместимый login (form-data)",
+    description=(
+        "Альтернативный логин на form-data (username/password) — нужен для "
+        "кнопки 'Authorize' в Swagger. Возвращает тот же TokenResponse, что "
+        "и /auth/login. Используй /auth/login для обычной JSON-интеграции."
+    ),
+)
+async def login_form(
+    request: Request,
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+) -> TokenResponse:
+    # ИСПРАВЛЕНО: добавлен form-эндпоинт, чтобы tokenUrl в OAuth2PasswordBearer
+    # совпадал с реальной реализацией. Раньше Swagger Authorize не работал.
+    await check_rate_limit(request, limit=5, window=60, redis=redis)
+    try:
+        # OAuth2 спецификация требует поле username — мапим его на email.
+        return await login_user(db, form.username, form.password)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@router.post(
     "/refresh",
     summary="Обновление access token",
-    description="Принимает действующий refresh token, возвращает новый access token.",
+    description=(
+        "Принимает refresh token, возвращает новый access + новый refresh. "
+        "Старый refresh после успешного вызова становится недействительным "
+        "(rotation): повторный запрос с тем же токеном даёт 401."
+    ),
 )
 async def refresh(
     request: Request,
     body: RefreshRequest,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
-):
+) -> TokenResponse:
     await check_rate_limit(
         request,
         limit=5,
@@ -105,8 +138,9 @@ async def refresh(
         redis=redis,
     )
     try:
-        access_token = await refresh_access_token(db, body.refresh_token)
-        return {"access_token": access_token}
+        # ИСПРАВЛЕНО: возвращаем TokenResponse целиком — клиент обязан
+        # заменить refresh-токен. См. rotation в services.auth.refresh_access_token.
+        return await refresh_access_token(db, body.refresh_token)
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 

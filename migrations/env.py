@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 from app.models.base import Base
-from app.models import user
+# Импортируем модели, чтобы их metadata подцепился к Base.metadata —
+# иначе autogenerate их не увидит и не создаст миграцию.
+from app.models import user  # noqa: F401
+from app.models import reference  # noqa: F401
+from app.models import file as _file_model  # noqa: F401
+from app.models import kennel as _kennel_model  # noqa: F401
+from app.models import dog as _dog_model  # noqa: F401
 
 from app.config import settings
 

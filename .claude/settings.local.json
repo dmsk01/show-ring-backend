@@ -56,7 +56,29 @@
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\hooks\\\\session-start\" | ForEach-Object { $_.Name })",
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\dmskd\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\hooks\\\\session-start\" -Recurse | ForEach-Object { $_.FullName })",
       "Skill(update-config)",
-      "Skill(task-format)"
+      "Skill(task-format)",
+      "Skill(stage-verification)",
+      "PowerShell($env:DATABASE_URL='postgresql+asyncpg://x:x@localhost/x'; $env:SECRET_KEY='x'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -c \"import app.main; import app.models.reference; print\\('OK', [t for t in app.models.base.Base.metadata.tables]\\)\")",
+      "PowerShell(& \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -c \"import asyncio; from sqlalchemy.ext.asyncio import create_async_engine; from sqlalchemy import text; async def f\\(\\): e=create_async_engine\\('postgresql+asyncpg://showtail:showtail@127.0.0.1:5432/showtail'\\); c=await e.connect\\(\\); r=await c.execute\\(text\\('SELECT 1'\\)\\); print\\(r.scalar\\(\\)\\); await c.close\\(\\); await e.dispose\\(\\); asyncio.run\\(f\\(\\)\\)\")",
+      "PowerShell(& \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/_check_db.py\")",
+      "PowerShell($env:PYTHONPATH = 'E:\\\\Coding\\\\python-animal-platform'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m alembic -c \"E:/Coding/python-animal-platform/alembic.ini\" revision --autogenerate -m \"stage_03_references\")",
+      "PowerShell($env:PYTHONPATH = 'E:\\\\Coding\\\\python-animal-platform'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m alembic -c \"E:/Coding/python-animal-platform/alembic.ini\" upgrade head)",
+      "PowerShell($env:PYTHONPATH = 'E:\\\\Coding\\\\python-animal-platform'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/seed_references.py\")",
+      "PowerShell($env:PYTHONPATH = 'E:\\\\Coding\\\\python-animal-platform'; cd \"E:/Coding/python-animal-platform\"; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --log-level warning)",
+      "PowerShell($breeds = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/breeds?per_page=5' -Method Get; \"TOTAL: $\\($breeds.meta.total\\) | PAGE: $\\($breeds.meta.page\\) | ITEMS: $\\($breeds.items.Count\\)\")",
+      "PowerShell($grp = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/breed-groups' -Method Get; \"Groups: $\\($grp.Count\\)\"; $cls = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/show-classes' -Method Get; \"Classes: $\\($cls.Count\\)\"; $rnk = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/show-ranks' -Method Get; \"Ranks: $\\($rnk.Count\\)\"; $tit = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/titles' -Method Get; \"Titles: $\\($tit.Count\\)\"; $grd = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/grades' -Method Get; \"Grades: $\\($grd.Count\\)\")",
+      "PowerShell($grp1 = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/breeds?breed_group_id=00000000-0000-0000-0000-000000000000&per_page=5' -Method Get; \"Empty filter total: $\\($grp1.meta.total\\)\"; $search = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/breeds?search=labrador' -Method Get; \"Search 'labrador' total: $\\($search.meta.total\\) name: $\\($search.items[0].name\\)\")",
+      "PowerShell(try { $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/admin/references/breeds' -Method Post -Body '{\"animal_type_id\":\"00000000-0000-0000-0000-000000000000\",\"code\":\"x\",\"name\":\"x\"}' -ContentType 'application/json'; \"WRONG: no auth required: $r\" } catch { \"OK admin guard: $\\($_.Exception.Response.StatusCode.value__\\) $\\($_.Exception.Response.StatusCode\\)\" })",
+      "PowerShell($search = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/references/breeds?search=%D0%9B%D0%B0%D0%B1%D1%80%D0%B0%D0%B4%D0%BE%D1%80' -Method Get; \"Russian search total: $\\($search.meta.total\\)\"; $search.items | ForEach-Object { $_.code })",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(& \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m pip install boto3 aioboto3 Pillow aiofiles 2>&1 | Select-Object -Last 15)",
+      "PowerShell(Out-Null *)",
+      "PowerShell(& \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/_init_minio.py\")",
+      "PowerShell($env:PYTHONPATH = 'E:\\\\Coding\\\\python-animal-platform'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -c \"import app.main; print\\('OK'\\)\")",
+      "PowerShell($env:PYTHONPATH = 'E:\\\\Coding\\\\python-animal-platform'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m alembic -c \"E:/Coding/python-animal-platform/alembic.ini\" revision --autogenerate -m \"stage_04_kennels_dogs_files\")",
+      "PowerShell(& \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m pip install httpx 2>&1 | Select-Object -Last 3)",
+      "PowerShell(Start-Sleep -Seconds 3; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/_smoke_stage_04.py\")",
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/_smoke_stage_04.py\")"
     ]
   }
 }

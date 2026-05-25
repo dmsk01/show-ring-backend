@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+# ИСПРАВЛЕНО: единая точка конфигурации pytest. asyncio_mode=auto, чтобы
+# не писать @pytest.mark.asyncio на каждый async тест.
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
