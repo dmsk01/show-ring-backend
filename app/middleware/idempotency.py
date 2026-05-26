@@ -31,7 +31,7 @@ import logging
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from app.config import settings
 from app.redis import redis_client
@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _HEADER = "Idempotency-Key"
+# In-flight lock TTL: разумный потолок одного HTTP-запроса. Если запрос
+# завис на больше 60 секунд — что-то пошло не так в любом случае. После
+# успешной/ошибочной обработки lock удаляется явно (см. finally ниже),
+# TTL — страховка от утечки lock'а при крэше процесса.
+_IN_FLIGHT_TTL_SECONDS = 60
 
 
 def _cache_key(method: str, path: str, key: str, body_hash: str) -> str:
@@ -51,6 +56,11 @@ def _cache_key(method: str, path: str, key: str, body_hash: str) -> str:
     тогда ответ из кэша некорректен, лучше пропустить мимо.
     """
     return f"idem:{method}:{path}:{key}:{body_hash}"
+
+
+def _lock_key(method: str, path: str, key: str, body_hash: str) -> str:
+    """Ключ in-flight-локки, отдельно от кэша ответа."""
+    return f"idem:lock:{method}:{path}:{key}:{body_hash}"
 
 
 class IdempotencyMiddleware(BaseHTTPMiddleware):
@@ -95,7 +105,35 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 # Битый кэш — пропускаем мимо, обработаем заново.
                 logger.warning("idempotency cache corrupt: %s", e)
 
-        # 2. Кэша нет — выполняем запрос и сохраняем ответ.
+        # 2. Кэша нет — проверяем in-flight lock. SETNX гарантирует
+        # атомарность: только ОДИН одновременный запрос с таким ключом
+        # пройдёт дальше, остальные получат 409 (Conflict).
+        # Без lock'а оба параллельных запроса дошли бы до handler'а
+        # и сделали бы операцию дважды.
+        lock_key = _lock_key(
+            request.method, request.url.path, key, body_hash
+        )
+        try:
+            acquired = await redis_client.set(
+                lock_key, "1", nx=True, ex=_IN_FLIGHT_TTL_SECONDS
+            )
+        except Exception as e:  # noqa: BLE001 — fail-open
+            logger.warning("idempotency lock SETNX failed: %s", e)
+            acquired = True  # без Redis работаем как раньше
+
+        if not acquired:
+            logger.info(
+                "idempotency in-flight conflict",
+                extra={"key": key, "path": request.url.path},
+            )
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "Request with this Idempotency-Key is already in progress",
+                },
+            )
+
+        # 3. Lock взят — выполняем запрос и сохраняем ответ.
         # Body нужно перечитать downstream'ом; receive override
         # позволяет это сделать.
         async def receive():
@@ -105,7 +143,16 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         # подменяем напрямую.
         request._receive = receive  # type: ignore[attr-defined]
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # На исключении lock освобождаем сразу, чтобы повторная попытка
+            # клиента не упёрлась в "409 уже выполняется" пока TTL не истёк.
+            try:
+                await redis_client.delete(lock_key)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("idempotency lock DEL on error failed: %s", e)
+            raise
 
         # Кэшируем ТОЛЬКО успешные ответы 2xx — иначе при 400 закэшируем
         # ошибку, и клиент не сможет переотправить корректный запрос.
@@ -136,6 +183,14 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             except Exception as e:  # noqa: BLE001
                 logger.warning("idempotency cache SET failed: %s", e)
 
+            # Lock освобождаем ПОСЛЕ записи в кэш. Если бы делали наоборот,
+            # параллельный запрос (попавший в окно "lock освобождён, кэш
+            # ещё не записан") пошёл бы выполняться вторично.
+            try:
+                await redis_client.delete(lock_key)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("idempotency lock DEL failed: %s", e)
+
             # Возвращаем новый Response с уже прочитанным телом —
             # старый body_iterator исчерпан.
             return Response(
@@ -145,4 +200,10 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 media_type=response.media_type,
             )
 
+        # Неуспешный ответ не кэшируем, но lock освобождаем — клиент
+        # должен иметь возможность повторить запрос корректно.
+        try:
+            await redis_client.delete(lock_key)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("idempotency lock DEL (non-2xx) failed: %s", e)
         return response

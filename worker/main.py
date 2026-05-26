@@ -20,11 +20,17 @@ import argparse
 import asyncio
 import json
 import logging
+import signal
 
 import aio_pika
 
 from app.config import settings
 from app.database import async_session_factory
+from worker.handlers.ad_handler import (
+    AD_EVENTS_QUEUE,
+    init_accumulator,
+    on_ad_event_message,
+)
 from worker.handlers.book_handler import process_book
 from worker.handlers.document_handler import process_document_task
 from worker.handlers.email_handler import process_email_task
@@ -108,6 +114,55 @@ async def on_event(message: aio_pika.abc.AbstractIncomingMessage):
 
 
 # ---------------------------------------------------------------------
+# Graceful shutdown helpers
+# ---------------------------------------------------------------------
+
+
+def _install_signal_handlers(stop_event: asyncio.Event) -> None:
+    """
+    SIGTERM/SIGINT → stop_event.set(). После этого основной цикл выходит
+    из await, закрывает соединение, и aio-pika корректно ack'ает уже
+    взятое сообщение (message.process() doesn't accept new messages
+    после close).
+
+    add_signal_handler работает только на Unix. На Windows бросает
+    NotImplementedError — там полагаемся на KeyboardInterrupt
+    (signal.SIGINT через стандартный механизм Python).
+    """
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:
+            # Windows: add_signal_handler не поддерживается. Ctrl+C
+            # всё равно прерывает через KeyboardInterrupt в main loop.
+            logger.debug("Signal handler not supported for %s", sig)
+
+
+async def _serve(
+    connection: aio_pika.abc.AbstractRobustConnection,
+    queue_name: str,
+) -> None:
+    """
+    Общий "main loop" для всех режимов воркера: ждёт SIGTERM/SIGINT,
+    после чего закрывает соединение. Внутри `message.process()` aio-pika
+    уже взявшее сообщение ack'нет в финале — мы не теряем данные.
+    """
+    stop = asyncio.Event()
+    _install_signal_handlers(stop)
+    try:
+        logger.info("Listening on '%s'. Send SIGTERM to stop gracefully.", queue_name)
+        await stop.wait()
+        logger.info("Shutdown signal received, draining in-flight messages…")
+    finally:
+        # close() ждёт текущие consume-задачи. В aio-pika это означает:
+        # уже запущенные обработчики дойдут до конца, новые сообщения
+        # не примутся.
+        await connection.close()
+        logger.info("Worker stopped")
+
+
+# ---------------------------------------------------------------------
 # Main loops
 # ---------------------------------------------------------------------
 
@@ -121,11 +176,7 @@ async def run_documents() -> None:
     await channel.set_qos(prefetch_count=1)
     queue = await channel.declare_queue(DOCUMENT_TASK_QUEUE, durable=True)
     await queue.consume(on_document_message)
-    logger.info("Listening on %s. Press Ctrl+C to exit.", DOCUMENT_TASK_QUEUE)
-    try:
-        await asyncio.Future()
-    finally:
-        await connection.close()
+    await _serve(connection, DOCUMENT_TASK_QUEUE)
 
 
 async def run_book() -> None:
@@ -134,11 +185,7 @@ async def run_book() -> None:
     await channel.set_qos(prefetch_count=1)
     queue = await channel.declare_queue("tasks", durable=True)
     await queue.consume(on_book_message)
-    logger.info("Listening on 'tasks' (legacy book worker)")
-    try:
-        await asyncio.Future()
-    finally:
-        await connection.close()
+    await _serve(connection, "tasks (legacy book worker)")
 
 
 async def run_events() -> None:
@@ -151,11 +198,7 @@ async def run_events() -> None:
     queue = await channel.declare_queue("", exclusive=True, auto_delete=True)
     await queue.bind(exchange)
     await queue.consume(on_event)
-    logger.info("Subscribed to fanout 'events'")
-    try:
-        await asyncio.Future()
-    finally:
-        await connection.close()
+    await _serve(connection, "events (fanout)")
 
 
 # ---------------------------------------------------------------------
@@ -221,14 +264,35 @@ async def run_topic_events() -> None:
 
     queue = await bind_topic_queue(consume_ch, pattern="#")
     await queue.consume(on_topic_event)
-    logger.info(
-        "Listening on topic exchange '%s' (pattern '#')",
-        settings.exchange_topic,
-    )
-    try:
-        await asyncio.Future()
-    finally:
-        await connection.close()
+    await _serve(connection, f"topic '{settings.exchange_topic}' (#)")
+
+
+async def on_ad_event(message: aio_pika.abc.AbstractIncomingMessage):
+    """Обёртка вокруг ad_handler.on_ad_event_message с правильным ack."""
+    async with message.process(requeue=False):
+        body = message.body.decode()
+        try:
+            await on_ad_event_message(body)
+        except Exception:
+            logger.exception("ad_event processing failed: %s", body)
+
+
+async def run_ad_events() -> None:
+    """
+    Воркер событий рекламы (этап 14): подписан на ad_events, копит
+    события в батч и пишет в БД одним INSERT'ом. См.
+    worker/handlers/ad_handler.py.
+    """
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    channel = await connection.channel()
+    # prefetch=100: события мелкие, можем тянуть пачку — внутри
+    # accumulator всё равно батчит по своему окну.
+    await channel.set_qos(prefetch_count=100)
+    queue = await channel.declare_queue(AD_EVENTS_QUEUE, durable=True)
+    # Стартуем аккумулятор: периодический flush уходит в фоновую задачу.
+    init_accumulator(async_session_factory)
+    await queue.consume(on_ad_event)
+    await _serve(connection, f"{AD_EVENTS_QUEUE} (ads batch)")
 
 
 async def run_email() -> None:
@@ -244,23 +308,20 @@ async def run_email() -> None:
     await channel.set_qos(prefetch_count=1)
     queue = await channel.declare_queue(EMAIL_TASK_QUEUE, durable=True)
     await queue.consume(on_email_task)
-    logger.info("Listening on '%s' (SMTP sender)", EMAIL_TASK_QUEUE)
-    try:
-        await asyncio.Future()
-    finally:
-        await connection.close()
+    await _serve(connection, f"{EMAIL_TASK_QUEUE} (SMTP sender)")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["documents", "book", "events", "topic", "email"],
+        choices=["documents", "book", "events", "topic", "email", "ads"],
         default="documents",
         help=(
             "documents — PDF-задачи; book — учебный пример; "
             "events — fanout-демо; topic — диспатчер событий этапа 9; "
-            "email — SMTP-воркер этапа 9."
+            "email — SMTP-воркер этапа 9; ads — batch-воркер рекламных "
+            "событий этапа 14."
         ),
     )
     args = parser.parse_args()
@@ -270,6 +331,7 @@ def main() -> None:
         "events": run_events,
         "topic": run_topic_events,
         "email": run_email,
+        "ads": run_ad_events,
     }[args.mode]
     asyncio.run(coro())
 

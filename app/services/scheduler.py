@@ -27,6 +27,7 @@ from sqlalchemy import delete, update
 
 from app.database import async_session_factory
 from app.models.classified import Classified, ClassifiedStatus
+from app.models.task import Task, TaskStatusEnum
 from app.models.user import RefreshToken
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,15 @@ async def start_scheduler() -> None:
         replace_existing=True,
     )
 
+    # Каждые 10 минут — пересинхронизация подвисших задач. Часто, чтобы
+    # пользователь не ждал часами после крэша воркера.
+    sched.add_job(
+        requeue_stuck_tasks,
+        CronTrigger(minute="*/10"),
+        id="requeue_stuck_tasks",
+        replace_existing=True,
+    )
+
     sched.start()
     logger.info("APScheduler started with %d jobs", len(sched.get_jobs()))
 
@@ -113,6 +123,44 @@ async def cleanup_expired_refresh_tokens() -> None:
         await db.commit()
         deleted = getattr(result, "rowcount", 0)
         logger.info("cleanup_refresh_tokens: deleted %s rows", deleted)
+
+
+async def requeue_stuck_tasks() -> None:
+    """
+    Возвращает в pending задачи, висящие в processing дольше 1 часа.
+    Сценарий: воркер взял задачу через claim_task (UPDATE → processing),
+    после чего упал/был убит OOM-killer'ом. Сама задача в очереди уже
+    ack'нута (или потеряна), новый воркер её не возьмёт.
+
+    1 час — компромисс: PDF-каталог тысячи собак или batch дипломов
+    могут идти десятки минут; раньше срабатывать опасно (поломаем
+    легитимную работу). Если когда-то появятся задачи >1ч, поле
+    `attempts` уже считается — можно ограничить максимальное число
+    повторов (TODO).
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    async with async_session_factory() as db:
+        stmt = (
+            update(Task)
+            .where(
+                Task.status == TaskStatusEnum.processing,
+                Task.updated_at < cutoff,
+            )
+            .values(status=TaskStatusEnum.pending)
+        )
+        result = await db.execute(stmt)
+        await db.commit()
+        n = getattr(result, "rowcount", 0)
+        if n:
+            logger.warning("requeue_stuck_tasks: re-pending %s tasks", n)
+            # TODO: re-publish в RabbitMQ. Сейчас задача останется в
+            # pending до повторной публикации (можно через admin-скрипт
+            # или ручной POST). Не делаем здесь, потому что воркер
+            # должен сам поднять её повторно при опросе очереди —
+            # но опрос идёт только при наличии сообщения. Чисто это
+            # делается через outbox-pattern (этап на будущее).
 
 
 async def archive_old_classifieds() -> None:

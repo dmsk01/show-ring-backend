@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_any_role
+from app.dependencies import get_current_user, require_any_role  # noqa: F401
 from app.models.classified import Classified, ClassifiedStatus
 from app.models.kennel import Kennel
 from app.models.user import User, UserRole
@@ -91,10 +91,15 @@ async def moderate_classified(
     classified_id: uuid.UUID,
     body: ClassifiedModerationDecision,
     db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
 ):
     try:
         obj = await svc.moderate_classified(
-            db, classified_id, body.approve, body.reason
+            db,
+            classified_id,
+            body.approve,
+            body.reason,
+            actor_id=actor.id,
         )
     except ValueError as e:
         _raise_for_error(e)
@@ -146,9 +151,12 @@ async def verify_kennel(
     kennel_id: uuid.UUID,
     body: KennelVerifyRequest,
     db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
 ):
     try:
-        obj = await svc.verify_kennel(db, kennel_id, body.is_verified)
+        obj = await svc.verify_kennel(
+            db, kennel_id, body.is_verified, actor_id=actor.id
+        )
     except ValueError as e:
         _raise_for_error(e)
     return {"id": obj.id, "is_verified": obj.is_verified}
@@ -212,9 +220,12 @@ async def block_user(
     user_id: uuid.UUID,
     body: UserBlockRequest,
     db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
 ):
     try:
-        obj = await svc.block_user(db, user_id, body.is_active)
+        obj = await svc.block_user(
+            db, user_id, body.is_active, actor_id=actor.id
+        )
     except ValueError as e:
         _raise_for_error(e)
     return {"id": obj.id, "is_active": obj.is_active}

@@ -1,11 +1,21 @@
+"""
+Учебный standalone-воркер. Production-точка входа — worker/main.py.
+Оставлен для песочницы; print заменён на logger чтобы не «портить»
+JSON-логи в проде, если кто-то случайно запустит этот файл.
+"""
 import asyncio
+import logging
+
 from aio_pika import connect_robust, IncomingMessage
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 
 async def process_message(message: IncomingMessage):
     async with message.process():
         body = message.body.decode()
-        print(f"Received message: {body}")
+        logger.info("Received message: %s", body)
 
 
 async def main():
@@ -15,7 +25,7 @@ async def main():
     await channel.set_qos(prefetch_count=1)
     queue = await channel.declare_queue("tasks", durable=True)
     await queue.consume(process_message)
-    print("Waiting for messages. To exit press CTRL+C")
+    logger.info("Waiting for messages. To exit press CTRL+C")
 
     try:
         await asyncio.Future()  # Run forever

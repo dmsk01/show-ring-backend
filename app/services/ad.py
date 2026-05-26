@@ -20,11 +20,15 @@ import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import json
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.ad import AdBanner, AdCampaign, AdEventType
 from app.redis import redis_client
 from app.repositories import ad as repo
+from app.services.rabbit import rabbit_service
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,40 @@ logger = logging.getLogger(__name__)
 # Дедупликация событий: 60-секундное окно. Внутри окна повтор от того же
 # (ip + user_agent + banner + тип) считается фродом и не учитывается.
 DEDUP_TTL_SECONDS = 60
+
+# Имя очереди должно совпадать с константой в worker/handlers/ad_handler.py.
+AD_EVENTS_QUEUE = "ad_events"
+
+
+async def _publish_event(
+    *,
+    banner_id: uuid.UUID,
+    event_type: AdEventType,
+    user_id: uuid.UUID | None,
+    ip: str | None,
+    ua_hash: str | None,
+    page_url: str | None,
+) -> None:
+    """
+    Публикует событие в очередь ad_events. fire-and-forget: при сбое
+    RabbitMQ событие потеряется, но это допустимо для аналитики
+    (потеря 0.01% impression'ов на падении брокера некритична).
+
+    Если хотим гарантию — добавить outbox pattern (запись в БД +
+    отдельный publisher). Это уже не «батч ради скорости».
+    """
+    payload = {
+        "banner_id": str(banner_id),
+        "event_type": event_type.value,
+        "user_id": str(user_id) if user_id else None,
+        "ip": ip,
+        "user_agent_hash": ua_hash,
+        "page_url": page_url,
+    }
+    try:
+        await rabbit_service.publish(AD_EVENTS_QUEUE, json.dumps(payload))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ad_event publish failed: %s", e)
 
 
 def _hash_user_agent(user_agent: str | None) -> str | None:
@@ -199,6 +237,20 @@ async def record_event(
 
     if await _is_duplicate(banner_id, event_type, ip, ua_hash):
         return False
+
+    # Если включён async-режим, не делаем БД-чтений в API: воркер
+    # сам подгрузит banner/campaign перед батч-вставкой. Это даёт
+    # суб-миллисекундный response time на /ads/events.
+    if settings.ad_events_async:
+        await _publish_event(
+            banner_id=banner_id,
+            event_type=event_type,
+            user_id=user_id,
+            ip=ip,
+            ua_hash=ua_hash,
+            page_url=page_url,
+        )
+        return True
 
     banner = await repo.get_banner(db, banner_id)
     if banner is None:
