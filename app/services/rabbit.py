@@ -1,14 +1,47 @@
+import logging
+
 import aio_pika
+
+logger = logging.getLogger(__name__)
 
 
 class RabbitMQService:
     def __init__(self):
-        self.connection: aio_pika.Connection | None = None
-        self.channel: aio_pika.Channel | None = None
+        # RobustConnection — выживает разрывы сети, переподключается
+        # автоматически. Тип Connection в аннотации — общий протокол;
+        # фактически это RobustConnection после connect_robust().
+        self.connection: aio_pika.abc.AbstractRobustConnection | None = None
+        self.channel: aio_pika.abc.AbstractRobustChannel | None = None
 
     async def connect(self, url: str):
-        self.connection = await aio_pika.connect_robust(url)
-        self.channel = await self.connection.channel()
+        # connect_robust возвращает RobustConnection. Параметры:
+        # timeout=5 — не висеть на dead-сервере при старте API;
+        # reconnect_interval=5 (default) — пауза между попытками.
+        self.connection = await aio_pika.connect_robust(url, timeout=5)
+        # Reconnect callbacks: aio-pika зовёт их при потере и восстановлении
+        # соединения. Логируем — это нужно для post-mortem и алертинга.
+        self.connection.reconnect_callbacks.add(self._on_reconnect)
+        self.connection.close_callbacks.add(self._on_close)
+        self.channel = await self.connection.channel()  # type: ignore[assignment]
+
+    @staticmethod
+    def _on_reconnect(
+        connection: aio_pika.abc.AbstractRobustConnection | None,
+    ) -> None:
+        # Сигнатура с Optional — aio-pika type stubs допускают вызов
+        # с None при инициализации/закрытии. Сам callback'у это
+        # неважно — connection используется только в логе.
+        logger.warning("RabbitMQ reconnected: %s", connection)
+
+    @staticmethod
+    def _on_close(
+        connection: aio_pika.abc.AbstractConnection | None,
+        exc: BaseException | None,
+    ) -> None:
+        if exc:
+            logger.warning("RabbitMQ connection closed: %s", exc)
+        else:
+            logger.info("RabbitMQ connection closed gracefully")
 
     async def publish(self, queue_name, message):
         if not self.channel:

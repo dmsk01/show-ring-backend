@@ -1,0 +1,56 @@
+# Контекст сборки. Чем меньше отдаём демону, тем быстрее идёт COPY .
+# и меньше шанс попасть секретам/мусору в образ.
+
+# Виртуалки и кэши Python.
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Git-метаданные не нужны внутри контейнера. История даёт дельту в
+# 30-100 МБ обычно — лишний слой при rebuild.
+.git/
+.gitignore
+.gitattributes
+
+# Локальные секреты — НИКОГДА не должны попадать в образ. .env
+# подключается отдельно через docker-compose env_file.
+.env
+.env.local
+*.env
+
+# IDE и редакторы.
+.vscode/
+.idea/
+.continueignore
+.continue/
+
+# Документация и подсказки нужны разработчику, не приложению.
+docs/
+hints/
+README.md
+
+# Тестовые артефакты.
+tests/
+.coverage
+htmlcov/
+.tox/
+
+# OS-мусор.
+.DS_Store
+Thumbs.db
+
+# Сами docker-файлы — не нужны внутри контейнера. Логически:
+# Dockerfile собирает себя сам, compose-файлы — это инструменты
+# хост-машины.
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Сторонние пакеты (если ставили wheel'ы локально).
+packages/

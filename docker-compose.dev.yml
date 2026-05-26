@@ -1,0 +1,53 @@
+# Dev-override для ShowTail (этап 15).
+#
+# Подключается поверх базового docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Что меняет:
+# - Поднимает MailPit (SMTP-заглушка), UI на http://localhost:8025.
+# - В api подключает bind-mount исходников и запускает с --reload —
+#   изменения в коде применяются без пересборки образа.
+# - DEBUG=true → включает echo SQL в SQLAlchemy.
+# - LOG_JSON=false (плейн-логи в консоль удобнее на dev).
+#
+# В prod compose-файл с overrides НЕ применяется; используется только
+# docker-compose.yml.
+
+services:
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"  # Web UI
+      - "1025:1025"  # SMTP
+    healthcheck:
+      # mailpit отдаёт UI по / без auth — wget на главную достаточен.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8025"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  api:
+    # Bind-mount всего репозитория: код сразу виден в контейнере.
+    # uvicorn --reload отслеживает изменения .py и перезагружается.
+    volumes:
+      - ./app:/app/app
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./worker:/app/worker
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      DEBUG: "true"
+      # Включаем шедулер на dev, чтобы можно было тестировать cron-задачи
+      # (они быстрые и не вредят).
+      SCHEDULER_ENABLED: "true"
+    depends_on:
+      mailpit:
+        condition: service_healthy
+
+  # Воркеры на dev тоже подхватывают код через bind-mount. uvicorn
+  # --reload им не нужен, но при изменении кода нужно вручную
+  # перезапустить контейнер: `docker compose restart worker`.
+  worker:
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker

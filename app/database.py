@@ -11,6 +11,16 @@ from .config import settings
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
+    # pool_pre_ping=True (этап 14): перед выдачей соединения из пула
+    # делаем cheap-ping (SELECT 1). Защита от "stale connections": после
+    # ребута PG / отключения сети старое соединение в пуле кажется
+    # живым, но при использовании вылетает с InterfaceError. pre_ping
+    # ловит мёртвые сокеты заранее и пересоздаёт их.
+    pool_pre_ping=True,
+    # pool_recycle=1800 — закрываем соединения старше 30 минут даже без
+    # ошибок. PG/PgBouncer часто имеют свой idle_timeout; recycle
+    # синхронизирует SQLAlchemy с этим лимитом.
+    pool_recycle=1800,
 )
 
 # 2. Создание фабрики сессий

@@ -7,9 +7,12 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text
 from app.config import settings
 from app.database import engine
+from app.logging_config import setup_logging
 from app.middleware.error_handler import ErrorHandlerMiddleware
+from app.middleware.idempotency import IdempotencyMiddleware
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.sanitization import SanitizationMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.routers import (
     ads,
     auth,
@@ -24,6 +27,7 @@ from app.routers import (
     references,
     results,
     shows,
+    support,
     tasks,
     users,
 )
@@ -39,8 +43,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # logging вместо print — чтобы события lifespan попадали в общий
-    # обработчик логов, а не терялись в проде без stdout-захвата.
+    # setup_logging — первое действие lifespan, чтобы все последующие
+    # log-сообщения уже шли в выбранный формат (JSON в prod, текст в dev).
+    # Идемпотентно: переинициализация при reload не дублирует хендлеры.
+    setup_logging()
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -83,9 +89,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# Порядок middleware важен: FastAPI применяет их в обратном порядке
+# добавления к запросу. Значит первым ВЫПОЛНЯЕТСЯ последний добавленный.
+# Идём от "ближе к handler'у" → "ближе к сети":
+#   1. RequestId  — добавить ID до всего остального (логи)
+#   2. ErrorHandler — ловить исключения handler'ов
+#   3. Sanitization — чистить тело до бизнес-логики
+#   4. Idempotency  — после sanitization (тело уже чистое), но до handler'а
+#   5. SecurityHeaders — на ответ всегда, последним в pipeline
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(ErrorHandlerMiddleware)
 app.add_middleware(SanitizationMiddleware)
+app.add_middleware(IdempotencyMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # ИСПРАВЛЕНО: CORSMiddleware подключается только если список доменов задан.
 # Пустой список = CORS не настраивается (без * по умолчанию) — иначе
@@ -130,3 +146,5 @@ app.include_router(ads.router)
 app.include_router(admin_analytics.router)
 app.include_router(admin_analytics.show_report_router)
 app.include_router(admin_moderation.router)
+# Этап 11: онлайн-поддержка (тикеты + WebSocket чат).
+app.include_router(support.router)

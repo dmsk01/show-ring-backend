@@ -55,5 +55,16 @@ class Settings(BaseSettings):
     # воркера для подписок — обе стороны читают из этого поля.
     exchange_topic: str = "showtail.events"
 
+    # --- Этап 14: Production-readiness ---
+    # log_json=true — JSON-логи для ELK/Loki. false — человекочитаемый
+    # текст для разработки (см. app/logging_config.py).
+    log_json: bool = False
+    # Уровень логирования: DEBUG/INFO/WARNING/ERROR.
+    log_level: str = "INFO"
+    # TTL кешированного ответа для idempotency-key (24 часа по умолчанию).
+    # 24ч покрывает типичный сценарий "клиент перепосылает запрос после
+    # сетевой ошибки"; дольше — не имеет смысла (запрос уже устарел).
+    idempotency_ttl_seconds: int = 24 * 3600
+
 
 settings = Settings()  # type: ignore

@@ -1,0 +1,249 @@
+# docker-compose для ShowTail (этап 15).
+#
+# Поднимает весь стек: PostgreSQL, RabbitMQ, Redis, MinIO, API, Worker,
+# плюс одноразовый init-контейнер для миграций.
+#
+# Запуск:
+#   docker compose --env-file .env up --build
+#
+# Для dev-окружения дополнительно подключается docker-compose.dev.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Архитектурные решения:
+# - migrate отдельным сервисом с restart: "no". Запускается ОДИН раз
+#   перед api и worker, гарантируя единую точку миграции. Без этого
+#   при scale api=3 каждый инстанс попытался бы накатить миграцию —
+#   race condition на pg_advisory_lock.
+# - healthcheck + depends_on.condition: service_healthy — api/worker
+#   ждут готовности PG/Rabbit/Redis/MinIO, а не просто запуска
+#   контейнеров. Без этого первые секунды старта получаем 503-ошибки.
+# - Volumes для PG, Redis, MinIO — данные переживают `compose down`.
+#   Стереть полностью: `compose down -v`.
+# - Сети не задаём явно — compose создаст одну default-сеть,
+#   все сервисы видят друг друга по имени.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-showtail}
+      POSTGRES_USER: ${POSTGRES_USER:-showtail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-showtail}
+    # Локальный порт открыт ради удобства dev-инструментов (DBeaver,
+    # psql). В prod закрываем: API ходит через внутреннюю сеть compose.
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready — встроенная утилита PG, специально для healthcheck.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-showtail}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "5672:5672"
+      # Management UI — http://localhost:15672 (guest/guest).
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      # check_port_connectivity — самый дешёвый и надёжный healthcheck
+      # для Rabbit.
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-showtail}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-showtailminio}
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Web Console
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      # mc ready — рекомендуемый healthcheck из официальной документации.
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Создание bucket'а при первом старте: minio не умеет автосоздавать
+  # bucket'ы при инициализации, поэтому отдельный one-shot контейнер.
+  # Запускается после готовности minio и завершается. Если bucket
+  # уже есть — игнорируем ошибку (idempotency).
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-showtail} ${S3_SECRET_KEY:-showtailminio} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-showtail-files} &&
+      echo 'MinIO bucket ready'
+      "
+    restart: "no"
+
+  # ОДНОРАЗОВЫЙ контейнер миграций. Запускается перед api/worker
+  # и завершается. service_completed_successfully на api гарантирует,
+  # что приложение стартует только когда миграции накачены.
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      # secret_key обязателен для alembic env.py (хотя миграциям
+      # сам секрет не нужен, app.config.Settings проверяет наличие).
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: alembic upgrade head
+    restart: "no"
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # asyncpg-URL через имя сервиса postgres — compose-сеть резолвит.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      # MinIO внутри сети compose: эндпойнт http://minio:9000.
+      # Не https — внутренняя сеть, TLS терминируется на reverse-proxy
+      # в проде.
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
+      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      # SMTP — placeholder. В prod ставить реальный SMTP (Sendgrid).
+      # В dev override (docker-compose.dev.yml) переключаем на mailpit.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@showtail.local}
+      SECRET_KEY: ${SECRET_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      DEBUG: ${DEBUG:-false}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-false}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    # restart: unless-stopped — переживёт перезапуск docker daemon,
+    # но при `compose down` остановится корректно.
+    restart: unless-stopped
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
+      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # По умолчанию воркер обрабатывает очередь документов. Для других
+    # очередей запускаем отдельные сервисы (см. ниже) или скейлим:
+    #   docker compose up --scale worker=3
+    command: ["python", "-m", "worker.main", "--mode", "documents"]
+    # У worker'а нет HTTP-эндпоинта — переопределяем healthcheck в no-op.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'worker.main' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Отдельные сервисы под очереди этапа 9 (topic events + email).
+  # На dev'е можно их выключить (profile: events), на проде они
+  # самостоятельные процессы — каждый легко масштабируется.
+  worker-events:
+    build: .
+    profiles: ["events"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "worker.main", "--mode", "topic"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'worker.main' || exit 1"]
+      interval: 30s
+    restart: unless-stopped
+
+  worker-email:
+    build: .
+    profiles: ["events"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@showtail.local}
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "worker.main", "--mode", "email"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'worker.main' || exit 1"]
+      interval: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:
+  minio_data:
