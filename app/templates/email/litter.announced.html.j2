@@ -1,0 +1,28 @@
+{% block subject %}Новый помёт{% if breed_name %} породы {{ breed_name }}{% endif %}{% endblock %}
+
+{% block html %}
+<p>Здравствуйте!</p>
+<p>
+  Питомник <strong>{{ kennel_name }}</strong> объявил новый помёт
+  {% if breed_name %}породы <strong>{{ breed_name }}</strong>{% endif %}.
+</p>
+{% if puppies_count %}
+<p>Щенков в помёте: {{ puppies_count }}.</p>
+{% endif %}
+{% if price_from or price_to %}
+<p>
+  Цена:
+  {% if price_from %}от {{ price_from }}{% endif %}
+  {% if price_to %} до {{ price_to }}{% endif %}.
+</p>
+{% endif %}
+<p style="color:#888;font-size:12px">
+  Это уведомление по вашей подписке на новые помёты{% if breed_name %} ({{ breed_name }}){% endif %}.
+</p>
+{% endblock %}
+
+{% block text %}
+Питомник «{{ kennel_name }}» объявил новый помёт{% if breed_name %} породы {{ breed_name }}{% endif %}.
+{% if puppies_count %}Щенков: {{ puppies_count }}.{% endif %}
+{% if price_from %}От {{ price_from }}{% endif %}{% if price_to %} до {{ price_to }}{% endif %}.
+{% endblock %}

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import Boolean, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,6 +52,12 @@ class Kennel(Base, TimestampMixin):
         UUID(as_uuid=True),
         ForeignKey("files.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    # is_verified — статус "проверен модератором". Этап 12: ставится
+    # вручную через /admin/moderation/kennels/{id}/verify. Используется
+    # на фронте как зелёная галочка, защита от фейковых питомников.
+    is_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
     )
 
     dogs: Mapped[list["Dog"]] = relationship(  # noqa: F821

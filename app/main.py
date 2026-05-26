@@ -10,17 +10,37 @@ from app.database import engine
 from app.middleware.error_handler import ErrorHandlerMiddleware
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.sanitization import SanitizationMiddleware
-from app.routers import health, auth, users, references, kennels, dogs, files
+from app.routers import (
+    ads,
+    auth,
+    classifieds,
+    documents,
+    dogs,
+    files,
+    health,
+    kennels,
+    litters,
+    notifications,
+    references,
+    results,
+    shows,
+    tasks,
+    users,
+)
 from app.routers.admin import references as admin_references
+from app.routers.admin import analytics as admin_analytics
+from app.routers.admin import moderation as admin_moderation
 from app.redis import init_redis, close_redis
+from app.services.rabbit import rabbit_service
+from app.services.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ИСПРАВЛЕНО: print → logging, чтобы события поднимались в обработчик логов
-    # и не терялись в проде без stdout-захвата.
+    # logging вместо print — чтобы события lifespan попадали в общий
+    # обработчик логов, а не терялись в проде без stdout-захвата.
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -30,9 +50,36 @@ async def lifespan(app: FastAPI):
         app.state.db_available = False
         logger.warning("DB unavailable at startup: %s", e)
     await init_redis()
+    # RabbitMQ подключаем с graceful fallback: если брокер недоступен,
+    # API всё равно поднимается — задачи документов будут создаваться
+    # в БД, но публикация в очередь упадёт с warning'ом (см.
+    # routers/documents._publish_task). Так dev-окружение не ломается,
+    # если кто-то забыл поднять rabbit.
+    try:
+        await rabbit_service.connect(settings.rabbitmq_url)
+        app.state.rabbit_available = True
+        logger.info("RabbitMQ connected")
+    except Exception as e:
+        app.state.rabbit_available = False
+        logger.warning("RabbitMQ unavailable at startup: %s", e)
+    # APScheduler по флагу — на dev обычно выключен, чтобы тестовые
+    # cron-задачи не запускались. Включается через .env.
+    if settings.scheduler_enabled:
+        try:
+            await start_scheduler()
+        except Exception as e:
+            logger.warning("Scheduler failed to start: %s", e)
     yield
     await engine.dispose()
     await close_redis()
+    try:
+        await rabbit_service.close()
+    except Exception as e:
+        logger.warning("RabbitMQ close failed: %s", e)
+    try:
+        await stop_scheduler()
+    except Exception as e:
+        logger.warning("Scheduler stop failed: %s", e)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -62,3 +109,24 @@ app.include_router(admin_references.router)
 app.include_router(kennels.router)
 app.include_router(dogs.router)
 app.include_router(files.router)
+# Этап 5: помёты и доска объявлений (полнотекстовый поиск).
+app.include_router(litters.router)
+app.include_router(classifieds.router)
+# Этап 6: выставки (создание, судьи, ринги, записи).
+app.include_router(shows.router)
+# Этап 7: результаты, титулы, публикация.
+app.include_router(results.router)
+app.include_router(results.publish_router)
+# Этап 8: генерация документов (PDF через RabbitMQ + воркер).
+app.include_router(documents.router)
+# tasks: GET статуса (DB-backed + legacy in-memory fallback), download
+# скачивает PDF из MinIO для done-задач.
+app.include_router(tasks.router)
+# Этап 9: уведомления и подписки.
+app.include_router(notifications.router)
+# Этап 10: рекламный модуль (кампании, баннеры, serve, events, stats).
+app.include_router(ads.router)
+# Этап 12: админ-аналитика и модерация.
+app.include_router(admin_analytics.router)
+app.include_router(admin_analytics.show_report_router)
+app.include_router(admin_moderation.router)

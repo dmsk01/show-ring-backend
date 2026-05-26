@@ -32,5 +32,28 @@ class Settings(BaseSettings):
     # дублируем на уровне приложения для defence-in-depth.
     max_upload_size_bytes: int = 10 * 1024 * 1024  # 10 МБ
 
+    # --- Этап 9: Email + Scheduler ---
+    # SMTP-настройки. В dev — MailPit (порт 1025, без auth, без TLS).
+    # В prod — реальный SMTP (Sendgrid/Mailgun/SES) с STARTTLS и логином.
+    # Дефолты подобраны под MailPit, чтобы локально всё работало "из коробки".
+    smtp_host: str = "127.0.0.1"
+    smtp_port: int = 1025
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    # STARTTLS актуален для prod-SMTP. MailPit его не поддерживает —
+    # оставляем False по умолчанию.
+    smtp_use_tls: bool = False
+    smtp_from_email: str = "noreply@showtail.local"
+    smtp_from_name: str = "ShowTail"
+
+    # APScheduler: включать ли встроенный планировщик. На dev удобно
+    # держать выключенным, чтобы тестовые задания не запускались на
+    # каждом старте. В prod включаем через .env.
+    scheduler_enabled: bool = False
+
+    # Имя topic exchange для событий платформы. То же, что и в очередях
+    # воркера для подписок — обе стороны читают из этого поля.
+    exchange_topic: str = "showtail.events"
+
 
 settings = Settings()  # type: ignore

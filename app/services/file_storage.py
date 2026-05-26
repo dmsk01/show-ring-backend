@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import logging
 import uuid
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import BinaryIO
+from typing import Any, BinaryIO, cast
 
 import aioboto3
 from botocore.exceptions import ClientError
@@ -71,19 +72,28 @@ def _detect_file_type(head: bytes) -> DetectedFileType | None:
 _session = aioboto3.Session()
 
 
-def _s3_client():
+def _s3_client() -> AbstractAsyncContextManager[Any]:
     """
     Контекстный менеджер с S3-клиентом. Использование:
         async with _s3_client() as s3:
             await s3.put_object(...)
     Каждый клиент закрывает свои TCP-коннекты при выходе из контекста.
+
+    cast нужен, потому что aioboto3 Session.client() имеет неполные
+    type-stubs и pyright видит его как абстрактный объект без
+    __aenter__/__aexit__. Реально это AbstractAsyncContextManager —
+    приводим тип явно, чтобы все `async with _s3_client()` ниже
+    проходили проверку типов.
     """
-    return _session.client(
-        "s3",
-        endpoint_url=settings.s3_endpoint,
-        aws_access_key_id=settings.s3_access_key,
-        aws_secret_access_key=settings.s3_secret_key,
-        region_name=settings.s3_region,
+    return cast(
+        AbstractAsyncContextManager[Any],
+        _session.client(
+            "s3",
+            endpoint_url=settings.s3_endpoint,
+            aws_access_key_id=settings.s3_access_key,
+            aws_secret_access_key=settings.s3_secret_key,
+            region_name=settings.s3_region,
+        ),
     )
 
 
@@ -153,6 +163,39 @@ async def upload_file(
         )
 
     return s3_key, detected.content_type, upload.filename or "file", total
+
+
+async def upload_bytes(
+    content: bytes,
+    *,
+    content_type: str,
+    extension: str,
+    folder: str = "documents",
+) -> tuple[str, int]:
+    """
+    Загружает уже готовые байты в MinIO (без UploadFile / валидации
+    magic bytes).
+
+    Используется фоновым воркером для сохранения сгенерированных PDF.
+    Magic bytes-проверка тут не нужна — содержимое мы сами сформировали,
+    оно гарантированно валидное.
+
+    Возвращает (s3_key, size_bytes). Регистрацию UploadedFile делает
+    вызывающий код, потому что у воркера есть свои сессии БД.
+    """
+    s3_key = f"{folder}/{uuid.uuid4()}.{extension}"
+    try:
+        async with _s3_client() as s3:
+            await s3.put_object(
+                Bucket=settings.s3_bucket,
+                Key=s3_key,
+                Body=content,
+                ContentType=content_type,
+            )
+    except ClientError as e:
+        logger.error("S3 upload (bytes) failed: %s", e)
+        raise
+    return s3_key, len(content)
 
 
 async def get_file_stream(s3_key: str):

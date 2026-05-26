@@ -1,0 +1,14 @@
+{% block subject %}Новый титул: {{ dog_name }} — {{ title_name }}{% endblock %}
+
+{% block html %}
+<p>Поздравляем!</p>
+<p>
+  Собака <strong>{{ dog_name }}</strong> получила титул
+  <strong>{{ title_name }}</strong> на выставке «{{ show_name }}»
+  ({{ date_earned }}).
+</p>
+{% endblock %}
+
+{% block text %}
+Собака {{ dog_name }} получила титул {{ title_name }} на выставке «{{ show_name }}» ({{ date_earned }}).
+{% endblock %}

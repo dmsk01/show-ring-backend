@@ -1,0 +1,194 @@
+"""
+Роутер доски объявлений (этап 5).
+"""
+
+from __future__ import annotations
+
+import uuid
+from decimal import Decimal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.dependencies import get_current_user
+from app.models.classified import ClassifiedCategory, ClassifiedStatus
+from app.models.user import User
+from app.repositories import classified as repo
+from app.schemas.classified import (
+    ClassifiedCreate,
+    ClassifiedPage,
+    ClassifiedResponse,
+    ClassifiedUpdate,
+)
+from app.services import classified as svc
+
+router = APIRouter(prefix="/classifieds", tags=["classifieds"])
+
+
+def _is_admin(user: User) -> bool:
+    return any(r.role.value == "admin" for r in user.roles)
+
+
+def _raise_for_error(err: ValueError) -> None:
+    code = str(err)
+    if code == "not_found":
+        raise HTTPException(404, code)
+    if code == "forbidden":
+        raise HTTPException(403, code)
+    raise HTTPException(400, code)
+
+
+@router.post(
+    "",
+    response_model=ClassifiedResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Создать объявление",
+)
+async def create_classified(
+    body: ClassifiedCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await svc.create_classified(
+        db,
+        author_id=user.id,
+        fields=body.model_dump(),
+    )
+
+
+# Внимание: /search обязательно ДО /{classified_id}, иначе FastAPI
+# попытается интерпретировать "search" как UUID и вернёт 422.
+@router.get(
+    "/search",
+    response_model=ClassifiedPage,
+    summary="Полнотекстовый поиск (русский язык)",
+    description=(
+        "Поиск по title и description с учётом морфологии русского "
+        "(snowball-stemmer). Запрос plainto_tsquery — обычный текст, "
+        "без специального синтаксиса. Сортировка — по релевантности."
+    ),
+)
+async def search_classifieds(
+    q: str = Query(..., min_length=2, max_length=200),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    items = await repo.search_classifieds(db, q, page=page, per_page=per_page)
+    total = await repo.count_search_results(db, q)
+    return ClassifiedPage(
+        items=[ClassifiedResponse.model_validate(x) for x in items],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.get(
+    "",
+    response_model=ClassifiedPage,
+    summary="Список объявлений с фильтрами",
+)
+async def list_classifieds(
+    category: ClassifiedCategory | None = Query(None),
+    breed_id: uuid.UUID | None = Query(None),
+    city: str | None = Query(None, max_length=128),
+    price_from: Decimal | None = Query(None, ge=0),
+    price_to: Decimal | None = Query(None, ge=0),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    items = await repo.list_classifieds(
+        db,
+        category=category,
+        breed_id=breed_id,
+        city=city,
+        # Публичный список — только активные. Closed/archived не показываем.
+        status=ClassifiedStatus.active,
+        price_from=price_from,
+        price_to=price_to,
+        page=page,
+        per_page=per_page,
+    )
+    total = await repo.count_classifieds(
+        db,
+        category=category,
+        breed_id=breed_id,
+        city=city,
+        status=ClassifiedStatus.active,
+        price_from=price_from,
+        price_to=price_to,
+    )
+    return ClassifiedPage(
+        items=[ClassifiedResponse.model_validate(x) for x in items],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.get(
+    "/{classified_id}",
+    response_model=ClassifiedResponse,
+    summary="Карточка объявления (инкрементирует views_count)",
+)
+async def get_classified(
+    classified_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    obj = await repo.get_classified(db, classified_id, with_images=True)
+    if obj is None:
+        raise HTTPException(404, "Объявление не найдено")
+    # Инкрементируем счётчик просмотров атомарным UPDATE. После этого
+    # объект в нашей сессии "отстаёт" на единицу — но это не страшно:
+    # пользователь увидит актуальный counter на следующем заходе.
+    await repo.increment_views(db, classified_id)
+    # Прибавляем в локальном объекте, чтобы ответ был сразу актуальным.
+    obj.views_count += 1
+    return obj
+
+
+@router.put(
+    "/{classified_id}",
+    response_model=ClassifiedResponse,
+    summary="Обновить объявление",
+)
+async def update_classified(
+    classified_id: uuid.UUID,
+    body: ClassifiedUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        return await svc.update_classified(
+            db,
+            classified_id=classified_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+            fields=body.model_dump(exclude_unset=True),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
+@router.delete(
+    "/{classified_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Закрыть объявление (soft delete)",
+)
+async def close_classified(
+    classified_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.close_classified(
+            db,
+            classified_id=classified_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)

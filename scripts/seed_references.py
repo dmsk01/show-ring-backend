@@ -45,6 +45,10 @@ from app.models.reference import (
     ShowRank,
     Title,
 )
+# Полный справочник пород FCI вынесен в data-модуль. Это длинный список
+# (200+ строк), который имеет смысл хранить отдельно от логики seed-скрипта:
+# легче поддерживать, не мешает читать саму процедуру наполнения.
+from scripts.data.fci_breeds import FCI_BREEDS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("seed")
@@ -69,36 +73,9 @@ FCI_GROUPS = [
 ]
 
 
-# (group_number, code, name, fci_number)
-BREEDS_SEED = [
-    (1, "german-shepherd", "Немецкая овчарка", "166"),
-    (1, "border-collie", "Бордер-колли", "297"),
-    (1, "australian-shepherd", "Австралийская овчарка", "342"),
-    (2, "rottweiler", "Ротвейлер", "147"),
-    (2, "doberman", "Доберман", "143"),
-    (2, "boxer", "Боксёр", "144"),
-    (2, "schnauzer", "Цвергшнауцер", "183"),
-    (3, "yorkshire-terrier", "Йоркширский терьер", "86"),
-    (3, "jack-russell-terrier", "Джек-рассел-терьер", "345"),
-    (3, "bull-terrier", "Бультерьер", "11"),
-    (4, "dachshund", "Такса", "148"),
-    (5, "siberian-husky", "Сибирский хаски", "270"),
-    (5, "samoyed", "Самоедская собака", "212"),
-    (5, "akita", "Акита-ину", "255"),
-    (6, "beagle", "Бигль", "161"),
-    (6, "basset-hound", "Бассет-хаунд", "163"),
-    (7, "english-setter", "Английский сеттер", "2"),
-    (7, "german-pointer", "Курцхаар", "119"),
-    (8, "labrador-retriever", "Лабрадор-ретривер", "122"),
-    (8, "golden-retriever", "Золотистый ретривер", "111"),
-    (8, "cocker-spaniel", "Английский кокер-спаниель", "5"),
-    (9, "chihuahua", "Чихуахуа", "218"),
-    (9, "french-bulldog", "Французский бульдог", "101"),
-    (9, "pomeranian", "Померанский шпиц", "97"),
-    (9, "pug", "Мопс", "253"),
-    (10, "borzoi", "Русская псовая борзая", "193"),
-    (10, "whippet", "Уиппет", "162"),
-]
+# BREEDS_SEED перенесён в scripts/data/fci_breeds.py — импортируется как
+# FCI_BREEDS. Формат тот же: (group_number, code, name, fci_number).
+BREEDS_SEED = FCI_BREEDS
 
 
 # По регламенту РКФ (Положение о сертификатных выставках).

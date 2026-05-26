@@ -14,6 +14,7 @@ from app.dependencies import get_current_user
 from app.models.dog import SexEnum
 from app.models.user import User
 from app.repositories import dog as repo
+from app.repositories import result as result_repo
 from app.schemas.dog import (
     DogCreate,
     DogPage,
@@ -21,6 +22,7 @@ from app.schemas.dog import (
     DogUpdate,
     PedigreeNode,
 )
+from app.schemas.result import DogTitleResponse
 from app.services import dog as svc
 
 router = APIRouter(prefix="/dogs", tags=["dogs"])
@@ -153,3 +155,20 @@ async def get_pedigree(
     if node is None:
         raise HTTPException(404, "Собака не найдена")
     return node
+
+
+@router.get(
+    "/{dog_id}/titles",
+    response_model=list[DogTitleResponse],
+    summary="Все титулы собаки",
+    description=(
+        "Возвращает список присвоенных собаке титулов (источник истины — "
+        "таблица dog_titles, заполняется автоматически при вводе результатов "
+        "выставок на этапе 7)."
+    ),
+)
+async def list_titles(
+    dog_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    return await result_repo.list_dog_titles(db, dog_id)

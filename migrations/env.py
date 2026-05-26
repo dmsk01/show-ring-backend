@@ -16,6 +16,13 @@ from app.models import reference  # noqa: F401
 from app.models import file as _file_model  # noqa: F401
 from app.models import kennel as _kennel_model  # noqa: F401
 from app.models import dog as _dog_model  # noqa: F401
+from app.models import litter as _litter_model  # noqa: F401
+from app.models import classified as _classified_model  # noqa: F401
+from app.models import show as _show_model  # noqa: F401
+from app.models import result as _result_model  # noqa: F401
+from app.models import task as _task_model  # noqa: F401
+from app.models import notification as _notification_model  # noqa: F401
+from app.models import ad as _ad_model  # noqa: F401
 
 from app.config import settings
 

@@ -1,0 +1,15 @@
+{% block subject %}Опубликованы результаты выставки «{{ show_name }}»{% endblock %}
+
+{% block html %}
+<p>Здравствуйте!</p>
+<p>
+  Опубликованы результаты выставки <strong>{{ show_name }}</strong>
+  ({{ show_rank }}, {{ date_start }}).
+</p>
+<p>Загляните в платформу — там оценки, расстановки и присвоенные титулы.</p>
+{% endblock %}
+
+{% block text %}
+Опубликованы результаты выставки «{{ show_name }}» ({{ show_rank }}, {{ date_start }}).
+Загляните в платформу.
+{% endblock %}

@@ -1,0 +1,28 @@
+{% block subject %}Открыта регистрация на выставку «{{ show_name }}»{% endblock %}
+
+{% block html %}
+<p>Здравствуйте!</p>
+<p>
+  Открылась регистрация на выставку <strong>{{ show_name }}</strong>
+  ({{ show_rank }}), которая пройдёт {{ date_start }}{% if city %} в городе {{ city }}{% endif %}.
+</p>
+{% if registration_deadline %}
+<p>Регистрация открыта до <strong>{{ registration_deadline }}</strong>.</p>
+{% endif %}
+<p>Перейдите в платформу, чтобы записать собаку.</p>
+<p style="color:#888;font-size:12px">
+  Это автоматическое уведомление по вашей подписке на события выставок.
+</p>
+{% endblock %}
+
+{% block text %}
+Здравствуйте!
+
+Открылась регистрация на выставку «{{ show_name }}» ({{ show_rank }}),
+которая пройдёт {{ date_start }}{% if city %} в городе {{ city }}{% endif %}.
+{% if registration_deadline %}Регистрация открыта до {{ registration_deadline }}.{% endif %}
+
+Перейдите в платформу, чтобы записать собаку.
+
+— автоматическое уведомление ShowTail
+{% endblock %}
