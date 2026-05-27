@@ -13,6 +13,7 @@ GET  /files/{id}    — публичный — браузер сразу мож�
 from __future__ import annotations
 
 import uuid
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import Response
@@ -70,6 +71,10 @@ async def get_file(file_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     if db_file is None:
         raise HTTPException(status_code=404, detail="Файл не найден")
     body, content_type = await file_storage.get_file_stream(db_file.s3_key)
+    # ИСПРАВЛЕНО (bug_202): см. tasks.py — \r\n или " в original_filename
+    # позволяли инжектировать произвольные HTTP-заголовки. RFC 6266
+    # filename* = UTF-8''<percent-encoded> закрывает класс ошибки.
+    safe_name = quote(db_file.original_filename or "file", safe="")
     return Response(
         content=body,
         media_type=content_type,
@@ -77,6 +82,6 @@ async def get_file(file_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         # Если бы было attachment — скачался бы файлом. inline здесь
         # удобнее для аватаров/фото.
         headers={
-            "Content-Disposition": f'inline; filename="{db_file.original_filename}"'
+            "Content-Disposition": f"inline; filename*=UTF-8''{safe_name}",
         },
     )

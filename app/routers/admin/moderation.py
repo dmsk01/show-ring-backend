@@ -41,6 +41,16 @@ def _raise_for_error(err: ValueError) -> NoReturn:
     code = str(err)
     if code == "not_found":
         raise HTTPException(404, code)
+    # bug_204 fix: self-block / self-demote / last-admin отдаём 409,
+    # потому что это не "невалидный запрос" (400), а конфликт с
+    # инвариантами системы — клиенту понятнее, что "запрос валиден,
+    # но нельзя из текущего состояния".
+    if code in {
+        "cannot_block_self",
+        "cannot_revoke_self_admin",
+        "last_admin_protected",
+    }:
+        raise HTTPException(409, code)
     raise HTTPException(400, code)
 
 

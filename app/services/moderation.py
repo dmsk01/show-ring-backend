@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import ModerationLog
@@ -134,6 +134,13 @@ async def block_user(
     obj = await db.get(User, user_id)
     if obj is None:
         raise ValueError("not_found")
+    # ИСПРАВЛЕНО (bug_204): запрещаем admin'у блокировать самого себя.
+    # Без проверки админ мог случайным PUT /admin/users/<свой_id>/block
+    # выключить себе is_active=False и потерять доступ навсегда (если
+    # он единственный admin — только восстановление через прямой SQL).
+    # Разблокировку самого себя не запрещаем — она безопасна.
+    if user_id == actor_id and is_active is False:
+        raise ValueError("cannot_block_self")
     obj.is_active = is_active
     if not is_active:
         # Отзываем все живые refresh-токены пользователя одним UPDATE.
@@ -182,6 +189,23 @@ async def update_user_role(
         UserRole.user_id == user_id, UserRole.role == role
     )
     existing = (await db.execute(stmt)).scalar_one_or_none()
+
+    # ИСПРАВЛЕНО (bug_204): два защитных слоя при отзыве admin-роли.
+    # 1. Самоотзыв: admin не может снять admin С СЕБЯ. Иначе случайным
+    #    PUT /admin/users/<свой_id>/role админ обнуляет себе доступ.
+    # 2. Последний admin: запрещаем удалять единственный оставшийся
+    #    admin-grant в системе. Без этой проверки даже не-self вариант
+    #    (один админ снимает роль у второго при условии, что 2-й —
+    #    последний оставшийся) разрушит управление платформой.
+    if not grant and role == RoleEnum.admin and existing is not None:
+        if user_id == granted_by:
+            raise ValueError("cannot_revoke_self_admin")
+        count_stmt = select(func.count()).select_from(UserRole).where(
+            UserRole.role == RoleEnum.admin
+        )
+        admin_count = int((await db.execute(count_stmt)).scalar_one())
+        if admin_count <= 1:
+            raise ValueError("last_admin_protected")
 
     if grant and existing is None:
         db.add(UserRole(user_id=user_id, role=role, granted_by=granted_by))

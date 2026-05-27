@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -116,6 +117,11 @@ async def get_task_status(
     return legacy
 
 
+def _is_admin(user: User) -> bool:
+    """Локальный helper: у юзера есть роль admin."""
+    return any(r.role.value == "admin" for r in user.roles)
+
+
 @router.get(
     "/{task_id}/download",
     summary="Скачать результат задачи (PDF)",
@@ -123,7 +129,7 @@ async def get_task_status(
 async def download_task_result(
     task_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),  # noqa: ARG001 — пока без ACL
+    user: User = Depends(get_current_user),
 ):
     """
     Возвращает файл из MinIO по file_id из task.result.
@@ -134,6 +140,13 @@ async def download_task_result(
     task = await task_repo.get_task(db, task_id)
     if task is None:
         raise HTTPException(404, "task_not_found")
+    # ИСПРАВЛЕНО (bug_201): IDOR — раньше любой авторизованный мог
+    # скачать чужой PDF по task_id (комментарий "пока без ACL"). Теперь
+    # доступ — только автору задачи или admin. created_by IS NULL —
+    # fail-closed: исторические задачи без автора недоступны никому,
+    # кроме admin (избегаем «забытого» 0-owner public ресурса).
+    if not _is_admin(user) and task.created_by != user.id:
+        raise HTTPException(403, "forbidden")
     if task.status != TaskStatusEnum.done:
         raise HTTPException(409, "task_not_done")
     result = task.result or {}
@@ -161,12 +174,17 @@ async def download_task_result(
         # функция получит реальный стрим вместо одного фрейма.
         yield body
 
+    # ИСПРАВЛЕНО (bug_202): сериализуем имя файла через RFC 6266
+    # filename* — без этого \r\n или " внутри original_filename
+    # вылезали как инжекция произвольных HTTP-заголовков (Set-Cookie,
+    # CSP-override и т.п.) на скачивающего клиента. urllib.quote с
+    # safe="" экранирует ВСЁ, включая UTF-8 байты — RFC 6266 для этого
+    # как раз и предлагает filename*=UTF-8''<percent-encoded>.
+    safe_name = quote(db_file.original_filename or "file", safe="")
     return StreamingResponse(
         _iter(),
         media_type=content_type or db_file.content_type or "application/octet-stream",
         headers={
-            "Content-Disposition": (
-                f'attachment; filename="{db_file.original_filename}"'
-            ),
+            "Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}",
         },
     )
