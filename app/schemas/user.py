@@ -49,6 +49,12 @@ class PublicUserResponse(BaseModel):
 
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
+    # ИСПРАВЛЕНО (bug_203): смена email — sensitive операция. Без re-auth
+    # компрометация access-токена даёт атакующему смену email на свой и
+    # последующий захват аккаунта через password reset. Текущий пароль
+    # обязателен только когда меняется email (роутер валидирует это
+    # отдельно — Pydantic-валидатор не имеет доступа к current_user).
+    current_password: str | None = None
 
 
 class TokenResponse(BaseModel):

@@ -16,17 +16,18 @@ bug_012, bug_018, bug_019) повторно не перечисляю.
 - [x] **bug_201** — IDOR: `/tasks/{id}/download` без ACL (HIGH)
 - [x] **bug_202** — Content-Disposition header injection через
   `original_filename` (HIGH)
-- [ ] **bug_203** — `PUT /users/me` смена email без верификации и без
+- [x] **bug_203** — `PUT /users/me` смена email без верификации и без
   отзыва сессий (HIGH)
 - [x] **bug_204** — Admin может self-block / отозвать собственную роль
   admin (HIGH)
-- [ ] **bug_205** — WS support держит `AsyncSession` на всё время жизни
+- [x] **bug_205** — WS support держит `AsyncSession` на всё время жизни
   соединения, исчерпывает пул (MEDIUM)
-- [ ] **bug_206** — WS support не пере-проверяет доступ / is_active
-  после первоначальной аутентификации (LOW)
+- [x] **bug_206** — WS support не пере-проверяет доступ / is_active
+  после первоначальной аутентификации (LOW) — пофикшен попутно с bug_205
 - [ ] **bug_207** — `app/routers/documents.py:_publish_task` пишет
   задачу в БД, но при неудачном publish в RabbitMQ оставляет её в
-  `pending` без явного механизма retry (LOW, документ-долг)
+  `pending` без явного механизма retry (LOW, документ-долг — см.
+  `docs/plans/future/technical-debt.md`)
 
 ## Детали
 

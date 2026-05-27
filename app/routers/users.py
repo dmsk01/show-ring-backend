@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,8 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.repositories.user import get_user_by_id, update_user
+from app.repositories.user import (
+    get_user_by_id,
+    revoke_all_refresh_tokens_for_user,
+    update_user,
+)
 from app.schemas.user import PublicUserResponse, UserResponse, UserUpdate
+from app.utils.security import verify_password
+
+# Отдельный логгер security-событий, чтобы можно было направлять в SIEM
+# на этапе 14 (см. app/services/auth.py — тот же канал).
+security_logger = logging.getLogger("app.security")
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -24,16 +34,60 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
 @router.put(
     "/me",
     summary="Обновить профиль",
-    description="Обновляет поля профиля. При смене email сбрасывает подтверждение почты.",
+    description=(
+        "Обновляет поля профиля. Смена email требует подтверждения "
+        "текущим паролем (re-auth) и приводит к разлогину всех "
+        "активных сессий пользователя."
+    ),
 )
 async def change_user_info(
     update_data: UserUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # exclude_none, чтобы не затирать поля у БД None'ами от Pydantic.
     fields = update_data.model_dump(exclude_none=True)
-    if "email" in fields and fields["email"] != current_user.email:
+    # current_password из payload используется ТОЛЬКО для re-auth и
+    # никогда не попадает в БД. Изымаем заранее.
+    current_password = fields.pop("current_password", None)
+
+    email_changes = (
+        "email" in fields and fields["email"] != current_user.email
+    )
+    if email_changes:
+        # ИСПРАВЛЕНО (bug_203): три слоя защиты при смене email.
+        # Раньше PUT /me менял email мгновенно по одному access-токену,
+        # без re-auth и без отзыва сессий. Любой кто получил access-токен
+        # (XSS, lost device, MITM) мог поменять email на свой и потом
+        # через будущий "forgot password" забрать аккаунт.
+        #
+        # 1. Re-auth: пользователь должен предъявить текущий пароль.
+        #    Случай "украли access-token, но пароль не знают" блокируется.
+        if not current_password or not verify_password(
+            current_password, current_user.hashed_password
+        ):
+            security_logger.warning(
+                "email_change_bad_password user_id=%s", current_user.id
+            )
+            raise HTTPException(
+                status_code=403, detail="current_password_invalid"
+            )
+        # 2. is_email_verified=False: новый email считается
+        #    неподтверждённым до тех пор, пока пользователь не пройдёт
+        #    отдельный verify-flow (TODO: см. tech-debt — отдельный
+        #    эндпоинт verify-email-change с письмом на новый адрес).
         fields["is_email_verified"] = False
+        # 3. Revoke all refresh tokens: если access-токен утёк и сейчас
+        #    им пользуется атакующий, после этой операции у него
+        #    останется только короткоживущий access (15 минут) — после
+        #    его истечения refresh не сработает, законный владелец
+        #    залогинится заново.
+        await revoke_all_refresh_tokens_for_user(db, current_user.id)
+        security_logger.info(
+            "email_change user_id=%s old=%s new=%s",
+            current_user.id, current_user.email, fields["email"],
+        )
+
     # ИСПРАВЛЕНО: коллизия email (UNIQUE constraint) раньше валилась
     # в 500. Теперь отдаём корректный 409 Conflict.
     try:

@@ -219,3 +219,39 @@ Outbox-таблица будет расти на failed строках при д
 с Rabbit. Добавить в scheduler: `DELETE FROM outbox_events WHERE
 status='failed' AND created_at < now() - interval '30 days'`.
 Раз в неделю.
+
+### Полный flow подтверждения смены email (follow-up bug_203)
+
+Текущий фикс bug_203 (`app/routers/users.py:32`) делает минимум:
+требует current_password, помечает email как неподтверждённый и
+отзывает все refresh-токены. Но новый адрес НЕ верифицируется
+письмом — атакующий мог ввести любой email (включая опечатанный),
+и пользователь получит is_email_verified=false с непроверенным
+значением в колонке email.
+
+**Полный flow (отдельный PR):**
+1. PUT /users/me со сменой email НЕ применяет email сразу. Вместо
+   этого создаёт запись в `email_change_tokens` (новая таблица или
+   расширение `email_verification_tokens` колонкой `new_email`).
+2. На СТАРЫЙ email шлётся уведомление «была попытка смены, если
+   это не вы — нажмите undo (одноразовый токен на восстановление)».
+3. На НОВЫЙ email шлётся подтверждение со ссылкой
+   `/users/me/email-change/confirm?token=...`. Применение email
+   только после клика на эту ссылку.
+4. До подтверждения старый email остаётся активным; в БД ничего
+   не меняется кроме новой строки в email_change_tokens.
+
+**Зависимости:** email-worker уже шлёт письма; нужна миграция
+под таблицу/колонку.
+
+### Re-publish stuck task на `/documents` (bug_207)
+
+`app/routers/documents._publish_task` пишет Task в БД и
+публикует в RabbitMQ. При сбое publish задача остаётся `pending`
+без шанса исполниться. Комментарий в коде обещает admin-эндпоинт.
+
+Решение: использовать существующий outbox-pattern (`app/models/
+outbox.py`) — публикация в Rabbit идёт через outbox, fallback'ный
+`outbox_publisher_worker` догоняет недоставленные строки.
+Конкретно для document-задач — переключить `_publish_task` с
+прямого `rabbit_service.publish` на запись в outbox.

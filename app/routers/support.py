@@ -266,13 +266,25 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
     5. Дальше клиент шлёт {"type":"message","body":"..."} — сервер
        сохраняет в БД и публикует в Redis-канал тикета. Все подключенные
        сокеты (на всех инстансах) получают копию.
+
+    ИСПРАВЛЕНО (bug_205): раньше одна AsyncSession оборачивала ВЕСЬ
+    жизненный цикл WS — пользователь, открывший чат и отошедший на
+    кофе, держал соединение из пула PostgreSQL часами. При pool_size=5
+    несколько idle-чатов исчерпывали пул и роняли REST-эндпоинты.
+    Теперь сессия живёт только в течение auth/access-фазы и затем
+    переоткрывается на каждое входящее сообщение — пул держит
+    соединение секунды, а не часы.
     """
     await websocket.accept()
 
-    # Каждый WS-цикл живёт долго, своя сессия БД (не Depends, потому
-    # что dependency для WS — отдельный механизм).
+    user_id: uuid.UUID | None = None
+    is_op = False
+
+    # --- AUTH + ACCESS CHECK (короткая сессия БД) ---
+    # Сессия открыта только на время handshake — после выхода из
+    # `async with` соединение возвращается в пул, даже если клиент
+    # просидит молча сутки.
     async with async_session_factory() as db:
-        # --- AUTH ---
         try:
             first = await websocket.receive_json()
         except (WebSocketDisconnect, ValueError):
@@ -295,7 +307,6 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
             await websocket.close(code=4401)
             return
 
-        # --- ACCESS CHECK ---
         ticket = await repo.get_ticket(db, ticket_id)
         if ticket is None:
             await websocket.send_json(
@@ -310,52 +321,93 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
             await websocket.close(code=4403)
             return
         is_op = svc.is_operator(user)
+        user_id = user.id
 
         await websocket.send_json(
-            {"type": "auth_ok", "payload": {"user_id": str(user.id)}}
+            {"type": "auth_ok", "payload": {"user_id": str(user_id)}}
         )
-        await ws_manager.connect(ticket_id, websocket)
-
-        # При входе помечаем прочитанными "не свои" сообщения —
-        # типичный UX: открыл чат — счётчик непрочитанных обнулился.
+        # mark_read под этой же handshake-сессией: дёшево и атомарно.
         await repo.mark_messages_read(db, ticket_id, is_op)
 
-        # --- MESSAGE LOOP ---
-        try:
-            while True:
-                frame = await websocket.receive_json()
-                if frame.get("type") != "message":
+    # Pyright не умеет проследить, что все code-paths без user_id уже
+    # сделали `return` внутри async with. Явный assert narrowит тип
+    # к UUID для оставшейся части функции.
+    assert user_id is not None
+
+    # Регистрируем WS у менеджера ПОСЛЕ закрытия handshake-сессии:
+    # connect — асинхронная операция (Redis subscribe), и нет смысла
+    # держать БД-соединение во время неё.
+    await ws_manager.connect(ticket_id, websocket)
+
+    # --- MESSAGE LOOP (сессия на каждое сообщение) ---
+    try:
+        while True:
+            # receive_json блокирует поток ожидания корутины — в это время
+            # БД-соединение НИКАКОЕ не занято.
+            frame = await websocket.receive_json()
+            if frame.get("type") != "message":
+                await websocket.send_json(
+                    {"type": "error", "payload": {"code": "bad_frame"}}
+                )
+                continue
+            body = (frame.get("body") or "").strip()
+            if not body:
+                await websocket.send_json(
+                    {"type": "error", "payload": {"code": "empty_body"}}
+                )
+                continue
+
+            # Per-message сессия: одна транзакция — одно сообщение.
+            # ИСПРАВЛЕНО (bug_206 follow-up): тут же пере-проверяем, что
+            # пользователь всё ещё имеет доступ. Если за время WS-сессии
+            # его заблокировали (`block_user`) или сняли роль
+            # operator — следующее сообщение упадёт с 4403 и WS закроется.
+            async with async_session_factory() as db:
+                fresh_user = await get_user_by_id(db, user_id)
+                if fresh_user is None or not fresh_user.is_active:
                     await websocket.send_json(
-                        {"type": "error", "payload": {"code": "bad_frame"}}
+                        {
+                            "type": "error",
+                            "payload": {"code": "user_revoked"},
+                        }
                     )
-                    continue
-                body = (frame.get("body") or "").strip()
-                if not body:
+                    await websocket.close(code=4401)
+                    return
+                fresh_ticket = await repo.get_ticket(db, ticket_id)
+                if fresh_ticket is None or not svc.can_access_ticket(
+                    fresh_ticket, fresh_user
+                ):
                     await websocket.send_json(
-                        {"type": "error", "payload": {"code": "empty_body"}}
+                        {"type": "error", "payload": {"code": "forbidden"}}
                     )
-                    continue
+                    await websocket.close(code=4403)
+                    return
+                # is_operator пересчитываем тоже: если у юзера сняли
+                # роль operator, новые сообщения должны идти как от
+                # клиента, а не от оператора.
+                is_op = svc.is_operator(fresh_user)
 
                 msg = await repo.add_message(
                     db,
                     ticket_id=ticket_id,
-                    sender_id=user.id,
+                    sender_id=user_id,
                     body=body,
                     is_from_operator=is_op,
                 )
-                # Publish — все инстансы (включая нас) получат через
-                # pubsub и разошлют в свои WS.
-                await ws_manager.publish(
-                    ticket_id,
-                    {"type": "message", "payload": _serialize_message(msg)},
-                )
-        except WebSocketDisconnect:
-            # Нормальный разрыв — клиент закрыл вкладку.
-            pass
-        except Exception:
-            logger.exception("WS loop error in ticket %s", ticket_id)
-        finally:
-            await ws_manager.disconnect(ticket_id, websocket)
+            # Publish — все инстансы (включая нас) получат через pubsub
+            # и разошлют в свои WS. Уже ВНЕ async with: send_json
+            # не должен держать БД-коннект.
+            await ws_manager.publish(
+                ticket_id,
+                {"type": "message", "payload": _serialize_message(msg)},
+            )
+    except WebSocketDisconnect:
+        # Нормальный разрыв — клиент закрыл вкладку.
+        pass
+    except Exception:
+        logger.exception("WS loop error in ticket %s", ticket_id)
+    finally:
+        await ws_manager.disconnect(ticket_id, websocket)
 
 
 # ---------------------------------------------------------------------
