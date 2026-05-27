@@ -81,11 +81,10 @@ async def create_litter(
         mother_id=fields.get("mother_id"),
     )
     obj = await repo.create_litter(db, **fields)
-    await db.commit()
-    await db.refresh(obj)
 
     # Подгружаем питомник и породу для красивого письма подписчикам.
-    # Сделаем это после commit, чтобы не растягивать основную транзакцию.
+    # Делаем это до commit'а — outbox enqueue должен быть в той же
+    # транзакции, что и INSERT помёта.
     kennel = await kennel_repo.get_kennel(db, obj.kennel_id)
     from app.models.reference import Breed
 
@@ -95,6 +94,10 @@ async def create_litter(
     # биндиться на конкретную породу через pattern:
     # "litter.announced.breed.<breed_id>". Сейчас воркер слушает "#",
     # но routing_key уже под расширение.
+    #
+    # publish_event с db=db → запись в outbox_events. Транзакционная
+    # гарантия: либо помёт + событие, либо ничего. Без db (старый
+    # вариант) при сбое Rabbit событие терялось бы.
     await notif_svc.publish_event(
         EventMessage(
             event_type="litter.announced",
@@ -113,8 +116,12 @@ async def create_litter(
                     str(obj.price_to) if obj.price_to is not None else None
                 ),
             },
-        )
+        ),
+        db=db,
     )
+
+    await db.commit()
+    await db.refresh(obj)
 
     return obj
 

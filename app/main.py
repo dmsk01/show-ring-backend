@@ -2,6 +2,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from contextlib import asynccontextmanager
 from sqlalchemy import text
@@ -10,6 +11,7 @@ from app.database import engine
 from app.logging_config import setup_logging
 from app.middleware.error_handler import ErrorHandlerMiddleware
 from app.middleware.idempotency import IdempotencyMiddleware
+from app.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.sanitization import SanitizationMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
@@ -92,16 +94,27 @@ app = FastAPI(lifespan=lifespan)
 # Порядок middleware важен: FastAPI применяет их в обратном порядке
 # добавления к запросу. Значит первым ВЫПОЛНЯЕТСЯ последний добавленный.
 # Идём от "ближе к handler'у" → "ближе к сети":
-#   1. RequestId  — добавить ID до всего остального (логи)
-#   2. ErrorHandler — ловить исключения handler'ов
-#   3. Sanitization — чистить тело до бизнес-логики
-#   4. Idempotency  — после sanitization (тело уже чистое), но до handler'а
+#   1. RequestId      — добавить ID до всего остального (логи)
+#   2. ErrorHandler   — ловить исключения handler'ов
+#   3. Sanitization   — чистить тело до бизнес-логики
+#   4. Idempotency    — после sanitization (тело уже чистое), но до handler'а
 #   5. SecurityHeaders — на ответ всегда, последним в pipeline
+#   6. ProxyHeaders   — ВЫПОЛНЯЕТСЯ ПЕРВЫМ (сетевой уровень): подменяем
+#                       client IP до того, как rate-limit/ad-fraud его
+#                       прочитают.
+#   7. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(ErrorHandlerMiddleware)
 app.add_middleware(SanitizationMiddleware)
 app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(ProxyHeadersMiddleware)
+# TrustedHost доступен в FastAPI/Starlette из коробки. Применяется
+# только когда allowed_hosts задан — на dev пустой список = всё пускаем.
+if settings.allowed_hosts:
+    app.add_middleware(
+        TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts
+    )
 
 # ИСПРАВЛЕНО: CORSMiddleware подключается только если список доменов задан.
 # Пустой список = CORS не настраивается (без * по умолчанию) — иначе

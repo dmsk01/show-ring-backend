@@ -39,6 +39,7 @@ from worker.handlers.events_handler import (
     bind_topic_queue,
     process_event,
 )
+from worker.handlers.outbox_handler import run_loop as outbox_run_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -295,6 +296,27 @@ async def run_ad_events() -> None:
     await _serve(connection, f"{AD_EVENTS_QUEUE} (ads batch)")
 
 
+async def run_outbox() -> None:
+    """
+    Outbox dispatcher (follow-up для этапов 9/10). Опрашивает таблицу
+    outbox_events и публикует pending события в RabbitMQ. См.
+    worker/handlers/outbox_handler.py.
+
+    В отличие от других режимов, тут нет consume-подписки на очередь —
+    воркер сам читает БД. Поэтому _serve не подходит: используем
+    свой stop_event и run_loop.
+    """
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    channel = await connection.channel()
+
+    stop = asyncio.Event()
+    _install_signal_handlers(stop)
+    try:
+        await outbox_run_loop(async_session_factory, channel, stop)
+    finally:
+        await connection.close()
+
+
 async def run_email() -> None:
     """
     Воркер отправки email. Простой: один тип сообщений
@@ -315,13 +337,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["documents", "book", "events", "topic", "email", "ads"],
+        choices=["documents", "book", "events", "topic", "email", "ads", "outbox"],
         default="documents",
         help=(
             "documents — PDF-задачи; book — учебный пример; "
             "events — fanout-демо; topic — диспатчер событий этапа 9; "
             "email — SMTP-воркер этапа 9; ads — batch-воркер рекламных "
-            "событий этапа 14."
+            "событий этапа 14; outbox — dispatcher outbox_events → "
+            "RabbitMQ (transactional outbox)."
         ),
     )
     args = parser.parse_args()
@@ -332,6 +355,7 @@ def main() -> None:
         "topic": run_topic_events,
         "email": run_email,
         "ads": run_ad_events,
+        "outbox": run_outbox,
     }[args.mode]
     asyncio.run(coro())
 

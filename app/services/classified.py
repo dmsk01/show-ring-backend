@@ -58,7 +58,11 @@ async def create_classified(
     # Перезагружаем объявление с подгруженными images через repo.get,
     # чтобы вернуть полный response. refresh(obj) без selectinload не
     # подтянет images в ту же сессию из-за expire_on_commit=False.
-    return await repo.get_classified(db, obj.id, with_images=True)
+    reloaded = await repo.get_classified(db, obj.id, with_images=True)
+    # assert для pyright: после успешного commit запись с тем же id
+    # точно существует — это invariant SQL'я, не runtime-проверка.
+    assert reloaded is not None
+    return reloaded
 
 
 async def update_classified(
@@ -80,7 +84,50 @@ async def update_classified(
     # Дочитываем заново с images — после commit relationship уже
     # подгружен (мы загружали с with_images=True), но повторное чтение
     # гарантирует консистентность.
-    return await repo.get_classified(db, classified_id, with_images=True)
+    reloaded = await repo.get_classified(db, classified_id, with_images=True)
+    assert reloaded is not None  # invariant: только что обновили — точно есть
+    return reloaded
+
+
+async def add_images(
+    db: AsyncSession,
+    classified_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+    images: list[dict],
+) -> Classified:
+    """
+    Добавляет изображения к существующему объявлению. Только автор
+    (или admin) может пополнять галерею — иначе любой авторизованный
+    пользователь мог бы «прицепить» свои файлы к чужому объявлению.
+
+    images — список dict'ов с file_id/position/is_primary (тот же
+    формат, что в create_classified.images). Загрузка самих файлов
+    идёт отдельно через POST /files/upload.
+
+    UniqueConstraint("classified_id", "file_id") в БД защищает от
+    дублирования одной картинки; повторная привязка кинет
+    IntegrityError. На этом этапе пробрасываем дальше — пользователь
+    увидит 400, либо клиент должен фильтровать дубликаты.
+    """
+    obj = await repo.get_classified(db, classified_id, with_images=True)
+    if obj is None:
+        raise ValueError("not_found")
+    await _check_owner(obj, requester_id, is_admin)
+
+    for img in images:
+        await repo.add_image(
+            db,
+            classified_id=classified_id,
+            file_id=img["file_id"],
+            position=img.get("position", 0),
+            is_primary=img.get("is_primary", False),
+        )
+
+    await db.commit()
+    reloaded = await repo.get_classified(db, classified_id, with_images=True)
+    assert reloaded is not None  # invariant: id известен (проверен выше)
+    return reloaded
 
 
 async def close_classified(

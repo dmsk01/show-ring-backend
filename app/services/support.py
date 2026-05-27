@@ -26,11 +26,13 @@ from app.repositories import support as repo
 
 
 def is_operator(user: User) -> bool:
-    """Есть ли у пользователя роль оператора (или admin)."""
-    return any(r.role.value in ("admin",) for r in user.roles)
-    # NB: отдельной роли "operator" в RoleEnum пока нет; используем
-    # admin как универсальный supersedes. Когда добавим роль operator
-    # в этапе 12+ — расширим этот предикат.
+    """
+    Есть ли у пользователя роль оператора. admin неявно тоже оператор —
+    у админа должен быть доступ ко всему для разруливания инцидентов.
+    """
+    return any(
+        r.role.value in ("operator", "admin") for r in user.roles
+    )
 
 
 def can_access_ticket(ticket: SupportTicket, user: User) -> bool:

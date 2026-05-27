@@ -63,8 +63,11 @@ async def moderate_classified(
     if obj is None:
         raise ValueError("not_found")
     prev_status = obj.status
-    # approve → возвращаем в active; reject → closed (мягкая блокировка,
-    # данные сохранены).
+    # approve → возвращаем в active; reject → закрываем со статусом closed.
+    # closed — мягкая блокировка: данные остаются, но из списков скрыты.
+    # reason сохраняем в moderation_logs (см. _log_action ниже); в самой
+    # таблице classifieds поля для причины нет — это сознательное
+    # решение, чтобы не плодить миграции под audit-данные.
     obj.status = (
         ClassifiedStatus.active if approve else ClassifiedStatus.closed
     )

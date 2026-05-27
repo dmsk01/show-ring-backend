@@ -71,5 +71,25 @@ class Settings(BaseSettings):
     # round-trip'ы к PG.
     ad_events_async: bool = False
 
+    # --- Доменно-специфичные политики ---
+    # Список разрешённых Host-заголовков. Пустой = не проверяем (для dev).
+    # В prod ставим ["api.showtail.example", "*.showtail.example"] —
+    # защищает от Host header injection и host rebinding attacks.
+    allowed_hosts: list[str] = []
+    # Сети, которым доверяем X-Forwarded-For / X-Forwarded-Proto.
+    # Список CIDR прокси-инфраструктуры (nginx, cloudflare).
+    # Если задан — клиентский IP берём из X-Forwarded-For; иначе только
+    # из request.client.host (защита от подделки IP анонимом).
+    forwarded_allow_ips: list[str] = []
+    # HSTS — Strict-Transport-Security. Включать только когда сайт уже
+    # работает на HTTPS: иначе браузер не даст вернуться на http даже
+    # для отладки.
+    hsts_enabled: bool = False
+    hsts_max_age_seconds: int = 63072000  # 2 года — рекомендация preload
+    # CSP для API: 'default-src none' — мы JSON-API, никакого
+    # содержимого, требующего ресурсы. frame-ancestors 'none' дублирует
+    # X-Frame-Options для современных браузеров.
+    csp_enabled: bool = False
+
 
 settings = Settings()  # type: ignore

@@ -27,7 +27,7 @@ from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_factory, get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, require_any_role
 from app.models.support import TicketStatus
 from app.models.user import User
 from app.repositories import support as repo
@@ -367,6 +367,12 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
     "/admin/tickets",
     response_model=list[TicketResponse],
     summary="Все тикеты (admin/operator)",
+    # require_any_role вместо inline svc.is_operator: проверка
+    # происходит на уровне dependency, до запуска тела handler'а.
+    # Это декларативнее (один взгляд на сигнатуру = понимание RBAC)
+    # и меньше шанс случайно пропустить проверку при копировании
+    # эндпоинта.
+    dependencies=[Depends(require_any_role("operator", "admin"))],
 )
 async def list_all_tickets(
     status_: TicketStatus | None = Query(None, alias="status"),
@@ -374,10 +380,7 @@ async def list_all_tickets(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
-    if not svc.is_operator(user):
-        raise HTTPException(403, "forbidden")
     items = await repo.list_tickets_admin(
         db,
         status=status_,

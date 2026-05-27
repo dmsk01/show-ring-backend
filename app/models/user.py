@@ -25,6 +25,10 @@ class RoleEnum(str, enum.Enum):
     breeder = "breeder"
     judge = "judge"
     buyer = "buyer"
+    # operator — оператор онлайн-поддержки (этап 11). Раздельная роль
+    # от admin: модераторам поддержки не нужны полные admin-права
+    # (управление пользователями, бюджетом рекламы и т.д.).
+    operator = "operator"
 
 
 class User(Base, TimestampMixin):

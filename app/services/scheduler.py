@@ -127,40 +127,90 @@ async def cleanup_expired_refresh_tokens() -> None:
 
 async def requeue_stuck_tasks() -> None:
     """
-    Возвращает в pending задачи, висящие в processing дольше 1 часа.
+    Возвращает в pending задачи, висящие в processing дольше 1 часа,
+    и через outbox перепубликует их в RabbitMQ.
+
     Сценарий: воркер взял задачу через claim_task (UPDATE → processing),
     после чего упал/был убит OOM-killer'ом. Сама задача в очереди уже
-    ack'нута (или потеряна), новый воркер её не возьмёт.
+    ack'нута (или потеряна), новый воркер её не возьмёт без переподачи.
 
     1 час — компромисс: PDF-каталог тысячи собак или batch дипломов
     могут идти десятки минут; раньше срабатывать опасно (поломаем
     легитимную работу). Если когда-то появятся задачи >1ч, поле
     `attempts` уже считается — можно ограничить максимальное число
     повторов (TODO).
+
+    Re-publish через outbox: добавляем запись в outbox_events в той же
+    транзакции, что и UPDATE status. Outbox-воркер подберёт и
+    опубликует — гарантия "статус pending ⇔ событие в очереди".
     """
     from datetime import timedelta
 
+    from app.repositories import outbox as outbox_repo
+    from app.schemas.task import TaskMessage
+
     cutoff = datetime.utcnow() - timedelta(hours=1)
     async with async_session_factory() as db:
-        stmt = (
-            update(Task)
-            .where(
-                Task.status == TaskStatusEnum.processing,
-                Task.updated_at < cutoff,
-            )
-            .values(status=TaskStatusEnum.pending)
+        # SELECT + UPDATE построчно — нужны type и payload для
+        # правильной публикации в очередь конкретного типа.
+        from sqlalchemy import select
+
+        select_stmt = select(Task).where(
+            Task.status == TaskStatusEnum.processing,
+            Task.updated_at < cutoff,
         )
-        result = await db.execute(stmt)
+        stuck = (await db.execute(select_stmt)).scalars().all()
+        if not stuck:
+            return
+
+        for task in stuck:
+            task.status = TaskStatusEnum.pending
+            # Имя очереди = task.type (см. константы в routers/documents.py
+            # и worker/handlers/*; договорённость — type строки совпадают
+            # с queue_name для DB-backed задач). Для типов, которых нет в
+            # этой карте, перепубликацию пропускаем — UPDATE → pending
+            # всё равно сделан, можно перезапустить вручную.
+            queue_name = _QUEUE_FOR_TASK_TYPE.get(task.type)
+            if queue_name is None:
+                logger.warning(
+                    "requeue_stuck_tasks: no queue for type %s (task %s)",
+                    task.type,
+                    task.id,
+                )
+                continue
+            # Тело сообщения — то же, что и в роутерах при первичной
+            # публикации (см. routers/documents._publish_task).
+            # model_dump(mode="json") сериализует UUID/datetime в строки,
+            # чтобы payload корректно лёг в JSONB и потом был
+            # десериализован воркером через TaskMessage.from_json.
+            message = TaskMessage(
+                task_id=task.id,
+                action=task.type,
+                payload=task.payload,
+            )
+            await outbox_repo.enqueue(
+                db,
+                exchange=None,  # default exchange, routing_key = queue_name
+                routing_key=queue_name,
+                payload=message.model_dump(mode="json"),
+            )
+
         await db.commit()
-        n = getattr(result, "rowcount", 0)
-        if n:
-            logger.warning("requeue_stuck_tasks: re-pending %s tasks", n)
-            # TODO: re-publish в RabbitMQ. Сейчас задача останется в
-            # pending до повторной публикации (можно через admin-скрипт
-            # или ручной POST). Не делаем здесь, потому что воркер
-            # должен сам поднять её повторно при опросе очереди —
-            # но опрос идёт только при наличии сообщения. Чисто это
-            # делается через outbox-pattern (этап на будущее).
+        logger.warning(
+            "requeue_stuck_tasks: re-queued %s tasks via outbox",
+            len(stuck),
+        )
+
+
+# Map task.type → RabbitMQ queue. Должен совпадать с константами в
+# routers/documents.py (DOCUMENT_TASK_QUEUE) и worker/main.py. Когда
+# появятся новые DB-backed типы задач, добавляем сюда; единая точка
+# изменения избавляет от рассыпанных строковых литералов.
+_QUEUE_FOR_TASK_TYPE: dict[str, str] = {
+    "generate_catalog": "document_task",
+    "generate_diploma": "document_task",
+    "generate_diplomas_batch": "document_task",
+}
 
 
 async def archive_old_classifieds() -> None:

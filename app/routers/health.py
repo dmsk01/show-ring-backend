@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,6 +103,24 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             "minio": minio_s,
         },
     }
+
+
+@router.get("/ready")
+async def readiness_probe(db: AsyncSession = Depends(get_db)):
+    """
+    Жёсткий readiness-probe для load balancer'ов: 503 если ЛЮБОЙ
+    критичный компонент down. Отдельно от /health, чтобы:
+    - /health показывал детальное состояние (для дашборда),
+    - /ready давал бинарное «можно/нельзя слать трафик» (для LB).
+
+    Что считается критичным: PG (без БД API не работает). Redis/Rabbit/
+    MinIO — некоторые эндпоинты деградируют без них, но базовая работа
+    есть; их падение НЕ должно выводить инстанс из ротации.
+    """
+    db_s = await _check_db(db)
+    if db_s != "ok":
+        raise HTTPException(status_code=503, detail={"db": db_s})
+    return {"status": "ready"}
 
 
 # Дев-эндпоинт для тестирования ErrorHandler — доступен только в debug.

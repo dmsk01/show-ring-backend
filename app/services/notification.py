@@ -17,29 +17,52 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import aio_pika
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.repositories import outbox as outbox_repo
 from app.schemas.notification import EventMessage
 from app.services.rabbit import rabbit_service
 
 logger = logging.getLogger(__name__)
 
 
-async def publish_event(event: EventMessage) -> None:
+async def publish_event(
+    event: EventMessage, db: AsyncSession | None = None
+) -> None:
     """
-    Публикует событие в Topic Exchange. Routing key уже в event'е —
-    подписчики ловят его по своему pattern (см. events_handler).
+    Публикует событие. Два режима:
 
-    Если RabbitMQ недоступен, не падаем — просто логируем warning.
-    Бизнес-операция (создание помёта, открытие регистрации) не должна
-    откатываться из-за того, что email-канал лежит.
+    1. Transactional outbox (если передан db): INSERT в outbox_events
+       в текущей транзакции. Воркер outbox-dispatcher (см.
+       worker/handlers/outbox_handler.py) подберёт и опубликует в Rabbit.
+       Гарантия «событие в БД ⇔ бизнес-операция прошла». Это правильный
+       prod-режим.
 
-    fire-and-forget: вызывающий код не ждёт результата, событие
-    "ушло — и забыли".
+    2. Direct publish (db=None) — legacy fire-and-forget путь. При
+       недоступном Rabbit событие просто теряется. Оставлен для мест,
+       где сессия БД недоступна (например, фоновые задачи воркеров).
+
+    Routing key уже в event'е — подписчики ловят его по своему pattern
+    (см. events_handler).
     """
+    if db is not None:
+        # Transactional outbox. enqueue без COMMIT — вызывающий код
+        # коммитит общую транзакцию.
+        await outbox_repo.enqueue(
+            db,
+            exchange=settings.exchange_topic,
+            routing_key=event.routing_key,
+            payload=json.loads(event.to_json()),
+        )
+        return
+
+    # Legacy direct-publish — fire-and-forget. На сбое Rabbit событие
+    # потеряется; для критичных операций используй db-вариант.
     if rabbit_service.channel is None:
         logger.warning(
             "Cannot publish event %s: RabbitMQ not connected",

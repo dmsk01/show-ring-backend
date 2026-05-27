@@ -17,6 +17,7 @@ from app.models.user import User
 from app.repositories import classified as repo
 from app.schemas.classified import (
     ClassifiedCreate,
+    ClassifiedImageCreate,
     ClassifiedPage,
     ClassifiedResponse,
     ClassifiedUpdate,
@@ -168,6 +169,36 @@ async def update_classified(
             requester_id=user.id,
             is_admin=_is_admin(user),
             fields=body.model_dump(exclude_unset=True),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
+@router.post(
+    "/{classified_id}/images",
+    response_model=ClassifiedResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Добавить изображения к объявлению",
+    description=(
+        "Привязывает уже загруженные файлы (file_id из POST /files/upload) "
+        "к существующему объявлению. Только автор/admin. На дубликат "
+        "пары (classified_id, file_id) БД вернёт ошибку — клиент должен "
+        "избегать повторов."
+    ),
+)
+async def add_images(
+    classified_id: uuid.UUID,
+    body: list[ClassifiedImageCreate],
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        return await svc.add_images(
+            db,
+            classified_id=classified_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+            images=[img.model_dump() for img in body],
         )
     except ValueError as e:
         _raise_for_error(e)

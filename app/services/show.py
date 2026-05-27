@@ -107,12 +107,12 @@ async def change_status(
         await _assign_catalog_numbers(db, show_id)
 
     obj.status = target
-    await db.commit()
-    await db.refresh(obj)
 
-    # Публикуем событие после успешного COMMIT'а, чтобы не разослать
-    # подписчикам сообщение про "открытие регистрации", если транзакция
-    # упала бы. fire-and-forget: ошибка publish не откатывает обновление.
+    # Публикуем событие ДО commit'а, через transactional outbox.
+    # INSERT в outbox_events идёт в той же транзакции, что и UPDATE
+    # status — гарантия "событие появилось ⇔ статус действительно
+    # изменился". Раньше publish был после commit (fire-and-forget),
+    # что могло терять события при падении Rabbit.
     if target == ShowStatus.registration_open:
         await notif_svc.publish_event(
             EventMessage(
@@ -131,7 +131,8 @@ async def change_status(
                         else None
                     ),
                 },
-            )
+            ),
+            db=db,
         )
     elif target == ShowStatus.completed:
         await notif_svc.publish_event(
@@ -145,9 +146,12 @@ async def change_status(
                     "date_start": obj.date_start.isoformat(),
                     "show_rank": "",
                 },
-            )
+            ),
+            db=db,
         )
 
+    await db.commit()
+    await db.refresh(obj)
     return obj
 
 
