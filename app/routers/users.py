@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
-from app.dependencies import get_current_user, require_any_role
+from app.dependencies import get_current_user
 from app.models.user import User
 from app.repositories.user import get_user_by_id, update_user
 from app.schemas.user import PublicUserResponse, UserResponse, UserUpdate
@@ -45,15 +45,12 @@ async def change_user_info(
     return UserResponse.model_validate(user)
 
 
-@router.get(
-    "/admin/list",
-    summary="Список пользователей (admin)",
-    description="Возвращает профиль текущего пользователя. Доступен только администраторам.",
-)
-async def list_users_admin(
-    current_user: User = Depends(require_any_role("admin")),
-):
-    return UserResponse.model_validate(current_user)
+# УДАЛЕНО (bug_009 ultrareview): эндпоинт /users/admin/list
+# назывался "Список пользователей (admin)", но возвращал ОДИН
+# UserResponse — профиль самого вызывающего admin'а. Misleading
+# название + redundant (полный список с пагинацией и ролями уже
+# есть в /admin/users из routers/admin/moderation.py). Удалён,
+# чтобы не плодить две точки правды и не путать клиентов API.
 
 
 @router.get(

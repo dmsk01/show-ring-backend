@@ -48,19 +48,52 @@ _HEADER = "Idempotency-Key"
 _IN_FLIGHT_TTL_SECONDS = 60
 
 
-def _cache_key(method: str, path: str, key: str, body_hash: str) -> str:
+def _caller_identity(request: Request) -> str:
     """
-    Полный кэш-ключ включает method+path — иначе клиент мог бы
-    «переиспользовать» ключ для разной операции и получить чужой ответ.
-    body_hash защищает от случая «тот же ключ, но другое тело» —
-    тогда ответ из кэша некорректен, лучше пропустить мимо.
+    Идентификатор вызывающего для namespace'а idempotency-ключей.
+    ИСПРАВЛЕНО (bug_018 ultrareview): без identity user B мог получить
+    cached-ответ user A (cache-hit короткозамыкает middleware до
+    Depends(get_current_user)), плюс auth bypass для replay
+    перехваченного ключа+тела.
+
+    Реализация:
+    - Если есть Authorization header — sha256(header). Хешируем,
+      чтобы JWT не лежал в Redis-ключах открытым (Redis MONITOR /
+      RDB-снапшоты не должны содержать токены).
+    - Анонимы — client IP. ProxyHeadersMiddleware (bug_012-фикс)
+      гарантирует, что IP корректный и не подделан.
+
+    Долгосрочно правильнее перенести Idempotency-логику в Depends
+    ПОСЛЕ get_current_user — там identity явно authenticated. Сейчас
+    минимальный fix в рамках middleware-архитектуры.
     """
-    return f"idem:{method}:{path}:{key}:{body_hash}"
+    auth = request.headers.get("authorization")
+    if auth:
+        return "u:" + hashlib.sha256(auth.encode("utf-8")).hexdigest()[:32]
+    if request.client is not None:
+        return "ip:" + request.client.host
+    return "anon"
 
 
-def _lock_key(method: str, path: str, key: str, body_hash: str) -> str:
-    """Ключ in-flight-локки, отдельно от кэша ответа."""
-    return f"idem:lock:{method}:{path}:{key}:{body_hash}"
+def _cache_key(
+    method: str, path: str, key: str, body_hash: str, identity: str
+) -> str:
+    """
+    Полный кэш-ключ включает identity, method, path и body_hash:
+    - identity — иначе разные пользователи делили бы кэш (см. bug_018);
+    - method+path — иначе клиент мог бы переиспользовать ключ для
+      разной операции и получить чужой ответ;
+    - body_hash — защищает от случая «тот же ключ, но другое тело»:
+      ответ из кэша не подходит, лучше пропустить мимо.
+    """
+    return f"idem:{identity}:{method}:{path}:{key}:{body_hash}"
+
+
+def _lock_key(
+    method: str, path: str, key: str, body_hash: str, identity: str
+) -> str:
+    """Ключ in-flight-локки, отдельно от кэша ответа; та же namespacing."""
+    return f"idem:lock:{identity}:{method}:{path}:{key}:{body_hash}"
 
 
 class IdempotencyMiddleware(BaseHTTPMiddleware):
@@ -78,8 +111,9 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         # чтение возможно.
         body = await request.body()
         body_hash = hashlib.sha256(body).hexdigest()
+        identity = _caller_identity(request)
         cache_key = _cache_key(
-            request.method, request.url.path, key, body_hash
+            request.method, request.url.path, key, body_hash, identity
         )
 
         # 1. Пробуем достать готовый ответ.
@@ -111,7 +145,7 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         # Без lock'а оба параллельных запроса дошли бы до handler'а
         # и сделали бы операцию дважды.
         lock_key = _lock_key(
-            request.method, request.url.path, key, body_hash
+            request.method, request.url.path, key, body_hash, identity
         )
         try:
             acquired = await redis_client.set(
@@ -134,8 +168,16 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             )
 
         # 3. Lock взят — выполняем запрос и сохраняем ответ.
-        # Body нужно перечитать downstream'ом; receive override
-        # позволяет это сделать.
+        # ИСПРАВЛЕНО (bug_001 ultrareview): подмены только `_receive`
+        # недостаточно — Starlette `_CachedRequest.wrapped_receive`
+        # возвращает кэшированный `_body` ДО обращения к `_receive`.
+        # В idempotency body не меняется (читаем — и оригинальное тело
+        # должно дойти до handler'а), но `_body` уже заполнен через
+        # `await request.body()` выше — фактически дубль присваивания.
+        # Закрепляем явно ради консистентности с sanitization.py и
+        # как защиту от регрессии при будущей правке.
+        request._body = body  # type: ignore[attr-defined]
+
         async def receive():
             return {"type": "http.request", "body": body, "more_body": False}
 

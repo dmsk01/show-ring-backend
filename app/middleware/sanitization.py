@@ -58,7 +58,18 @@ class SanitizationMiddleware(BaseHTTPMiddleware):
         sanitized = _sanitize(data)
         new_body = json.dumps(sanitized).encode("utf-8")
 
-        # переопределяем receive, чтобы downstream получил очищенное тело
+        # ИСПРАВЛЕНО (bug_001 ultrareview): подмены только `_receive`
+        # недостаточно. BaseHTTPMiddleware оборачивает request в
+        # _CachedRequest, чей `wrapped_receive` сначала проверяет
+        # `self._body` и возвращает кэш (заполненный нашим
+        # `await request.body()` выше), и только при отсутствии кэша
+        # обращается к `_receive`. Поэтому downstream получал ОРИГИНАЛЬНОЕ
+        # тело, а bleach.clean был молчаливым no-op.
+        # Перезаписываем _body — этим починили санитизацию вообще; replace
+        # _receive оставляем «belt-and-braces» для случая, если кто-то
+        # downstream вручную сбросит _body.
+        request._body = new_body  # type: ignore[attr-defined]
+
         async def receive():
             return {"type": "http.request", "body": new_body, "more_body": False}
 

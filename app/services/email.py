@@ -37,9 +37,22 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "email"
 # Jinja Environment кэширует шаблоны — переиспользуем один на процесс.
 # autoescape для html — защита от XSS, если в payload событий придёт
 # пользовательский контент.
+#
+# ИСПРАВЛЕНО (bug_011 ultrareview): без явного enabled_extensions
+# select_autoescape сверяет с дефолтом ('html','htm','xml'). Все наши
+# шаблоны named *.html.j2 — trailing extension `.j2` НЕ совпадает с
+# дефолтным списком, поэтому autoescape был молчаливо ВЫКЛЮЧЕН для
+# каждого письма, и organizer/breeder-контролируемые поля
+# (show_name, kennel_name, dog_name) шли сырыми в HTML подписчикам.
+# Включаем расширение 'j2' явно. Все шаблоны в templates/email/ —
+# HTML, escape unconditional безопасен.
 _env = Environment(
     loader=FileSystemLoader(str(_TEMPLATES_DIR)),
-    autoescape=select_autoescape(default_for_string=False, default=False),
+    autoescape=select_autoescape(
+        enabled_extensions=("html", "htm", "xml", "j2"),
+        default_for_string=False,
+        default=False,
+    ),
     enable_async=False,
     trim_blocks=True,
     lstrip_blocks=True,

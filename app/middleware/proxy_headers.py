@@ -73,10 +73,31 @@ class ProxyHeadersMiddleware(BaseHTTPMiddleware):
                     # X-Forwarded-For: "client, proxy1, proxy2".
                     # Клиент — первый в списке (leftmost).
                     real_ip = xff.split(",")[0].strip()
-                    # Подменяем scope. Порт сохраняем из исходного
-                    # request.client (port в XFF не передаётся).
-                    port = request.client.port if request.client else 0
-                    request.scope["client"] = (real_ip, port)
+                    # ИСПРАВЛЕНО (bug_012 ultrareview): валидируем,
+                    # что строка действительно IP. Без проверки:
+                    # - empty XFF (nginx misconfig с пустым
+                    #   $proxy_add_x_forwarded_for) → real_ip="" →
+                    #   rate-limit (rate:{ip}:{ep}) и ad-fraud
+                    #   dedup (ad_dedup:{banner}:{ip}:...) рушатся,
+                    #   все анонимы в одной корзине;
+                    # - nginx по умолчанию APPENDS XFF, не replaces;
+                    #   client-controlled значение проходит как
+                    #   leftmost token, давая rate-limit bypass
+                    #   ротацией XFF на /auth/login.
+                    # Симметрия с _is_trusted_peer, где такая же
+                    # валидация уже есть.
+                    try:
+                        ipaddress.ip_address(real_ip)
+                    except ValueError:
+                        logger.warning(
+                            "Trusted proxy %s sent malformed XFF %r",
+                            peer, xff,
+                        )
+                    else:
+                        # Подменяем scope. Порт сохраняем из исходного
+                        # request.client (port в XFF не передаётся).
+                        port = request.client.port if request.client else 0
+                        request.scope["client"] = (real_ip, port)
                 # X-Forwarded-Proto для корректного scheme в HTTPS-режиме
                 # за reverse-proxy. Без этого request.url.scheme='http'
                 # даже когда клиент пришёл по HTTPS.

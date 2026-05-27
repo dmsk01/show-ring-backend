@@ -270,6 +270,15 @@ async def set_best_of_breed(
 
     # Снимаем флаги BOB/best_male/best_female/best_junior/best_veteran
     # с прежних победителей в этой породе (если кто-то был).
+    #
+    # ИСПРАВЛЕНО (bug_019 ultrareview): при re-election BOB ex-winner
+    # сохранял флаги is_best_in_group и is_best_in_show, потому что
+    # этот reset их не трогал. Дальше set_best_in_group искал prev
+    # BIG-winner'ов через `is_best_of_breed=True` — ex-BOB (теперь
+    # False) в выборку не попадал, и его BIG-флаг оставался навсегда.
+    # Аналогично — для BIS через is_best_in_group.
+    # Каскадом снимаем все ancestor-флаги, иначе ломается инвариант
+    # BIS ⊆ BIG ⊆ BOB → дубли в analytics, PDF-каталоге, дашборде.
     existing = await repo.list_results_by_breed(db, show_id, breed_id)
     for r in existing:
         r.is_best_of_breed = False
@@ -277,6 +286,8 @@ async def set_best_of_breed(
         r.is_best_female = False
         r.is_best_junior = False
         r.is_best_veteran = False
+        r.is_best_in_group = False
+        r.is_best_in_show = False
 
     # Утилита для проставления флага одной записи.
     async def _set_flag_on(entry_id: uuid.UUID, attr: str) -> ShowResult:
@@ -364,9 +375,17 @@ async def set_best_in_group(
         raise ValueError("forbidden")
 
     # Снимаем флаг BIG с предыдущих победителей этой группы.
+    # ИСПРАВЛЕНО (bug_019 ultrareview): также сбрасываем
+    # is_best_in_show — иначе при re-election BIG ex-winner сохранял
+    # BIS-флаг, и инвариант BIS ⊆ BIG ломался.
+    # NB: list_results_by_group фильтрует по is_best_of_breed=True;
+    # если ex-BIG уже потерял BOB (через set_best_of_breed выше),
+    # его BIG-флаг сбрасывается там же — здесь рассчитываем на
+    # «обычный» сценарий, когда BOB не менялся.
     prev = await repo.list_results_by_group(db, show_id, breed_group_id)
     for r in prev:
         r.is_best_in_group = False
+        r.is_best_in_show = False
 
     ctx = await repo.get_entry_context(db, winner_entry_id)
     if ctx is None:
