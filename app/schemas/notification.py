@@ -92,6 +92,12 @@ class EventMessage(BaseModel):
     payload, формирует subject/body email'а через Jinja2-шаблон.
     """
 
+    # bug_230 audit 2026-05-28: event_id — идемпотентный ключ события.
+    # Генерится в момент публикации; при retry/redelivery остаётся тем
+    # же (он лежит в payload, который не меняется). events_handler
+    # использует его как часть per-recipient message_id, чтобы
+    # повторная обработка того же event не плодила дубли Notification.
+    event_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     event_type: str
     routing_key: str
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -124,6 +130,11 @@ class EmailTaskMessage(BaseModel):
     """
 
     notification_id: uuid.UUID
+    # bug_230 audit 2026-05-28: per-recipient идемпотентный ключ.
+    # Должен совпадать с Notification.message_id. email_handler
+    # дополнительно проверяет статус уведомления и не отправляет
+    # дубликат, если RabbitMQ повторно доставил task.
+    message_id: uuid.UUID
     to_email: str
     subject: str
     html_body: str

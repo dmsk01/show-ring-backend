@@ -149,8 +149,23 @@ class Notification(Base):
 
     __tablename__ = "notifications"
 
+    __table_args__ = (
+        # bug_230 audit 2026-05-28: UNIQUE на message_id — защита от
+        # двойной обработки одного события. events_handler формирует
+        # message_id = uuid5(event_id, user_id), при повторной доставке
+        # RabbitMQ INSERT упадёт с IntegrityError → пропускаем как
+        # «уже отправлено».
+        UniqueConstraint("message_id", name="uq_notifications_message_id"),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # message_id — детерминированный per-recipient идемпотентный ключ.
+    # nullable=True для исторических строк, созданных до миграции; всё
+    # новое заполняется в events_handler.
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

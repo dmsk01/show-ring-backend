@@ -24,11 +24,17 @@ import logging
 import uuid
 
 import aio_pika
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.notification import NotificationChannel
+from app.models.notification import (
+    Notification,
+    NotificationChannel,
+    NotificationStatus,
+)
 from app.repositories import notification as notif_repo
+from app.repositories import outbox as outbox_repo
 from app.schemas.notification import EmailTaskMessage, EventMessage
 from app.services.email import render_email
 
@@ -36,6 +42,19 @@ logger = logging.getLogger(__name__)
 
 
 EMAIL_TASK_QUEUE = "email_tasks"
+
+
+def _recipient_message_id(
+    event_id: uuid.UUID, user_id: uuid.UUID
+) -> uuid.UUID:
+    """
+    bug_230 audit 2026-05-28: детерминированный idempotency-ключ на
+    пару (event, user). uuid5(NAMESPACE_OID, "<event_id>:<user_id>")
+    выдаёт один и тот же uuid при любом числе повторных вызовов —
+    идеально для UNIQUE-индекса. NAMESPACE_OID — стандартный namespace
+    из RFC 4122; выбор не принципиален, важна стабильность.
+    """
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"{event_id}:{user_id}")
 
 
 def _safe_uuid(value) -> uuid.UUID | None:
@@ -53,7 +72,28 @@ async def process_event(
     channel: aio_pika.abc.AbstractChannel,
     body: str,
 ) -> None:
-    """Точка входа: один event → N писем подписчикам."""
+    """
+    Точка входа: один event → N писем подписчикам.
+
+    ИСПРАВЛЕНО (bug_231 audit 2026-05-28): раньше Notification
+    коммитился, потом отдельным шагом публиковался email_task в Rabbit.
+    При краше воркера между commit и publish уведомление висело pending
+    навсегда — письмо не уходило. Теперь Notification и outbox-event
+    кладутся в БД в одной транзакции; outbox-publisher выталкивает
+    email_task в очередь с гарантией at-least-once.
+
+    ИСПРАВЛЕНО (bug_230 audit 2026-05-28): per-recipient message_id
+    (uuid5 от event_id+user_id) с UNIQUE-constraint защищает от
+    дублей при redelivery события. На второй обработке INSERT падает
+    с IntegrityError → подписчик пропускается; events_handler
+    идемпотентен.
+
+    Параметр `channel` оставлен в подписи ради обратной совместимости
+    с worker/main.py — теперь не используется (publish идёт через
+    outbox dispatcher). Удаление — отдельный рефакторинг.
+    """
+    _ = channel  # сохраняем сигнатуру; publish теперь через outbox
+
     event = EventMessage.from_json(body)
     payload = event.payload
 
@@ -81,44 +121,64 @@ async def process_event(
     # должен лежать файл templates/email/litter.announced.html.j2.
     template_name = event.event_type
 
-    # Декларируем очередь email_tasks один раз. durable=True — переживёт
-    # рестарт RabbitMQ; persistent сообщения уцелеют.
-    queue = await channel.declare_queue(EMAIL_TASK_QUEUE, durable=True)
-
+    dispatched = 0
+    skipped_duplicate = 0
     for sub, user in subscribers:
+        msg_id = _recipient_message_id(event.event_id, user.id)
         subject, html_body, text_body = render_email(template_name, payload)
-        # Notification создаём ДО публикации в очередь, чтобы email-воркер
-        # знал, какой статус апдейтить.
-        notif = await notif_repo.create_notification(
-            db,
-            user_id=user.id,
-            event_type=event.event_type,
-            channel=NotificationChannel.email,
-            subject=subject,
-        )
-        email_msg = EmailTaskMessage(
-            notification_id=notif.id,
-            to_email=user.email,
-            subject=subject,
-            html_body=html_body,
-            text_body=text_body,
-        )
-        await channel.default_exchange.publish(
-            aio_pika.Message(
-                body=email_msg.to_json().encode(),
-                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                content_type="application/json",
-            ),
-            routing_key=queue.name,
-        )
-        # sub переменная используется как ссылка для возможной аналитики
-        # в будущем ("какая подписка вызвала рассылку"); сейчас не нужна.
+
+        # Per-subscriber commit. Если краш между двумя подписчиками,
+        # уже зафиксированные не теряются, а необработанные подберутся
+        # при redelivery RabbitMQ — UNIQUE на message_id защитит уже
+        # отправленных от повторного создания.
+        try:
+            notif = Notification(
+                user_id=user.id,
+                event_type=event.event_type,
+                channel=NotificationChannel.email,
+                subject=subject,
+                status=NotificationStatus.pending,
+                message_id=msg_id,
+            )
+            db.add(notif)
+            await db.flush()  # вытащить notif.id для outbox payload
+
+            email_msg = EmailTaskMessage(
+                notification_id=notif.id,
+                message_id=msg_id,
+                to_email=user.email,
+                subject=subject,
+                html_body=html_body,
+                text_body=text_body,
+            )
+            # bug_231: outbox-enqueue в той же транзакции, что и
+            # Notification → атомарность «уведомление создано ⇔
+            # задача на отправку зарегистрирована».
+            await outbox_repo.enqueue(
+                db,
+                exchange=None,  # default exchange → routing_key=queue
+                routing_key=EMAIL_TASK_QUEUE,
+                payload=email_msg.model_dump(mode="json"),
+            )
+            await db.commit()
+            dispatched += 1
+        except IntegrityError:
+            # bug_230: UNIQUE на message_id поймал повторную обработку
+            # этого же (event, user). Это нормальный путь redelivery —
+            # просто пропускаем, не считаем за ошибку.
+            await db.rollback()
+            skipped_duplicate += 1
+            logger.debug(
+                "Skipping duplicate notification: event=%s user=%s",
+                event.event_id, user.id,
+            )
+        # sub переменная не используется — на будущее (аналитика
+        # «какая подписка вызвала рассылку»).
         _ = sub
 
     logger.info(
-        "Event %s dispatched to %d subscriber(s)",
-        event.event_type,
-        len(subscribers),
+        "Event %s dispatched: %d new, %d duplicate-skipped",
+        event.event_type, dispatched, skipped_duplicate,
     )
 
 

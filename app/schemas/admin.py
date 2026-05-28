@@ -8,7 +8,7 @@ Pydantic-модели сделаны фигурой dict-to-schema без from_a
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -38,6 +38,10 @@ class DashboardStats(BaseModel):
     active_classifieds: int
     total_litters: int
     active_campaigns: int
+    # bug_226 audit 2026-05-28: момент пересчёта значений. Клиент видит,
+    # что цифры могут отставать до 5 минут (TTL кеша). При cache miss
+    # last_updated_at ≈ «сейчас», при hit — момент предыдущего SELECT'а.
+    last_updated_at: datetime
 
 
 # ---------------------------------------------------------------------

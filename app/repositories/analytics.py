@@ -12,11 +12,28 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app import redis as redis_module
+
+logger = logging.getLogger(__name__)
+
+
+# bug_226 audit 2026-05-28: dashboard делает 10 параллельных COUNT(*)
+# без WHERE по большим таблицам. На 100k+ строк каждый — 1-2 сек, в
+# сумме 10-20 сек на каждое открытие админки. Кеш на 5 минут даёт
+# приемлемую «свежесть» (это аналитика, не realtime) и отрезает
+# 99% запросов от БД. Версия v1 в ключе — на случай, когда форма
+# ответа изменится (добавим поле): достаточно сменить v1→v2, и
+# старый кеш протухнет (TTL — fallback).
+DASHBOARD_CACHE_KEY = "analytics:dashboard:v1"
+DASHBOARD_CACHE_TTL_SECONDS = 5 * 60
 
 
 # ---------------------------------------------------------------------
@@ -44,9 +61,49 @@ DASHBOARD_SQL = text(
 
 
 async def dashboard(db: AsyncSession) -> dict:
-    """Сводка платформы — одной строкой."""
+    """
+    Сводка платформы — одной строкой.
+
+    Кеш Redis: TTL 5 минут, ключ `analytics:dashboard:v1`. При hit'е
+    SELECT не выполняется. При miss'е делаем запрос и сохраняем
+    результат с last_updated_at — клиент видит, насколько свежи цифры.
+
+    Fail-open на Redis: если кеш недоступен (нет redis_client или
+    Redis отвалился), просто идём в БД без кеша. Это аналитика, не
+    идемпотентный платёж — лишнее обращение к PG не ломает корректность,
+    только просаживает SLA на одну запросу.
+    """
+    rc = redis_module.redis_client
+
+    if rc is not None:
+        try:
+            cached = await rc.get(DASHBOARD_CACHE_KEY)
+            if cached:
+                return json.loads(cached)
+        except Exception:  # noqa: BLE001 — Redis может быть в плохом состоянии
+            logger.warning(
+                "Redis GET failed for dashboard cache", exc_info=True
+            )
+
     row = (await db.execute(DASHBOARD_SQL)).mappings().one()
-    return dict(row)
+    result = dict(row)
+    # ISO-string, потому что json не сериализует datetime; pydantic
+    # на стороне роутера сам распарсит обратно в datetime.
+    result["last_updated_at"] = datetime.utcnow().isoformat()
+
+    if rc is not None:
+        try:
+            await rc.set(
+                DASHBOARD_CACHE_KEY,
+                json.dumps(result),
+                ex=DASHBOARD_CACHE_TTL_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Redis SET failed for dashboard cache", exc_info=True
+            )
+
+    return result
 
 
 # ---------------------------------------------------------------------

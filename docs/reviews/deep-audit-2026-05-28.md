@@ -25,9 +25,9 @@ Business+Security) + ручной обход middleware, миграций, ко�
   re-election'ы оставляют stale-флаги без `SELECT ... FOR UPDATE`
 - [x] **bug_210** — Classified `status` mass-assignable через PUT
   без валидации state machine transition
-- [ ] **bug_230** — Email handler не идемпотентен: повторная доставка
+- [x] **bug_230** — Email handler не идемпотентен: повторная доставка
   RabbitMQ-сообщения дублирует Notification и SMTP-отправку
-- [ ] **bug_231** — Events handler создаёт Notification + публикует
+- [x] **bug_231** — Events handler создаёт Notification + публикует
   email_task в разных шагах: краш между ними = потерянное письмо
 - [x] **bug_232** — Outbox batch commit-after-publish: при сбое
   посреди батча #5 ломает атомарность всего #1..#N
@@ -53,7 +53,7 @@ Business+Security) + ручной обход middleware, миграций, ко�
   на десятках тысяч баннеров
 - [x] **bug_225** — Pool config дефолтный (5+10): на 10+ конкурентных
   запросах вылетит "QueuePool limit exceeded"
-- [ ] **bug_226** — Dashboard `COUNT(*)` без WHERE по 5+ таблицам:
+- [x] **bug_226** — Dashboard `COUNT(*)` без WHERE по 5+ таблицам:
   на 100k+ записей запрос становится секундами
 - [x] **bug_234** — PDF-handler не cap'ает `attempts`: poison message
   крутится в очереди вечно

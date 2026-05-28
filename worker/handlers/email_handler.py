@@ -12,6 +12,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.notification import Notification, NotificationStatus
 from app.repositories import notification as notif_repo
 from app.schemas.notification import EmailTaskMessage
 from app.services.email import send_email
@@ -27,8 +28,30 @@ async def process_email_task(db: AsyncSession, body: str) -> None:
     при requeue=False не отправит сообщение снова — это сознательное
     решение: стабильная ошибка (битый домен, неверный SMTP-конфиг) не
     должна крутиться в очереди вечно.
+
+    ИСПРАВЛЕНО (bug_230 audit 2026-05-28): перед send_email
+    проверяем статус Notification. Если уведомление уже sent — это
+    повторная доставка RabbitMQ (worker крашнулся после send_email,
+    но до ack, либо outbox-publisher продублировал). Тихо завершаем —
+    письмо ушло один раз, дубля не будет.
     """
     msg = EmailTaskMessage.from_json(body)
+
+    notif = await db.get(Notification, msg.notification_id)
+    if notif is None:
+        # Notification удалили (cleanup?) или ID битый — нечего апдейтить.
+        logger.warning(
+            "Email task references unknown notification %s — skipping",
+            msg.notification_id,
+        )
+        return
+    if notif.status == NotificationStatus.sent:
+        logger.info(
+            "Notification %s already sent — idempotent skip",
+            msg.notification_id,
+        )
+        return
+
     try:
         await send_email(
             to_email=msg.to_email,
