@@ -43,12 +43,21 @@ async def dispatch_once(
     publish_channel: aio_pika.abc.AbstractChannel,
 ) -> int:
     """
-    Один проход dispatcher'а. Возвращает число обработанных событий
-    (sent + failed + remaining_pending). Используется для метрик/логов.
+    Один проход dispatcher'а. Возвращает число событий, успешно
+    отправленных (sent) в этой итерации.
 
-    Каждое событие коммитится отдельно после успешного publish —
-    иначе при крэше посередине пачки кусок остался бы залоченным
-    SKIP LOCKED'ом до конца транзакции.
+    ИСПРАВЛЕНО (bug_232 audit 2026-05-28): commit ПОСЛЕ КАЖДОГО
+    успешного publish. Раньше был один commit в конце пачки — если
+    что-то падало посреди (publish #5 крашится с BaseException, либо
+    сам mark_sent кидает DB-ошибку), то события #1..#4 уже улетели
+    в RabbitMQ, а их статус в БД оставался pending → следующий тик
+    выбирал и публиковал их повторно. Per-event commit ограничивает
+    окно «published-но-не-marked-sent» одним событием за раз.
+
+    Trade-off: после первого commit'а FOR UPDATE-локи на оставшихся
+    строках в пачке освобождаются, и другой воркер может подхватить
+    те же события. Двойной publish обрабатывается на уровне consumer'а
+    (см. bug_230 — идемпотентность по message_id).
     """
     events = await outbox_repo.fetch_pending(db, limit=BATCH_SIZE)
     if not events:
@@ -58,22 +67,36 @@ async def dispatch_once(
 
     sent = 0
     for ev in events:
+        # Снимок полей: после rollback ORM-объект остаётся «живым»
+        # благодаря expire_on_commit=False, но привычка хранить
+        # значения локально защищает от изменения сценария в будущем.
+        ev_id = ev.id
+        ev_attempts = ev.attempts
         try:
             await _publish(publish_channel, ev)
-        except Exception as e:  # noqa: BLE001 — оставляем pending для retry
+            await outbox_repo.mark_sent(db, ev_id)
+            await db.commit()
+            sent += 1
+        except Exception as e:  # noqa: BLE001 — изоляция падений одного события
+            await db.rollback()
             logger.warning(
                 "Outbox publish failed for %s (attempt %d): %s",
-                ev.id, ev.attempts + 1, e,
+                ev_id, ev_attempts + 1, e,
             )
-            if ev.attempts + 1 >= MAX_ATTEMPTS:
-                await outbox_repo.mark_failed(db, ev.id, str(e))
-            else:
-                await outbox_repo.increment_attempts(db, ev.id, str(e))
-            continue
-        await outbox_repo.mark_sent(db, ev.id)
-        sent += 1
-    # Один commit на всю пачку — освобождает SKIP LOCKED-локки.
-    await db.commit()
+            # Бухгалтерия неудачи — отдельная транзакция, чтобы её
+            # сбой не подавил предыдущий exception в логах.
+            try:
+                if ev_attempts + 1 >= MAX_ATTEMPTS:
+                    await outbox_repo.mark_failed(db, ev_id, str(e))
+                else:
+                    await outbox_repo.increment_attempts(db, ev_id, str(e))
+                await db.commit()
+            except Exception:  # noqa: BLE001 — последний рубеж
+                await db.rollback()
+                logger.exception(
+                    "Outbox failure-bookkeeping itself failed for %s",
+                    ev_id,
+                )
     return sent
 
 

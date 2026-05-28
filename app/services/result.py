@@ -279,7 +279,16 @@ async def set_best_of_breed(
     # Аналогично — для BIS через is_best_in_group.
     # Каскадом снимаем все ancestor-флаги, иначе ломается инвариант
     # BIS ⊆ BIG ⊆ BOB → дубли в analytics, PDF-каталоге, дашборде.
-    existing = await repo.list_results_by_breed(db, show_id, breed_id)
+    #
+    # ИСПРАВЛЕНО (bug_209 audit 2026-05-28): for_update=True добавляет
+    # SELECT … FOR UPDATE OF show_results. Без этого два параллельных
+    # PUT BOB на одну породу читали один и тот же набор ex-победителей,
+    # каждый писал нового → один из сбросов терялся, оставалось два
+    # BOB-флага. Лок держится до db.commit() ниже — критическая секция
+    # сериализована по этой выборке (по сути, по паре show_id+breed_id).
+    existing = await repo.list_results_by_breed(
+        db, show_id, breed_id, for_update=True
+    )
     for r in existing:
         r.is_best_of_breed = False
         r.is_best_male = False
@@ -382,7 +391,11 @@ async def set_best_in_group(
     # если ex-BIG уже потерял BOB (через set_best_of_breed выше),
     # его BIG-флаг сбрасывается там же — здесь рассчитываем на
     # «обычный» сценарий, когда BOB не менялся.
-    prev = await repo.list_results_by_group(db, show_id, breed_group_id)
+    # ИСПРАВЛЕНО (bug_209 audit 2026-05-28): for_update=True — лок до
+    # commit'а сериализует параллельные set_best_in_group по одной группе.
+    prev = await repo.list_results_by_group(
+        db, show_id, breed_group_id, for_update=True
+    )
     for r in prev:
         r.is_best_in_group = False
         r.is_best_in_show = False
@@ -438,7 +451,11 @@ async def set_best_in_show(
         raise ValueError("forbidden")
 
     # Снимаем BIS с предыдущего победителя выставки.
-    prev = await repo.list_bob_results_for_show(db, show_id)
+    # ИСПРАВЛЕНО (bug_209 audit 2026-05-28): for_update=True для
+    # сериализации параллельных set_best_in_show на одной выставке.
+    prev = await repo.list_bob_results_for_show(
+        db, show_id, for_update=True
+    )
     for r in prev:
         r.is_best_in_show = False
 

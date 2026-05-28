@@ -37,6 +37,11 @@ def _raise_for_error(err: ValueError) -> None:
         raise HTTPException(404, code)
     if code == "forbidden":
         raise HTTPException(403, code)
+    # bug_210: специальный код для запрещённого перехода статуса —
+    # 422 (unprocessable), а не 400, потому что это semantic validation
+    # ошибка, а не malformed input.
+    if code == "status_transition_forbidden":
+        raise HTTPException(422, code)
     raise HTTPException(400, code)
 
 

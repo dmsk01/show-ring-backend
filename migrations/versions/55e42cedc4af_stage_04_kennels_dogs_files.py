@@ -149,3 +149,8 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_files_uploaded_by'), table_name='files')
     op.drop_table('files')
     # ### end Alembic commands ###
+    # ДОПОЛНЕНО ВРУЧНУЮ (bug_243 audit 2026-05-28): SQLAlchemy.Enum в
+    # PostgreSQL создаёт отдельный TYPE 'sexenum', который автогенератор
+    # Alembic в downgrade не убирает. Без явного drop повторный upgrade
+    # упадёт: "type already exists".
+    sa.Enum(name='sexenum').drop(op.get_bind(), checkfirst=True)

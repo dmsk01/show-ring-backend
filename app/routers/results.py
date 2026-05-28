@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.models.show import ShowEntry
 from app.models.user import User
 from app.repositories import result as repo
 from app.schemas.result import (
@@ -105,7 +106,7 @@ async def upsert_result(
     summary="Скорректировать результат",
 )
 async def update_result(
-    show_id: uuid.UUID,  # noqa: ARG001
+    show_id: uuid.UUID,
     result_id: uuid.UUID,
     body: ShowResultUpdate,
     db: AsyncSession = Depends(get_db),
@@ -115,6 +116,17 @@ async def update_result(
     # result_id.
     result = await repo.get_result(db, result_id)
     if result is None:
+        raise HTTPException(404, "result_not_found")
+    # ИСПРАВЛЕНО (bug_208 audit 2026-05-28): без этой проверки URL
+    # `/shows/X/results/<result_из_Y>` шёл на upsert_class_result, который
+    # выбирал show из entry (т.е. Y), а URL-параметр show_id оставался
+    # декоративным. Атакующий-судья выставки Y мог дёрнуть эндпоинт с
+    # любым show_id в URL и обойти любые middleware-проверки/политики,
+    # завязанные на URL-pattern. Сравниваем entry.show_id с URL-значением,
+    # отдаём 404 (не 403, чтобы не раскрывать факт существования result'а
+    # в чужой выставке).
+    entry = await db.get(ShowEntry, result.show_entry_id)
+    if entry is None or entry.show_id != show_id:
         raise HTTPException(404, "result_not_found")
     try:
         return await svc.upsert_class_result(

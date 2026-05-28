@@ -70,3 +70,9 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_support_tickets_assigned_to_id'), table_name='support_tickets')
     op.drop_table('support_tickets')
     # ### end Alembic commands ###
+    # ДОПОЛНЕНО ВРУЧНУЮ (bug_243 audit 2026-05-28): SQLAlchemy.Enum
+    # создаёт PostgreSQL TYPE-ы, которые Alembic в downgrade сам не
+    # удаляет. Без этих drop'ов повторный upgrade упадёт с
+    # "type already exists".
+    sa.Enum(name='ticketstatus').drop(op.get_bind(), checkfirst=True)
+    sa.Enum(name='ticketpriority').drop(op.get_bind(), checkfirst=True)

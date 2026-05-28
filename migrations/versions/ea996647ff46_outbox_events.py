@@ -47,3 +47,6 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_outbox_events_created_at'), table_name='outbox_events')
     op.drop_table('outbox_events')
     # ### end Alembic commands ###
+    # ДОПОЛНЕНО ВРУЧНУЮ (bug_243 audit 2026-05-28): без drop'а TYPE
+    # 'outboxstatus' повторный upgrade упадёт с "type already exists".
+    sa.Enum(name='outboxstatus').drop(op.get_bind(), checkfirst=True)

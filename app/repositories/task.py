@@ -67,31 +67,52 @@ async def claim_task(
 
 async def mark_done(
     db: AsyncSession, task_id: uuid.UUID, result_payload: dict
-) -> None:
-    """Перевод в терминальный статус done. result сохраняем целиком."""
+) -> bool:
+    """
+    Перевод в терминальный статус done. result сохраняем целиком.
+
+    ИСПРАВЛЕНО (bug_233 audit 2026-05-28): UPDATE с условием
+    `status = processing` — только воркер, удержавший claim, может
+    перевести задачу в done. Если два воркера случайно подхватили
+    одну (split-brain pool/двойной consume) — второй mark_done
+    отлетит без затирания результата первого. Возвращаем bool, чтобы
+    воркер мог залогировать warning при rowcount=0.
+    """
     stmt = (
         update(Task)
-        .where(Task.id == task_id)
+        .where(
+            Task.id == task_id,
+            Task.status == TaskStatusEnum.processing,
+        )
         .values(status=TaskStatusEnum.done, result=result_payload)
     )
-    await db.execute(stmt)
+    result = await db.execute(stmt)
     await db.commit()
+    return getattr(result, "rowcount", 0) == 1
 
 
 async def mark_failed(
     db: AsyncSession, task_id: uuid.UUID, error: str
-) -> None:
+) -> bool:
     """
     Перевод в failed. error усечён до 2000 символов — длинные стектрейсы
     лучше писать в логи, а в БД хранить причину.
+
+    ИСПРАВЛЕНО (bug_233 audit 2026-05-28): такой же гард по
+    `status = processing`, что и в mark_done — иначе fail с retry
+    мог затереть уже успешный результат другого воркера.
     """
     stmt = (
         update(Task)
-        .where(Task.id == task_id)
+        .where(
+            Task.id == task_id,
+            Task.status == TaskStatusEnum.processing,
+        )
         .values(
             status=TaskStatusEnum.failed,
             result={"error": error[:2000]},
         )
     )
-    await db.execute(stmt)
+    result = await db.execute(stmt)
     await db.commit()
+    return getattr(result, "rowcount", 0) == 1

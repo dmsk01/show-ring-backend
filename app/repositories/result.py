@@ -86,10 +86,17 @@ async def list_results_by_breed(
     db: AsyncSession,
     show_id: uuid.UUID,
     breed_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> Sequence[ShowResult]:
     """
     Результаты в породе. Используется для определения ЛК/ЛС/ЛПП — там
     нужны CW по классам этой породы.
+
+    for_update=True добавляет SELECT … FOR UPDATE OF show_results —
+    нужно сервису при re-election BoB, чтобы два параллельных PUT'а на
+    одну породу не теряли каскадный reset флагов (bug_209). Обычные
+    листинги читаются без лока.
     """
     stmt = (
         select(ShowResult)
@@ -101,6 +108,10 @@ async def list_results_by_breed(
             ShowResult.placement.asc().nullslast(),
         )
     )
+    if for_update:
+        # of=ShowResult — лочим только row-и результатов, а не
+        # подтянутые JOIN'ом dog/breed/entry (избыточная блокировка).
+        stmt = stmt.with_for_update(of=ShowResult)
     return (await db.execute(stmt)).scalars().all()
 
 
@@ -108,9 +119,14 @@ async def list_results_by_group(
     db: AsyncSession,
     show_id: uuid.UUID,
     breed_group_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> Sequence[ShowResult]:
     """
     Все BOB по породам этой группы. Используется для определения BIG.
+
+    for_update=True — для bug_209: критическая секция set_best_in_group
+    сериализуется по показателю «BoB-результаты этой группы».
     """
     stmt = (
         select(ShowResult)
@@ -123,13 +139,22 @@ async def list_results_by_group(
             ShowResult.is_best_of_breed.is_(True),
         )
     )
+    if for_update:
+        stmt = stmt.with_for_update(of=ShowResult)
     return (await db.execute(stmt)).scalars().all()
 
 
 async def list_bob_results_for_show(
-    db: AsyncSession, show_id: uuid.UUID
+    db: AsyncSession,
+    show_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> Sequence[ShowResult]:
-    """Все BOB выставки — кандидаты на BIS (через BIG)."""
+    """Все BOB выставки — кандидаты на BIS (через BIG).
+
+    for_update=True — для bug_209: set_best_in_show при параллельных
+    вызовах должен сериализоваться по набору BIG-победителей.
+    """
     stmt = (
         select(ShowResult)
         .join(ShowEntry, ShowEntry.id == ShowResult.show_entry_id)
@@ -138,6 +163,8 @@ async def list_bob_results_for_show(
             ShowResult.is_best_in_group.is_(True),
         )
     )
+    if for_update:
+        stmt = stmt.with_for_update(of=ShowResult)
     return (await db.execute(stmt)).scalars().all()
 
 

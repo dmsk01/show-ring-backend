@@ -69,12 +69,25 @@ async def process_document_task(
             raise ValueError(f"unknown task type: {task.type}")
     except Exception as e:  # noqa: BLE001 — последняя черта обороны воркера
         logger.exception("Task %s failed", task_id)
-        await task_repo.mark_failed(db, task_id, str(e))
+        # mark_failed теперь возвращает bool: False означает, что задача
+        # уже не в processing (другой воркер опередил или ручной apgrade).
+        # Просто логируем — в любом случае работать дальше нечего.
+        if not await task_repo.mark_failed(db, task_id, str(e)):
+            logger.warning(
+                "Task %s no longer in processing during mark_failed",
+                task_id,
+            )
         return
 
-    await task_repo.mark_done(
-        db, task_id, {"file_id": str(file_id)}
-    )
+    # bug_233 audit: mark_done теперь возвращает False, если другой
+    # воркер успел перевести задачу из processing раньше. Логируем
+    # warning — это сигнал о двойном consume (split-brain pool).
+    if not await task_repo.mark_done(db, task_id, {"file_id": str(file_id)}):
+        logger.warning(
+            "Task %s no longer in processing during mark_done — "
+            "possible duplicate consume; result file_id=%s not recorded",
+            task_id, file_id,
+        )
 
 
 # ---------------------------------------------------------------------

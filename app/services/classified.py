@@ -30,6 +30,39 @@ async def _check_owner(
         raise ValueError("forbidden")
 
 
+# ИСПРАВЛЕНО (bug_210 audit 2026-05-28): без этой проверки клиент мог
+# через PUT /classifieds/{id} с body {"status": "active"} откатить
+# закрытое или находящееся на модерации объявление обратно в active,
+# минуя поток admin-модерации (/admin/moderation/classifieds/{id}).
+# Архитектурное решение: пользователь сам управляет только парой
+# active <-> closed (выложить / снять с продажи); смена в moderation
+# и archived — прерогатива модератора/scheduler'а.
+_USER_STATUS_TRANSITIONS: dict[ClassifiedStatus, set[ClassifiedStatus]] = {
+    ClassifiedStatus.active: {ClassifiedStatus.closed},
+    ClassifiedStatus.closed: {ClassifiedStatus.active},
+    # moderation / archived — терминальные для пользовательских PUT'ов
+    ClassifiedStatus.moderation: set(),
+    ClassifiedStatus.archived: set(),
+}
+
+
+def _validate_status_transition(
+    old: ClassifiedStatus,
+    new: ClassifiedStatus,
+    is_admin: bool,
+) -> None:
+    """
+    Разрешает только безопасные переходы для обычного автора. Админ
+    может ставить любой статус (нужен для модерации/восстановления).
+    no-op при old == new — клиент мог прислать текущий статус.
+    """
+    if is_admin or old == new:
+        return
+    allowed = _USER_STATUS_TRANSITIONS.get(old, set())
+    if new not in allowed:
+        raise ValueError("status_transition_forbidden")
+
+
 async def create_classified(
     db: AsyncSession,
     author_id: uuid.UUID,
@@ -76,6 +109,14 @@ async def update_classified(
     if obj is None:
         raise ValueError("not_found")
     await _check_owner(obj, requester_id, is_admin)
+
+    # bug_210: смена статуса — отдельная политика. Проверяем ДО setattr,
+    # чтобы не запачкать ORM-объект промежуточным новым значением (в
+    # сессии expire_on_commit=False, и при rollback пришлось бы вручную
+    # рефрешить).
+    new_status = fields.get("status")
+    if new_status is not None:
+        _validate_status_transition(obj.status, new_status, is_admin)
 
     for k, v in fields.items():
         setattr(obj, k, v)
