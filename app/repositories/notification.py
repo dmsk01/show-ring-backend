@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Sequence
 
 from sqlalchemy import select, update
@@ -172,23 +172,52 @@ async def list_user_notifications(
     return (await db.execute(stmt)).scalars().all()
 
 
-async def mark_sent(db: AsyncSession, notification_id: uuid.UUID) -> None:
+async def mark_sent(db: AsyncSession, notification_id: uuid.UUID) -> bool:
+    """
+    Перевод уведомления в sent. Возвращает True, если запись обновлена,
+    False — если notification с таким id отсутствует (битый UUID,
+    Notification удалён cleanup-джобом).
+
+    ИСПРАВЛЕНО (bug_241 audit 2026-05-28): без rowcount-check'а UPDATE
+    с неверным id молча возвращал 0 изменённых строк — никаких ошибок,
+    но и эффекта тоже. Это маскировало битые сообщения email_handler'а.
+    """
     stmt = (
         update(Notification)
         .where(Notification.id == notification_id)
-        .values(status=NotificationStatus.sent, sent_at=datetime.utcnow())
+        .values(status=NotificationStatus.sent, sent_at=datetime.now(timezone.utc))
     )
-    await db.execute(stmt)
+    result = await db.execute(stmt)
     await db.commit()
+    rowcount = getattr(result, "rowcount", 0)
+    if rowcount == 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "mark_sent: notification %s not found (rowcount=0)",
+            notification_id,
+        )
+    return rowcount == 1
 
 
 async def mark_failed(
     db: AsyncSession, notification_id: uuid.UUID, error: str
-) -> None:
+) -> bool:
+    """
+    Перевод в failed с текстом ошибки. См. mark_sent — та же семантика
+    возврата bool (bug_241 audit 2026-05-28).
+    """
     stmt = (
         update(Notification)
         .where(Notification.id == notification_id)
         .values(status=NotificationStatus.failed, error=error[:2000])
     )
-    await db.execute(stmt)
+    result = await db.execute(stmt)
     await db.commit()
+    rowcount = getattr(result, "rowcount", 0)
+    if rowcount == 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "mark_failed: notification %s not found (rowcount=0)",
+            notification_id,
+        )
+    return rowcount == 1

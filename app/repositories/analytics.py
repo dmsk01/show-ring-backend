@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,7 +89,7 @@ async def dashboard(db: AsyncSession) -> dict:
     result = dict(row)
     # ISO-string, потому что json не сериализует datetime; pydantic
     # на стороне роутера сам распарсит обратно в datetime.
-    result["last_updated_at"] = datetime.utcnow().isoformat()
+    result["last_updated_at"] = datetime.now(timezone.utc).isoformat()
 
     if rc is not None:
         try:

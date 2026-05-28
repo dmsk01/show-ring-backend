@@ -15,10 +15,13 @@ engine = create_async_engine(
     # живым, но при использовании вылетает с InterfaceError. pre_ping
     # ловит мёртвые сокеты заранее и пересоздаёт их.
     pool_pre_ping=True,
-    # pool_recycle=1800 — закрываем соединения старше 30 минут даже без
+    # pool_recycle — закрываем соединения старше N сек даже без
     # ошибок. PG/PgBouncer часто имеют свой idle_timeout; recycle
     # синхронизирует SQLAlchemy с этим лимитом.
-    pool_recycle=1800,
+    # bug_227 audit 2026-05-28: вынесли в config, чтобы можно было
+    # подкрутить под inframost-timeout (см. db_pool_recycle_seconds
+    # с примерами).
+    pool_recycle=settings.db_pool_recycle_seconds,
     # bug_225 audit 2026-05-28: явный sizing вместо дефолтных 5+10.
     # См. config.db_pool_size для обоснования.
     pool_size=settings.db_pool_size,

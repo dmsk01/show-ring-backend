@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Sequence
 
 from sqlalchemy import select, update
@@ -73,7 +73,7 @@ async def mark_sent(db: AsyncSession, event_id: uuid.UUID) -> None:
         .where(OutboxEvent.id == event_id)
         .values(
             status=OutboxStatus.sent,
-            sent_at=datetime.utcnow(),
+            sent_at=datetime.now(timezone.utc),
         )
     )
     await db.execute(stmt)

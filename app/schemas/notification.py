@@ -9,7 +9,7 @@ topic exchange. Не привязана к ORM, чтобы воркер мог �
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -105,7 +105,7 @@ class EventMessage(BaseModel):
     # ему же уведомление о собственном действии (см. notification.service).
     actor_id: uuid.UUID | None = None
     # Сам ивент-таймстемп — нужен в шаблонах писем и для дебага.
-    occurred_at: datetime = Field(default_factory=datetime.utcnow)
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_json(self) -> str:
         return self.model_dump_json()

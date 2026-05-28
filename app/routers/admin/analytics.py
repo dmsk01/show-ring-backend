@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +38,7 @@ router = APIRouter(
 
 def _period_start(days: int) -> datetime:
     """Удобный билдер: начало периода = сейчас минус N дней."""
-    return datetime.utcnow() - timedelta(days=days)
+    return datetime.now(timezone.utc) - timedelta(days=days)
 
 
 @router.get(

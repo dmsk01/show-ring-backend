@@ -27,6 +27,7 @@ import aio_pika
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories import outbox as outbox_repo
+from app.services.rabbit_dlx import declare_workflow_queue
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,18 @@ MAX_ATTEMPTS = 10
 async def dispatch_once(
     db: AsyncSession,
     publish_channel: aio_pika.abc.AbstractChannel,
-) -> int:
+) -> tuple[int, int]:
     """
-    Один проход dispatcher'а. Возвращает число событий, успешно
-    отправленных (sent) в этой итерации.
+    Один проход dispatcher'а. Возвращает (sent, failed):
+    - sent — число событий, успешно опубликованных,
+    - failed — число событий, для которых publish бросил
+      исключение (помечены `pending+attempts++` или `failed` если
+      attempts достиг лимита).
+
+    bug_237 audit 2026-05-28: run_loop использует пару (sent, failed)
+    для экспоненциального backoff'а — если N итераций подряд имеют
+    sent==0 при failed>0, sleep растёт, чтобы не молотить БД и
+    лог-агрегатор при лежачем Rabbit'е.
 
     ИСПРАВЛЕНО (bug_232 audit 2026-05-28): commit ПОСЛЕ КАЖДОГО
     успешного publish. Раньше был один commit в конце пачки — если
@@ -63,9 +72,10 @@ async def dispatch_once(
     if not events:
         # Откатываем пустую транзакцию — иначе lock висит до timeout.
         await db.rollback()
-        return 0
+        return 0, 0
 
     sent = 0
+    failed = 0
     for ev in events:
         # Снимок полей: после rollback ORM-объект остаётся «живым»
         # благодаря expire_on_commit=False, но привычка хранить
@@ -79,6 +89,7 @@ async def dispatch_once(
             sent += 1
         except Exception as e:  # noqa: BLE001 — изоляция падений одного события
             await db.rollback()
+            failed += 1
             logger.warning(
                 "Outbox publish failed for %s (attempt %d): %s",
                 ev_id, ev_attempts + 1, e,
@@ -97,7 +108,7 @@ async def dispatch_once(
                     "Outbox failure-bookkeeping itself failed for %s",
                     ev_id,
                 )
-    return sent
+    return sent, failed
 
 
 async def _publish(
@@ -123,7 +134,10 @@ async def _publish(
     else:
         # default exchange: routing_key = queue_name. Декларируем
         # очередь, чтобы сообщение не потерялось при первом publish.
-        await channel.declare_queue(event.routing_key, durable=True)
+        # bug_239 audit 2026-05-28: workflow-очередь с DLX-аргументами —
+        # outbox-publisher должен видеть те же declare-параметры, что
+        # и consumer'ы (иначе PRECONDITION_FAILED при mismatch).
+        await declare_workflow_queue(channel, event.routing_key)
         await channel.default_exchange.publish(
             message, routing_key=event.routing_key
         )
@@ -137,24 +151,47 @@ async def run_loop(
     """
     Главный цикл: периодически вызывает dispatch_once. Выходит при
     выставленном stop_event (см. _serve в worker/main.py).
+
+    ИСПРАВЛЕНО (bug_237 audit 2026-05-28): экспоненциальный backoff
+    при сбоях. Раньше при недоступном Rabbit каждые 2 сек логировался
+    failed publish — за час 1800 одинаковых warning'ов засоряли лог-
+    агрегатор и грели CPU/DB зря. Теперь интервал sleep'а растёт
+    2s→4s→8s→16s→32s→60s (cap) при подряд идущих ошибках; на первой
+    успешной итерации (sent>0 или пустая outbox-таблица) сбрасывается
+    в базовый POLL_INTERVAL_SECONDS.
     """
+    BACKOFF_CAP = 60.0
+    backoff = POLL_INTERVAL_SECONDS
     logger.info(
         "Outbox dispatcher started (interval=%.1fs, batch=%d)",
         POLL_INTERVAL_SECONDS, BATCH_SIZE,
     )
     while not stop_event.is_set():
+        sent = 0
+        failed = 0
         try:
             async with session_factory() as db:
-                n = await dispatch_once(db, channel)
-            if n:
-                logger.info("Outbox dispatched %d events", n)
+                sent, failed = await dispatch_once(db, channel)
+            if sent:
+                logger.info("Outbox dispatched %d events", sent)
         except Exception:
             logger.exception("Outbox dispatch loop error")
+            # Loop-уровневая ошибка (БД/Redis/etc) — растим backoff
+            # так же, как при failed-publish'ах.
+            backoff = min(backoff * 2, BACKOFF_CAP)
+        else:
+            # Условие «прогресс был»: либо что-то отправлено, либо
+            # outbox пуст (failed==0). Сбрасываем backoff.
+            if failed == 0 or sent > 0:
+                backoff = POLL_INTERVAL_SECONDS
+            else:
+                # Только failed'ы (Rabbit лежит, например) — растим.
+                backoff = min(backoff * 2, BACKOFF_CAP)
         # asyncio.wait_for на stop с таймаутом = sleep,
         # прерываемый при stop_event.set().
         try:
             await asyncio.wait_for(
-                stop_event.wait(), timeout=POLL_INTERVAL_SECONDS
+                stop_event.wait(), timeout=backoff
             )
         except asyncio.TimeoutError:
             pass

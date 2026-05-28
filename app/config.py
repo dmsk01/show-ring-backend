@@ -101,6 +101,15 @@ class Settings(BaseSettings):
     # = 100 default; даже 3 инстанса по 30 = 90 < 100.
     db_pool_size: int = 20
     db_max_overflow: int = 10
+    # bug_227 audit 2026-05-28: pool_recycle и PgBouncer/PG idle-таймауты.
+    # 1800s (30 мин) — дефолт SQLAlchemy после нашего этапа 14, но если
+    # сетевая инфра (PgBouncer/HAProxy/managed PG) рвёт idle-соединения
+    # раньше, мы будем получать «connection has been closed» при выдаче
+    # из пула. Правило: ставим РОВНО НИЖЕ inframost timeout'а.
+    # Примеры: PgBouncer server_idle_timeout=600 → ставим 540;
+    # AWS RDS Proxy idle = 1800 → ставим 1500; managed PG idle = 3600
+    # → 1800 норм. Тюнится через .env.
+    db_pool_recycle_seconds: int = 1800
 
 
 settings = Settings()  # type: ignore

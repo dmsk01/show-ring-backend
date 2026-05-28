@@ -26,6 +26,7 @@ import aio_pika
 
 from app.config import settings
 from app.database import async_session_factory
+from app.services.rabbit_dlx import declare_workflow_queue
 from worker.handlers.ad_handler import (
     AD_EVENTS_QUEUE,
     init_accumulator,
@@ -175,7 +176,10 @@ async def run_documents() -> None:
     # не обработал текущее. На PDF-рендере это критично: тяжёлая задача
     # не должна "связывать" десяток сообщений из-под себя.
     await channel.set_qos(prefetch_count=1)
-    queue = await channel.declare_queue(DOCUMENT_TASK_QUEUE, durable=True)
+    # bug_239 audit 2026-05-28: durable workflow queue с DLX —
+    # nack(requeue=False) и истёкшие/maxlen-сообщения уходят в общий
+    # DLQ, а не теряются молча. См. app/services/rabbit_dlx.py.
+    queue = await declare_workflow_queue(channel, DOCUMENT_TASK_QUEUE)
     await queue.consume(on_document_message)
     await _serve(connection, DOCUMENT_TASK_QUEUE)
 
@@ -184,7 +188,8 @@ async def run_book() -> None:
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)
     channel = await connection.channel()
     await channel.set_qos(prefetch_count=1)
-    queue = await channel.declare_queue("tasks", durable=True)
+    # bug_239: см. run_documents.
+    queue = await declare_workflow_queue(channel, "tasks")
     await queue.consume(on_book_message)
     await _serve(connection, "tasks (legacy book worker)")
 
@@ -289,7 +294,8 @@ async def run_ad_events() -> None:
     # prefetch=100: события мелкие, можем тянуть пачку — внутри
     # accumulator всё равно батчит по своему окну.
     await channel.set_qos(prefetch_count=100)
-    queue = await channel.declare_queue(AD_EVENTS_QUEUE, durable=True)
+    # bug_239: см. run_documents.
+    queue = await declare_workflow_queue(channel, AD_EVENTS_QUEUE)
     # Стартуем аккумулятор: периодический flush уходит в фоновую задачу.
     accumulator = init_accumulator(async_session_factory)
     await queue.consume(on_ad_event)
@@ -335,7 +341,8 @@ async def run_email() -> None:
     # ритм. На большом трафике добавляются параллельные воркеры, а не
     # увеличивается prefetch.
     await channel.set_qos(prefetch_count=1)
-    queue = await channel.declare_queue(EMAIL_TASK_QUEUE, durable=True)
+    # bug_239: см. run_documents.
+    queue = await declare_workflow_queue(channel, EMAIL_TASK_QUEUE)
     await queue.consume(on_email_task)
     await _serve(connection, f"{EMAIL_TASK_QUEUE} (SMTP sender)")
 

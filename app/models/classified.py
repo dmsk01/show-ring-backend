@@ -40,6 +40,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Computed,
     Enum as SAEnum,
     ForeignKey,
@@ -72,6 +73,26 @@ class ClassifiedStatus(str, enum.Enum):
     archived = "archived"          # архив (старше N месяцев, скрыто)
 
 
+class ClassifiedPriceKind(str, enum.Enum):
+    """
+    bug_215 audit 2026-05-28: устраняет двусмысленность «price=NULL vs
+    price=0 vs price>0». Раньше клиент сам угадывал, что имел в виду
+    автор. Теперь три явных смысла:
+
+    - fixed       — конкретная цена; в БД price IS NOT NULL и > 0
+    - free        — бесплатно / в добрые руки; price IS NULL
+    - negotiable  — цена договорная / по запросу; price IS NULL
+
+    Инвариант защищён CHECK-constraint'ом на уровне БД (миграция
+    6b1f4e8a3d92), Pydantic-валидатор отсекает невалидные комбинации
+    ещё до запроса.
+    """
+
+    fixed = "fixed"
+    free = "free"
+    negotiable = "negotiable"
+
+
 class Classified(Base, TimestampMixin):
     __tablename__ = "classifieds"
     __table_args__ = (
@@ -86,6 +107,13 @@ class Classified(Base, TimestampMixin):
         # в категории, отсортированные по дате". Помогает планнеру выбрать
         # одно сканирование вместо двух.
         Index("ix_classifieds_status_category", "status", "category"),
+        # bug_215 audit: price согласован с price_kind. CHECK на
+        # уровне БД защищает от прямых SQL-апдейтов в обход сервиса.
+        CheckConstraint(
+            "(price_kind = 'fixed' AND price IS NOT NULL AND price > 0) "
+            "OR (price_kind IN ('free', 'negotiable') AND price IS NULL)",
+            name="ck_classifieds_price_kind_match",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -127,6 +155,13 @@ class Classified(Base, TimestampMixin):
 
     price: Mapped[Decimal | None] = mapped_column(
         Numeric(10, 2), nullable=True
+    )
+    # bug_215: price_kind различает три семантики; см. ClassifiedPriceKind
+    # докстринг и CHECK-constraint в __table_args__.
+    price_kind: Mapped[ClassifiedPriceKind] = mapped_column(
+        SAEnum(ClassifiedPriceKind, name="classifiedpricekind"),
+        default=ClassifiedPriceKind.fixed,
+        server_default=ClassifiedPriceKind.fixed.value,
     )
     city: Mapped[str | None] = mapped_column(
         String(128), index=True, nullable=True

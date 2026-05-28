@@ -37,6 +37,7 @@ from app.repositories import notification as notif_repo
 from app.repositories import outbox as outbox_repo
 from app.schemas.notification import EmailTaskMessage, EventMessage
 from app.services.email import render_email
+from app.services.rabbit_dlx import declare_workflow_queue
 
 logger = logging.getLogger(__name__)
 
@@ -121,11 +122,18 @@ async def process_event(
     # должен лежать файл templates/email/litter.announced.html.j2.
     template_name = event.event_type
 
+    # ИСПРАВЛЕНО (bug_238 audit 2026-05-28): рендерим Jinja-шаблон
+    # ОДИН РАЗ для всего события. Контекст (имя питомника, порода,
+    # помёт) одинаковый для всех подписчиков — на 1000 подписчиков
+    # повторный render тратил CPU зря. Если когда-то понадобится
+    # персонализация (имя адресата в письме), вернуть render внутрь
+    # цикла и передавать user-context дополнительным аргументом.
+    subject, html_body, text_body = render_email(template_name, payload)
+
     dispatched = 0
     skipped_duplicate = 0
     for sub, user in subscribers:
         msg_id = _recipient_message_id(event.event_id, user.id)
-        subject, html_body, text_body = render_email(template_name, payload)
 
         # Per-subscriber commit. Если краш между двумя подписчиками,
         # уже зафиксированные не теряются, а необработанные подберутся
@@ -199,11 +207,9 @@ async def bind_topic_queue(
         aio_pika.ExchangeType.TOPIC,
         durable=True,
     )
-    queue = await channel.declare_queue(
-        # Имя зашиваем чтобы очередь была одна на всех воркеров (work
-        # queue semantics: каждое сообщение получает ровно один из них).
-        "showtail.events.dispatcher",
-        durable=True,
-    )
+    # bug_239 audit 2026-05-28: workflow-очередь с DLX. Имя зашиваем,
+    # чтобы очередь была одна на всех воркеров (work queue semantics:
+    # каждое сообщение получает ровно один из них).
+    queue = await declare_workflow_queue(channel, "showtail.events.dispatcher")
     await queue.bind(exchange, routing_key=pattern)
     return queue

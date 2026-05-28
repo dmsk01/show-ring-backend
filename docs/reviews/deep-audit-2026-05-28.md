@@ -68,36 +68,42 @@ Business+Security) + ручной обход middleware, миграций, ко�
 
 ### LOW (P2)
 
-- [ ] **bug_215** — Classified price=0 без is_free флага (бизнес-смысл
-  не определён)
+- [x] **bug_215** — Classified price=0 без is_free флага → enum
+  `price_kind` (fixed/free/negotiable) + CHECK constraint + backfill
 - [x] **bug_216** — Файлы в classified add_images проверяются только
   на ownership самого classified, не на ownership файла (overlap с 212)
-- [ ] **bug_217** — N+1 в `set_best_of_breed`: 5 раз вызывает
+- [x] **bug_217** — N+1 в `set_best_of_breed`: 5 раз вызывает
   `_resolve_animal_type` для одной операции
-- [ ] **bug_218** — `litter.price_from > price_to` не валидируется
-- [ ] **bug_219** — `/references/breeds?per_page=200` без rate-limit
-- [ ] **bug_220** — `classified_image.position` без верхней границы
-- [ ] **bug_227** — `pool_recycle=1800` может превышать PgBouncer
+- [x] **bug_218** — `litter.price_from > price_to` не валидируется
+- [x] **bug_219** — `/references/breeds?per_page=200` без rate-limit
+- [x] **bug_220** — `classified_image.position` без верхней границы
+- [x] **bug_227** — `pool_recycle=1800` может превышать PgBouncer
   `idle_in_transaction_session_timeout`
-- [ ] **bug_228** — Нет GIN-индекса на `moderation_logs.extra` JSONB
-- [ ] **bug_229** — Нет композитного индекса на `(is_best_in_show,
+- [x] **bug_228** — Нет GIN-индекса на `moderation_logs.extra` JSONB
+- [x] **bug_229** — Нет композитного индекса на `(is_best_in_show,
   show_entry_id)` для топ-репортов
-- [ ] **bug_237** — Outbox publisher без backoff: спамит DB-запросами
+- [x] **bug_237** — Outbox publisher без backoff: спамит DB-запросами
   пока Rabbit лежит
-- [ ] **bug_238** — Jinja template рендерится N раз для N подписчиков
+- [x] **bug_238** — Jinja template рендерится N раз для N подписчиков
   одного события (вместо 1 раз + рассылка)
-- [ ] **bug_239** — Нет DLX (dead-letter exchange): `nack(requeue=False)`
-  тихо теряет malformed-сообщения
-- [ ] **bug_240** — `ad_handler._flush()` swallow'ит исключение и
+- [x] **bug_239** — Нет DLX (dead-letter exchange): `nack(requeue=False)`
+  тихо теряет malformed-сообщения → общий `dlx` (direct) + `dlq`,
+  helper `declare_workflow_queue` применён ко ВСЕМ workflow-очередям
+  (document_task/email_tasks/ad_events/tasks/showtail.events.dispatcher).
+  Deploy-миграция документирована в technical-debt.md
+- [x] **bug_240** — `ad_handler._flush()` swallow'ит исключение и
   очищает буфер → потеря событий при сбое БД
-- [ ] **bug_241** — `notification.mark_sent()` не проверяет rowcount
-- [ ] **bug_242** — `datetime.utcnow()` (deprecated) в 3 местах
+- [x] **bug_241** — `notification.mark_sent()` не проверяет rowcount
+- [x] **bug_242** — `datetime.utcnow()` (deprecated) в 3 местах
   `app/services/scheduler.py` (lines 119, 152, 226)
-- [ ] **bug_245** — `RequestIdMiddleware` доверяет клиентскому
+- [x] **bug_245** — `RequestIdMiddleware` доверяет клиентскому
   `X-Request-ID` без валидации UUID
-- [ ] **bug_246** — `progressive_ban` non-atomic check-then-zadd
-- [ ] **bug_247** — `progressive_ban` fail-open при сбое Redis:
-  rate-limit беззвучно отключается
+- [x] **bug_246** — `progressive_ban` non-atomic check-then-zadd
+- [x] **bug_247** — `progressive_ban` fail-open при сбое Redis →
+  per-call `fail_closed:bool=False`; auth-эндпоинты (login/register/
+  refresh/verify/logout/token) → fail_closed=True (503 вместо
+  открытого окна для credential stuffing'а). Остальные (ads/
+  classifieds/references) — fail-open: доступность поиска важнее
 
 ---
 

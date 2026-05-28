@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import json
@@ -347,6 +347,6 @@ async def daily_stats(
     if campaign is None:
         raise ValueError("not_found")
     _ensure_owner(campaign, user_id, is_admin)
-    end = datetime.utcnow()
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     return await repo.daily_stats(db, campaign_id, start, end)

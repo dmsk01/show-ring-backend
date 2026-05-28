@@ -299,21 +299,28 @@ async def set_best_of_breed(
         r.is_best_in_show = False
 
     # Утилита для проставления флага одной записи.
-    async def _set_flag_on(entry_id: uuid.UUID, attr: str) -> ShowResult:
+    # ИСПРАВЛЕНО (bug_217 audit 2026-05-28): возвращаем не только
+    # result, но и entry/breed — раньше для winner'а отдельно дёргался
+    # _resolve_animal_type и ещё раз get_entry_context, всего 3
+    # запроса к БД на одну запись. Теперь все нужные ORM-объекты
+    # достаются одним JOIN'ом и переиспользуются.
+    async def _set_flag_on(entry_id: uuid.UUID, attr: str):
         # Валидация: запись принадлежит выставке и породе.
         ctx = await repo.get_entry_context(db, entry_id)
         if ctx is None:
             raise ValueError("entry_not_found")
-        entry, dog, _breed = ctx
+        entry, dog, breed = ctx
         if entry.show_id != show_id or dog.breed_id != breed_id:
             raise ValueError("entry_breed_mismatch")
         result = await repo.get_result_by_entry(db, entry_id)
         if result is None:
             raise ValueError("result_not_found")
         setattr(result, attr, True)
-        return result
+        return result, entry, breed
 
-    winner_result = await _set_flag_on(winner_entry_id, "is_best_of_breed")
+    winner_result, winner_entry, winner_breed = await _set_flag_on(
+        winner_entry_id, "is_best_of_breed"
+    )
     # Сам BOB по умолчанию — это и best_male/best_female (если пол собаки
     # известен), но клиент может явно указать обоих "лучших" в породе.
     if best_male_entry_id is not None:
@@ -325,21 +332,16 @@ async def set_best_of_breed(
     if best_veteran_entry_id is not None:
         await _set_flag_on(best_veteran_entry_id, "is_best_veteran")
 
-    # Выдаём BOB победителю.
+    # Выдаём BOB победителю. animal_type_id берём напрямую из уже
+    # загруженного winner_breed (bug_217: убрали повторный SELECT).
     bob_award = await show_rules.get_best_of_breed_titles(
         db,
-        animal_type_id=(
-            # animal_type у winner_result определяется через породу собаки.
-            (await _resolve_animal_type(db, winner_entry_id))
-        ),
+        animal_type_id=winner_breed.animal_type_id,
         show_rank=rank,
         is_bob=True,
         is_best_male=winner_result.is_best_male,
         is_best_female=winner_result.is_best_female,
     )
-    winner_entry_ctx = await repo.get_entry_context(db, winner_entry_id)
-    assert winner_entry_ctx is not None  # выше проверили в _set_flag_on
-    winner_entry, _wdog, _wbreed = winner_entry_ctx
     await _apply_class_titles(
         db,
         result=winner_result,

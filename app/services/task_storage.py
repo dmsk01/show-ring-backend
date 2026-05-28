@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.exceptions import TaskNotFoundError
 from app.schemas.task import TaskStatus, TaskStatusResponse
@@ -12,8 +12,8 @@ class InMemoryTaskStorage():
         task = TaskStatusResponse(
             task_id=task_id,
             status=TaskStatus.PENDING,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
         self._tasks[task_id] = task
         return task
@@ -27,7 +27,7 @@ class InMemoryTaskStorage():
             raise TaskNotFoundError(task_id)
 
         updated_task = task.model_copy(update={
-                                       "status": status, "result": result, "error": error, "updated_at": datetime.utcnow()})
+                                       "status": status, "result": result, "error": error, "updated_at": datetime.now(timezone.utc)})
         self._tasks[task_id] = updated_task
 
         return updated_task

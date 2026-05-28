@@ -2,6 +2,8 @@ import logging
 
 import aio_pika
 
+from app.services.rabbit_dlx import declare_workflow_queue
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +49,11 @@ class RabbitMQService:
         if not self.channel:
             raise Exception("RabbitMQ connection is not established.")
 
-        queue = await self.channel.declare_queue(queue_name, durable=True)
+        # bug_239 audit 2026-05-28: workflow-очередь с DLX. Producer
+        # должен объявить очередь с теми же аргументами, что и
+        # consumer (иначе RabbitMQ кинет PRECONDITION_FAILED при
+        # mismatch).
+        queue = await declare_workflow_queue(self.channel, queue_name)
         msg = aio_pika.Message(
             body=message.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT
         )

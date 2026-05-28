@@ -193,6 +193,36 @@ nginx/k8s ingress. Cloudflare даёт публичные IP-диапазоны 
 `ALLOWED_HOSTS=["api.showtail.example", "*.showtail.example"]`.
 Защищает от Host header injection при misconfiguration nginx.
 
+### RabbitMQ deploy: пересоздание очередей под DLX (follow-up bug_239)
+
+В рамках bug_239 (deep-audit 2026-05-28) добавлен общий DLX/DLQ и
+все workflow-очереди (`document_task`, `email_tasks`, `ad_events`,
+`tasks`, `showtail.events.dispatcher`) теперь декларируются с
+`x-dead-letter-exchange` / `x-dead-letter-routing-key`.
+
+**Что нужно сделать ОДИН РАЗ при первом деплое после этого фикса**
+на existing RabbitMQ-кластере:
+
+1. Остановить producers и consumers.
+2. Удалить старые очереди без DLX-аргументов:
+   ```
+   rabbitmqctl delete_queue document_task
+   rabbitmqctl delete_queue email_tasks
+   rabbitmqctl delete_queue ad_events
+   rabbitmqctl delete_queue tasks
+   rabbitmqctl delete_queue showtail.events.dispatcher
+   ```
+3. Поднять воркеры — они сами объявят DLX+DLQ+очереди с новыми
+   аргументами.
+
+**Иначе**: RabbitMQ кинет `PRECONDITION_FAILED — inequivalent arg`
+при declare, и воркер не стартанёт. На свежем dev-кластере / в
+Docker (с anonymous volume) проблемы нет.
+
+**Алертинг (на ops-этап):** мониторить размер DLQ через
+RabbitMQ Management API — растущая DLQ = индикатор проблемного
+деплоя или poison-payload'ов.
+
 ### End-to-end `docker compose up --build` smoke-test
 
 После любых изменений в `Dockerfile`/`docker-compose.yml` —

@@ -31,11 +31,20 @@ async def register(
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
+    # bug_247 audit 2026-05-28: fail_closed=True на всех auth-эндпоинтах.
+    # Без этого падение Redis превращалось в открытое окно для
+    # credential stuffing'а / spam-регистраций / token-guessing'а —
+    # rate-limit беззвучно отключался, и атакующий получал unlimited
+    # попытки. Теперь Redis-сбой → 503, что отказ обслуживания, но
+    # лучше, чем компрометация аккаунтов. Тот же fail_closed=True
+    # стоит и на остальных auth-callsite'ах ниже — повторяю без
+    # комментария, чтобы не зашумлять файл.
     await check_rate_limit(
         request,
         limit=3,
         window=3600,
         redis=redis,
+        fail_closed=True,
     )
     # ИСПРАВЛЕНО: ответ одинаков и для нового, и для уже существующего
     # email — это защита от перечисления учётных записей. Сервис
@@ -60,6 +69,7 @@ async def verify_user_email(
         limit=10,
         window=60,
         redis=redis,
+        fail_closed=True,  # bug_247: см. /register
     )
     try:
         await verify_email(db, token)
@@ -84,6 +94,7 @@ async def login(
         limit=5,
         window=60,
         redis=redis,
+        fail_closed=True,  # bug_247: см. /register
     )
     try:
         return await login_user(db, body.email, body.password)
@@ -108,7 +119,10 @@ async def login_form(
 ) -> TokenResponse:
     # ИСПРАВЛЕНО: добавлен form-эндпоинт, чтобы tokenUrl в OAuth2PasswordBearer
     # совпадал с реальной реализацией. Раньше Swagger Authorize не работал.
-    await check_rate_limit(request, limit=5, window=60, redis=redis)
+    # bug_247: см. /register — fail_closed для всех auth-callsite'ов.
+    await check_rate_limit(
+        request, limit=5, window=60, redis=redis, fail_closed=True
+    )
     try:
         # OAuth2 спецификация требует поле username — мапим его на email.
         return await login_user(db, form.username, form.password)
@@ -136,6 +150,7 @@ async def refresh(
         limit=5,
         window=60,
         redis=redis,
+        fail_closed=True,  # bug_247: см. /register
     )
     try:
         # ИСПРАВЛЕНО: возвращаем TokenResponse целиком — клиент обязан
@@ -161,6 +176,7 @@ async def logout(
         limit=5,
         window=60,
         redis=redis,
+        fail_closed=True,  # bug_247: см. /register
     )
     try:
         await logout_user(db, body.refresh_token)

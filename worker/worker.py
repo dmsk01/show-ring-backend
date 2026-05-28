@@ -8,6 +8,8 @@ import logging
 
 from aio_pika import connect_robust, IncomingMessage
 
+from app.services.rabbit_dlx import declare_workflow_queue
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,9 @@ async def main():
     channel = await connection.channel()
 
     await channel.set_qos(prefetch_count=1)
-    queue = await channel.declare_queue("tasks", durable=True)
+    # bug_239: те же DLX-аргументы, что и в run_book — иначе при
+    # запуске обоих в одном Rabbit'е получим PRECONDITION_FAILED.
+    queue = await declare_workflow_queue(channel, "tasks")
     await queue.consume(process_message)
     logger.info("Waiting for messages. To exit press CTRL+C")
 

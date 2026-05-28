@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.middleware.progressive_ban import check_rate_limit
+from app.redis import get_redis
 from app.repositories import reference as repo
 from app.schemas.reference import (
     AnimalTypeResponse,
@@ -67,13 +70,25 @@ async def list_breed_groups(
     ),
 )
 async def list_breeds(
+    request: Request,
     animal_type_id: uuid.UUID | None = Query(None),
     breed_group_id: uuid.UUID | None = Query(None),
     search: str | None = Query(None, max_length=128),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
+    # bug_219 audit 2026-05-28: эндпоинт public, без auth, c per_page
+    # до 200 + поиск через ILIKE — это самый «тяжёлый» из справочников.
+    # 60 req/min на IP отрезает скрейперы, не мешая обычному фронту
+    # (один запрос на страницу + дозагрузка).
+    await check_rate_limit(
+        request,
+        limit=60,
+        window=60,
+        redis=redis,
+    )
     items = await repo.list_breeds(
         db,
         animal_type_id=animal_type_id,

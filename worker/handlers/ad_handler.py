@@ -42,6 +42,10 @@ AD_EVENTS_QUEUE = "ad_events"
 # INSERT. В prod увеличиваются через env (не сейчас).
 BATCH_SIZE = 50
 BATCH_TIMEOUT_SECONDS = 2.0
+# bug_240: cap буфера при retry-recovery. 1000 событий ≈ 20 минут
+# нагрузки на 50 событий/сек — за это время оператор должен заметить
+# стабильную ошибку процессинга.
+_MAX_BUFFER_SIZE = 1000
 
 
 async def process_batch(
@@ -192,13 +196,39 @@ class BatchAccumulator:
                 await self._flush(batch)
 
     async def _flush(self, batch: list[dict]) -> None:
+        """
+        ИСПРАВЛЕНО (bug_240 audit 2026-05-28): при ошибке process_batch
+        возвращаем события в начало буфера, чтобы следующий тик
+        попробовал отправить их снова. Раньше on-error батч просто
+        логировался и терялся — биллинг рекламы недосчитывал показы.
+        Retry-loop опасен poison'ом (битый event крутится вечно), но
+        здесь это меньшее зло: процессить ad-events важнее, чем
+        потерять; стабильно битые увидим как «buffer grew to N» в
+        warning'ах оператора.
+        """
         async with self._session_factory() as db:
             try:
                 await process_batch(db, batch)
             except Exception:
                 logger.exception(
-                    "ad_events batch flush failed (size=%d)", len(batch)
+                    "ad_events batch flush failed (size=%d) — "
+                    "returning to buffer for retry",
+                    len(batch),
                 )
+                async with self._lock:
+                    # Кладём в НАЧАЛО — сохраняем хронологию.
+                    self._buffer[:0] = batch
+                    if len(self._buffer) > _MAX_BUFFER_SIZE:
+                        # Растущий бесконтрольно буфер = OOM. Дропаем
+                        # самые старые (FIFO retention) после порога —
+                        # лучше потерять часть, чем уронить воркер.
+                        drop = len(self._buffer) - _MAX_BUFFER_SIZE
+                        del self._buffer[:drop]
+                        logger.error(
+                            "ad_events buffer overflow: dropped %d "
+                            "oldest events (cap=%d)",
+                            drop, _MAX_BUFFER_SIZE,
+                        )
 
 
 # Глобальный аккумулятор — стартует в worker/main.py.

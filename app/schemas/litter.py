@@ -65,6 +65,23 @@ class LitterUpdate(BaseModel):
     status: LitterStatus | None = None
     description: str | None = None
 
+    @model_validator(mode="after")
+    def _validate_price_range(self) -> "LitterUpdate":
+        # bug_218 audit 2026-05-28: тот же инвариант, что и в LitterBase.
+        # PUT-обновление мог поставить price_from=1000, price_to=500.
+        # NB: тут проверяем ТОЛЬКО если оба поля присутствуют в payload.
+        # Частичные апдейты только одного из price_* не валидируются;
+        # семантически они могут оставить базу в инвалидном состоянии,
+        # но это уже не дело Pydantic'а — нужна проверка после merge'а
+        # на стороне сервиса. Минимум здесь — отсекать явно битые.
+        if (
+            self.price_from is not None
+            and self.price_to is not None
+            and self.price_to < self.price_from
+        ):
+            raise ValueError("price_to must be >= price_from")
+        return self
+
 
 class LitterResponse(LitterBase):
     model_config = ConfigDict(from_attributes=True)

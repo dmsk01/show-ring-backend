@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -206,7 +206,7 @@ async def cleanup_expired_refresh_tokens() -> None:
             return
         async with async_session_factory() as db:
             stmt = delete(RefreshToken).where(
-                (RefreshToken.expires_at < datetime.utcnow())
+                (RefreshToken.expires_at < datetime.now(timezone.utc))
                 | (RefreshToken.is_revoked.is_(True))
             )
             result = await db.execute(stmt)
@@ -239,7 +239,7 @@ async def requeue_stuck_tasks() -> None:
     from app.repositories import outbox as outbox_repo
     from app.schemas.task import TaskMessage
 
-    cutoff = datetime.utcnow() - timedelta(hours=1)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
     async with _scheduler_lock("requeue_stuck_tasks") as acquired:
         if not acquired:
             return
@@ -316,7 +316,7 @@ async def archive_old_classifieds() -> None:
     """
     from datetime import timedelta
 
-    cutoff = datetime.utcnow() - timedelta(days=90)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
     async with _scheduler_lock("archive_classifieds") as acquired:
         if not acquired:
             return
