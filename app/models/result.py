@@ -186,5 +186,8 @@ class DogTitle(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+        # bug_223 audit 2026-05-28: индекс под отчёты «титулы выданные
+        # судьёй X» и каскад SET NULL при удалении user'а.
+        index=True,
     )
     date_earned: Mapped[date] = mapped_column(Date, index=True)

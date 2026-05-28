@@ -91,5 +91,16 @@ class Settings(BaseSettings):
     # X-Frame-Options для современных браузеров.
     csp_enabled: bool = False
 
+    # bug_225 audit 2026-05-28: SQLAlchemy QueuePool по умолчанию
+    # держит pool_size=5 и max_overflow=10 — потолок 15 одновременных
+    # соединений. WebSocket-чат (per-message session, см. bug_205 fix)
+    # + параллельные API-запросы + outbox-worker съедают это за
+    # секунды под нагрузкой → QueuePool overflow и 30-секундный
+    # timeout. 20+10 = 30 — комфортный потолок для среднего prod;
+    # тюнится через .env под наблюдаемую нагрузку. PG max_connections
+    # = 100 default; даже 3 инстанса по 30 = 90 < 100.
+    db_pool_size: int = 20
+    db_max_overflow: int = 10
+
 
 settings = Settings()  # type: ignore

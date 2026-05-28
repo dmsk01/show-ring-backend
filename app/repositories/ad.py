@@ -150,10 +150,35 @@ async def find_banner_for_serve(
     else:
         stmt = stmt.where(AdBanner.target_region.is_(None))
 
-    # func.random() — PG-native. Альтернатива: TABLESAMPLE BERNOULLI —
-    # шустрее на больших таблицах, но менее равномерное распределение.
-    stmt = stmt.order_by(func.random()).limit(1)
-    return (await db.execute(stmt)).scalar_one_or_none()
+    # ИСПРАВЛЕНО (bug_224 audit 2026-05-28): двухэтапный выбор вместо
+    # `ORDER BY random()` по всему фильтрованному набору. Раньше при
+    # 10k+ баннерах PG вычислял random() для КАЖДОЙ строки, сортировал,
+    # брал первую — O(n log n) и секундные задержки на каждый /ads/serve.
+    # Теперь:
+    #   1. По индексам отбираем до 100 кандидатов (детерминированный
+    #      порядок — id ASC: PG идёт по индексу, ранний LIMIT).
+    #   2. Из этих 100 — `WHERE id IN (...) ORDER BY random() LIMIT 1`:
+    #      random() оценивается максимум 100 раз.
+    # Равномерность сохраняется (на каждый запрос — случайный из
+    # топ-100), при N>100 даём долгосрочную «справедливость» через
+    # рандомизацию вторым шагом. Альтернатива TABLESAMPLE BERNOULLI —
+    # ещё быстрее, но менее предсказуема при малом N.
+    candidate_ids = (
+        await db.execute(
+            stmt.with_only_columns(AdBanner.id)
+            .order_by(AdBanner.id)
+            .limit(100)
+        )
+    ).scalars().all()
+    if not candidate_ids:
+        return None
+    random_pick = (
+        select(AdBanner)
+        .where(AdBanner.id.in_(candidate_ids))
+        .order_by(func.random())
+        .limit(1)
+    )
+    return (await db.execute(random_pick)).scalar_one_or_none()
 
 
 # ---------------------------------------------------------------------

@@ -27,6 +27,15 @@ from app.utils import pdf
 
 logger = logging.getLogger(__name__)
 
+# bug_234 audit 2026-05-28: poison-payload (например, неудалимая
+# ссылка в payload или специфический шаблон, который ломает рендерер)
+# крутился вечно. Scheduler re-публиковал stuck-задачу раз в час, а
+# в handler'е не было барьера: 24 рестарта в сутки до бесконечности.
+# 5 попыток = ~5 часов реальных retry'ев; этого достаточно для
+# восстановления после transient-сбоев (MinIO коротко недоступен,
+# PG в read-only), но не позволяет poison'у жить вечно.
+MAX_TASK_ATTEMPTS = 5
+
 
 async def process_document_task(
     db: AsyncSession, task_id: uuid.UUID
@@ -54,6 +63,20 @@ async def process_document_task(
     if task is None:
         # Невозможно (claim_task пройдёт только на существующей задаче),
         # но защищаемся для type-checker.
+        return
+
+    # bug_234 audit 2026-05-28: cap retry'ев. claim_task инкрементирует
+    # attempts в одном UPDATE, так что после удачного claim'а task.attempts
+    # уже отражает текущую попытку. Если задача уже исчерпала бюджет —
+    # сразу терминальное failed, не пытаемся снова, не публикуем в outbox.
+    if task.attempts > MAX_TASK_ATTEMPTS:
+        logger.error(
+            "Task %s exceeded max attempts (%d > %d) — marking failed",
+            task_id, task.attempts, MAX_TASK_ATTEMPTS,
+        )
+        await task_repo.mark_failed(
+            db, task_id, f"max_attempts_exceeded ({task.attempts})"
+        )
         return
 
     try:

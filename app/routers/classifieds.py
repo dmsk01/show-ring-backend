@@ -7,13 +7,16 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.middleware.progressive_ban import check_rate_limit
 from app.models.classified import ClassifiedCategory, ClassifiedStatus
 from app.models.user import User
+from app.redis import get_redis
 from app.repositories import classified as repo
 from app.schemas.classified import (
     ClassifiedCreate,
@@ -35,7 +38,9 @@ def _raise_for_error(err: ValueError) -> None:
     code = str(err)
     if code == "not_found":
         raise HTTPException(404, code)
-    if code == "forbidden":
+    # bug_212/216: file_forbidden — попытка прицепить чужой файл.
+    # Тот же класс ошибки, что и обычный forbidden, поэтому 403.
+    if code in ("forbidden", "file_forbidden"):
         raise HTTPException(403, code)
     # bug_210: специальный код для запрещённого перехода статуса —
     # 422 (unprocessable), а не 400, потому что это semantic validation
@@ -76,11 +81,24 @@ async def create_classified(
     ),
 )
 async def search_classifieds(
+    request: Request,
     q: str = Query(..., min_length=2, max_length=200),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
+    # bug_213 audit 2026-05-28: FTS-запрос с 200-символьным q
+    # запускает PostgreSQL to_tsquery + GIN-поиск — CPU-стоит. Для
+    # анонимного эндпоинта это вектор DoS на каждый запрос.
+    # 30 запросов/мин на IP — достаточно для пользовательского поиска
+    # (одна-две страницы в секунду), мало для атаки.
+    await check_rate_limit(
+        request,
+        limit=30,
+        window=60,
+        redis=redis,
+    )
     items = await repo.search_classifieds(db, q, page=page, per_page=per_page)
     total = await repo.count_search_results(db, q)
     return ClassifiedPage(

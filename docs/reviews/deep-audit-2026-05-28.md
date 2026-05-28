@@ -38,31 +38,31 @@ Business+Security) + ручной обход middleware, миграций, ко�
 
 ### MEDIUM (P1)
 
-- [ ] **bug_211** — `target_url` в баннере проходит регэксп
+- [x] **bug_211** — `target_url` в баннере проходит регэксп
   `^https?://.+` — JS-схема через query-параметр в frontend
-- [ ] **bug_212** — `classified.add_images` принимает file_id без
+- [x] **bug_212** — `classified.add_images` принимает file_id без
   верификации владельца файла → можно прицепить чужие фото
-- [ ] **bug_213** — Нет rate-limit на `/ads/events` и
+- [x] **bug_213** — Нет rate-limit на `/ads/events` и
   `/classifieds/search`: накрутка показов и DoS на FTS
-- [ ] **bug_214** — При `campaign.budget=0` (если ввести через DB)
+- [x] **bug_214** — При `campaign.budget=0` (если ввести через DB)
   бесплатные impressions запишутся бесконечно
-- [ ] **bug_221** — Нет индекса на `show_rings.judge_id` (FK без индекса)
-- [ ] **bug_222** — Нет индекса на `show_entries.handler_id`
-- [ ] **bug_223** — Нет индекса на `dog_titles.judge_id`
-- [ ] **bug_224** — `ORDER BY random()` в подборе баннера: O(n log n)
+- [x] **bug_221** — Нет индекса на `show_rings.judge_id` (FK без индекса)
+- [x] **bug_222** — Нет индекса на `show_entries.handler_id`
+- [x] **bug_223** — Нет индекса на `dog_titles.judge_id`
+- [x] **bug_224** — `ORDER BY random()` в подборе баннера: O(n log n)
   на десятках тысяч баннеров
-- [ ] **bug_225** — Pool config дефолтный (5+10): на 10+ конкурентных
+- [x] **bug_225** — Pool config дефолтный (5+10): на 10+ конкурентных
   запросах вылетит "QueuePool limit exceeded"
 - [ ] **bug_226** — Dashboard `COUNT(*)` без WHERE по 5+ таблицам:
   на 100k+ записей запрос становится секундами
-- [ ] **bug_234** — PDF-handler не cap'ает `attempts`: poison message
+- [x] **bug_234** — PDF-handler не cap'ает `attempts`: poison message
   крутится в очереди вечно
-- [ ] **bug_235** — `ad_handler._periodic_flush()` не отменяется при
+- [x] **bug_235** — `ad_handler._periodic_flush()` не отменяется при
   shutdown → потеря батча событий в памяти
 - [x] **bug_243** — `drop_type` отсутствует в 3 миграциях
   (`sexenum`, `ticketstatus`/`ticketpriority`, `outboxstatus`):
   повторный upgrade упадёт «type already exists»
-- [ ] **bug_244** — `app/database.py:get_db()` оборачивает `yield` в
+- [x] **bug_244** — `app/database.py:get_db()` оборачивает `yield` в
   try/except OperationalError → ошибки внутри handler'а конвертируются
   в 503
 
@@ -70,7 +70,7 @@ Business+Security) + ручной обход middleware, миграций, ко�
 
 - [ ] **bug_215** — Classified price=0 без is_free флага (бизнес-смысл
   не определён)
-- [ ] **bug_216** — Файлы в classified add_images проверяются только
+- [x] **bug_216** — Файлы в classified add_images проверяются только
   на ownership самого classified, не на ownership файла (overlap с 212)
 - [ ] **bug_217** — N+1 в `set_best_of_breed`: 5 раз вызывает
   `_resolve_animal_type` для одной операции

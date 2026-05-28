@@ -140,6 +140,34 @@ class BatchAccumulator:
         if self._flush_task is None:
             self._flush_task = asyncio.create_task(self._periodic_flush())
 
+    async def stop(self) -> None:
+        """
+        bug_235 audit 2026-05-28: graceful shutdown. Раньше при
+        SIGTERM воркер просто закрывал RabbitMQ-соединение и выходил,
+        пока _periodic_flush спал на asyncio.sleep — фоновая задача
+        отменялась через cancel of event loop, а буфер с событиями в
+        памяти (до BATCH_SIZE-1 штук) терялся. Биллинг рекламы
+        недосчитывался показов.
+        Тут: отменяем периодический flush, дожидаемся его выхода и
+        сливаем оставшийся буфер в БД.
+        """
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except (asyncio.CancelledError, Exception):
+                # CancelledError ожидаем; любые другие — уже залогированы
+                # внутри _periodic_flush через _flush()'а logger.exception.
+                pass
+            self._flush_task = None
+        async with self._lock:
+            if self._buffer:
+                batch, self._buffer = self._buffer, []
+            else:
+                batch = None
+        if batch:
+            await self._flush(batch)
+
     async def add(self, event: dict) -> None:
         async with self._lock:
             self._buffer.append(event)

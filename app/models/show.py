@@ -285,6 +285,9 @@ class ShowRing(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=True,
+        # bug_221 audit 2026-05-28: FK без индекса = full scan на
+        # любой WHERE judge_id = ? и каскадных удалениях user'а.
+        index=True,
     )
 
     ring_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -342,6 +345,9 @@ class ShowEntry(Base, TimestampMixin):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+        # bug_222 audit 2026-05-28: индекс под выборки «записи, где
+        # хендлер = X» и каскад SET NULL.
+        index=True,
     )
     # Кто записал собаку (для аудита и прав на отмену). Обычно владелец
     # её питомника, но возможны случаи "записал хендлер".

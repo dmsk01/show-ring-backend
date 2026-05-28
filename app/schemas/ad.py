@@ -7,10 +7,35 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.ad import AdEventType, BannerPlacement, CampaignStatus
+
+
+def _validate_target_url(v: str) -> str:
+    """
+    bug_211 audit 2026-05-28: regex `^https?://.+` пропускал ссылки
+    вида `https://evil.com/redirect?to=javascript:alert(...)`. Сам по
+    себе server-side не опасен, но если frontend рендерит target_url
+    в `<a href="…">` и обработчик клика делает `window.location =
+    this.href`, можно получить XSS. Делаем backend fail-closed:
+    парсим URL и принимаем ТОЛЬКО https:// + непустой hostname.
+    Заодно глушим SSRF-вектор (file://, gopher://) на случай, если
+    target_url когда-то начнёт фетчиться сервером.
+    """
+    parsed = urlparse(v)
+    if parsed.scheme != "https":
+        raise ValueError("target_url must be https://")
+    if not parsed.hostname:
+        raise ValueError("target_url must have a hostname")
+    # Hostname без точки = не публичный домен (localhost, internal).
+    # Запрещаем — для рекламы интрасеть и так бессмысленна, а ssrf-
+    # вектор закрыт.
+    if "." not in parsed.hostname:
+        raise ValueError("target_url hostname must contain a dot")
+    return v
 
 
 # ---------------------------------------------------------------------
@@ -68,15 +93,20 @@ class CampaignResponse(CampaignBase):
 
 class BannerBase(BaseModel):
     image_file_id: uuid.UUID | None = None
-    # target_url — http(s)-схема обязательна. Иначе сюда можно подставить
-    # javascript:alert(...) и получить XSS на странице, рендерящей баннер.
-    target_url: str = Field(..., max_length=2048, pattern=r"^https?://.+")
+    # target_url — только https://; парсер в _validate_target_url
+    # отсекает javascript:, file://, http:// и URL без hostname.
+    target_url: str = Field(..., max_length=2048)
     title: str | None = Field(None, max_length=255)
     placement: BannerPlacement
     target_animal_type_id: uuid.UUID | None = None
     target_breed_id: uuid.UUID | None = None
     target_region: str | None = Field(None, max_length=128)
     is_active: bool = True
+
+    @field_validator("target_url")
+    @classmethod
+    def _check_target_url(cls, v: str) -> str:
+        return _validate_target_url(v)
 
 
 class BannerCreate(BannerBase):
@@ -85,13 +115,18 @@ class BannerCreate(BannerBase):
 
 class BannerUpdate(BaseModel):
     image_file_id: uuid.UUID | None = None
-    target_url: str | None = Field(None, max_length=2048, pattern=r"^https?://.+")
+    target_url: str | None = Field(None, max_length=2048)
     title: str | None = Field(None, max_length=255)
     placement: BannerPlacement | None = None
     target_animal_type_id: uuid.UUID | None = None
     target_breed_id: uuid.UUID | None = None
     target_region: str | None = Field(None, max_length=128)
     is_active: bool | None = None
+
+    @field_validator("target_url")
+    @classmethod
+    def _check_target_url(cls, v: str | None) -> str | None:
+        return _validate_target_url(v) if v is not None else None
 
 
 class BannerResponse(BannerBase):

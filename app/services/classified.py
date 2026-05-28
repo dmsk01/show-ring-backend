@@ -18,7 +18,32 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.classified import Classified, ClassifiedStatus
+from app.models.file import UploadedFile
 from app.repositories import classified as repo
+
+
+async def _verify_files_owned(
+    db: AsyncSession,
+    images: list[dict],
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    """
+    bug_212/216 audit 2026-05-28: каждый file_id, привязываемый к
+    объявлению, должен принадлежать requester'у. Раньше можно было
+    подсмотреть чужой file_id (например, из публичного аватара
+    питомника) и прицепить его к своему объявлению — копирайт-абуз
+    и подмена визуала чужого контента.
+
+    Админ-исключение: модератор/админ может прицепить любой файл
+    (например, при ручном фиксе чужого объявления).
+    """
+    if is_admin or not images:
+        return
+    for img in images:
+        f = await db.get(UploadedFile, img["file_id"])
+        if f is None or f.uploaded_by != requester_id:
+            raise ValueError("file_forbidden")
 
 
 async def _check_owner(
@@ -76,6 +101,10 @@ async def create_classified(
     отдельным запросом).
     """
     images = fields.pop("images", []) or []
+    # bug_212/216: автор создаёт объявление — он же должен быть владельцем
+    # каждого file_id. is_admin=False, потому что POST идёт от обычного
+    # пользователя; админ-bypass актуален только для update/add_images.
+    await _verify_files_owned(db, images, author_id, is_admin=False)
     obj = await repo.create_classified(db, author_id=author_id, **fields)
 
     for img in images:
@@ -155,6 +184,8 @@ async def add_images(
     if obj is None:
         raise ValueError("not_found")
     await _check_owner(obj, requester_id, is_admin)
+    # bug_212/216: проверяем ownership каждого file_id.
+    await _verify_files_owned(db, images, requester_id, is_admin)
 
     for img in images:
         await repo.add_image(

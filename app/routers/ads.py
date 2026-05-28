@@ -17,11 +17,14 @@ import uuid
 from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
+from app.redis import get_redis
 from app.repositories import ad as repo
 from app.schemas.ad import (
     AdEventCreate,
@@ -224,7 +227,19 @@ async def record_event(
     body: AdEventCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
+    # bug_213 audit 2026-05-28: public-эндпоинт без авторизации —
+    # обязателен rate-limit поверх дедупа. Дедуп ловит «одинаковые»
+    # повторы (banner+ip+ua+type) на 60s, но атакующий с ротацией
+    # User-Agent пробивает дедуп и накручивает разные ключи. Лимит на
+    # IP режет ботнет до устойчивого фона, не мешая обычным просмотрам.
+    await check_rate_limit(
+        request,
+        limit=120,
+        window=60,
+        redis=redis,
+    )
     # ip и user_agent — из заголовков HTTP. Клиент не может подделать
     # (для X-Forwarded-For нужно доверять только реверс-прокси, что мы
     # настроим на этапе 15 при выкатке за nginx).

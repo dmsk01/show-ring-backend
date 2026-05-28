@@ -1,6 +1,4 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from fastapi import HTTPException
-from sqlalchemy.exc import OperationalError, InterfaceError
 from .config import settings
 
 # 1. Создание асинхронного движка
@@ -21,6 +19,10 @@ engine = create_async_engine(
     # ошибок. PG/PgBouncer часто имеют свой idle_timeout; recycle
     # синхронизирует SQLAlchemy с этим лимитом.
     pool_recycle=1800,
+    # bug_225 audit 2026-05-28: явный sizing вместо дефолтных 5+10.
+    # См. config.db_pool_size для обоснования.
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
 )
 
 # 2. Создание фабрики сессий
@@ -32,10 +34,13 @@ async_session_factory = async_sessionmaker(
 
 
 async def get_db():
-    try:
-        async with async_session_factory() as session:
-            yield session
-    except (OperationalError, InterfaceError, OSError):
-        raise HTTPException(
-            status_code=503, detail="Database unavailable. Please try again later."
-        )
+    # ИСПРАВЛЕНО (bug_244 audit 2026-05-28): убрана обёртка
+    # try/except (OperationalError, InterfaceError, OSError) → 503
+    # вокруг yield. Раньше любая такая ошибка, поднятая ВНУТРИ
+    # handler'а (например, statement_timeout на медленном запросе)
+    # конвертировалась в общий 503 с сообщением «Database unavailable»
+    # без traceback'а в логах — отладка ломалась. Теперь различение
+    # DB-ошибок и общий 503-ответ делает ErrorHandlerMiddleware,
+    # сохраняя стек исключения.
+    async with async_session_factory() as session:
+        yield session

@@ -291,9 +291,16 @@ async def run_ad_events() -> None:
     await channel.set_qos(prefetch_count=100)
     queue = await channel.declare_queue(AD_EVENTS_QUEUE, durable=True)
     # Стартуем аккумулятор: периодический flush уходит в фоновую задачу.
-    init_accumulator(async_session_factory)
+    accumulator = init_accumulator(async_session_factory)
     await queue.consume(on_ad_event)
-    await _serve(connection, f"{AD_EVENTS_QUEUE} (ads batch)")
+    # bug_235 audit 2026-05-28: после _serve (он закрывает connection
+    # и дожидается завершения in-flight consume-tasks) явно
+    # останавливаем accumulator. Иначе фоновый _periodic_flush был бы
+    # убит вместе с event loop'ом, и батч в памяти терялся бы.
+    try:
+        await _serve(connection, f"{AD_EVENTS_QUEUE} (ads batch)")
+    finally:
+        await accumulator.stop()
 
 
 async def run_outbox() -> None:

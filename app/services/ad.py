@@ -25,7 +25,7 @@ import json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.ad import AdBanner, AdCampaign, AdEventType
+from app.models.ad import AdBanner, AdCampaign, AdEventType, CampaignStatus
 from app.redis import redis_client
 from app.repositories import ad as repo
 from app.services.rabbit import rabbit_service
@@ -267,6 +267,16 @@ async def record_event(
     campaign = await repo.get_campaign(db, banner.campaign_id)
     if campaign is None:
         raise ValueError("campaign_not_found")
+
+    # bug_214 audit 2026-05-28: schema требует budget>0 при создании,
+    # но через прямой UPDATE/миграцию/админский reset кампания может
+    # оказаться с budget<=0 или в нерабочем статусе. До этого фикса
+    # запись событий продолжалась бесконечно (особенно при
+    # cost_per_impression=0 — try_charge не пытался списать) →
+    # «бесплатная» открутка и накрутка счётчиков. Fail-closed: для
+    # неактивных или пустых кампаний событие считается отброшенным.
+    if campaign.status != CampaignStatus.active or campaign.budget <= 0:
+        return False
 
     # Списываем бюджет только за impression. Клики на этапе 10
     # не тарифицируются — CPM-модель. CPC расширим в будущем.
