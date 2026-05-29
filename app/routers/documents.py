@@ -29,6 +29,8 @@ from app.models.user import User
 from app.repositories import show as show_repo
 from app.repositories import task as task_repo
 from app.schemas.task import DocumentKind, TaskMessage, TaskResponse
+from app.services import document_official
+from app.services.document import to_jsonable
 from app.services.rabbit import rabbit_service
 
 logger = logging.getLogger(__name__)
@@ -168,3 +170,167 @@ async def generate_diploma(
         DocumentKind.DIPLOMA,
         {"show_id": str(show_id), "entry_id": str(entry_id)},
     )
+
+
+# ---------------------------------------------------------------------
+# Официальные документы (формат РКФ) — отдельные ручки рядом со старыми.
+# Формат вывода — query-параметр format=docx|pdf, кладётся в payload задачи.
+# ---------------------------------------------------------------------
+
+
+def _norm_format(fmt: str) -> str:
+    if fmt not in ("docx", "pdf"):
+        raise HTTPException(400, "format must be docx or pdf")
+    return fmt
+
+
+@router.post(
+    "/{show_id}/official/catalog",
+    response_model=TaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Каталог выставки в формате РКФ (docx/pdf)",
+)
+async def generate_official_catalog(
+    show_id: uuid.UUID,
+    format: str = "docx",
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    fmt = _norm_format(format)
+    try:
+        await _ensure_organizer(db, show_id, user)
+    except ValueError as e:
+        _raise_for_error(e)
+    return await _publish_task(
+        db, user, DocumentKind.CATALOG_OFFICIAL,
+        {"show_id": str(show_id), "format": fmt},
+    )
+
+
+@router.post(
+    "/{show_id}/official/diplomas",
+    response_model=TaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Пакет дипломов в формате РКФ (docx/pdf)",
+)
+async def generate_official_diplomas(
+    show_id: uuid.UUID,
+    format: str = "docx",
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    fmt = _norm_format(format)
+    try:
+        await _ensure_organizer(db, show_id, user)
+    except ValueError as e:
+        _raise_for_error(e)
+    return await _publish_task(
+        db, user, DocumentKind.DIPLOMAS_BATCH_OFFICIAL,
+        {"show_id": str(show_id), "format": fmt},
+    )
+
+
+@router.post(
+    "/{show_id}/entries/{entry_id}/official/diploma",
+    response_model=TaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Диплом участника в формате РКФ (docx/pdf)",
+)
+async def generate_official_diploma(
+    show_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    format: str = "docx",
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    fmt = _norm_format(format)
+    try:
+        await _ensure_organizer(db, show_id, user)
+    except ValueError as e:
+        _raise_for_error(e)
+    return await _publish_task(
+        db, user, DocumentKind.DIPLOMA_OFFICIAL,
+        {"show_id": str(show_id), "entry_id": str(entry_id), "format": fmt},
+    )
+
+
+@router.post(
+    "/{show_id}/official/ring-sheets",
+    response_model=TaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ринговые ведомости в формате РКФ (docx/pdf)",
+)
+async def generate_official_ring_sheets(
+    show_id: uuid.UUID,
+    format: str = "docx",
+    ring_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    fmt = _norm_format(format)
+    try:
+        await _ensure_organizer(db, show_id, user)
+    except ValueError as e:
+        _raise_for_error(e)
+    payload = {"show_id": str(show_id), "format": fmt}
+    if ring_id is not None:
+        payload["ring_id"] = str(ring_id)
+    return await _publish_task(
+        db, user, DocumentKind.RING_SHEETS_OFFICIAL, payload
+    )
+
+
+# ---------------------------------------------------------------------
+# Удобство фронта: предпросмотр собранных данных и чек-лист готовности.
+# ---------------------------------------------------------------------
+
+
+@router.get(
+    "/{show_id}/official/{kind}/context",
+    summary="Данные документа для предпросмотра/правки на фронте",
+)
+async def get_official_context(
+    show_id: uuid.UUID,
+    kind: str,
+    entry_id: uuid.UUID | None = None,
+    ring_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await _ensure_organizer(db, show_id, user)
+    except ValueError as e:
+        _raise_for_error(e)
+    try:
+        if kind == "catalog":
+            ctx = await document_official.build_catalog_context(db, show_id)
+        elif kind == "ring-sheets":
+            ctx = await document_official.build_ring_sheets_context(
+                db, show_id, ring_id
+            )
+        elif kind == "diploma":
+            if entry_id is None:
+                raise HTTPException(400, "entry_id required for diploma")
+            ctx = await document_official.build_diploma_context(db, entry_id)
+        else:
+            raise HTTPException(404, "unknown document kind")
+    except ValueError as e:
+        _raise_for_error(e)
+    return to_jsonable(ctx)
+
+
+@router.get(
+    "/{show_id}/documents/readiness",
+    summary="Чек-лист пробелов перед печатью документов",
+)
+async def get_documents_readiness(
+    show_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await _ensure_organizer(db, show_id, user)
+        data = await document_official.build_documents_readiness(db, show_id)
+    except ValueError as e:
+        _raise_for_error(e)
+    return data
