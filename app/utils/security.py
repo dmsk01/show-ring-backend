@@ -14,7 +14,15 @@ ALGORITHM = "HS256"
 # ИСПРАВЛЕНО: фиксированный bcrypt-хеш для constant-time проверки в login,
 # когда пользователь не найден. Без него длительность ответа выдавала
 # существование email (timing attack → user enumeration).
-_DUMMY_BCRYPT_HASH = pwd_context.hash("dummy-password-for-timing")
+#
+# ИСПРАВЛЕНО (review 2026-05-28): раньше pwd_context.hash вычислялся на
+# импорте модуля и стоил ~250 мс CPU. Этот файл импортируется из всего
+# app (через app.dependencies, app.services.auth), и налог платился
+# каждым процессом API/worker'а на холодном старте + каждым pytest-
+# процессом. Теперь хеш кешируется лениво при первом вызове
+# dummy_verify_password — в проде он прогревается первым же логином
+# несуществующего пользователя, в тестах — соответствующим тестом.
+_DUMMY_BCRYPT_HASH: str | None = None
 
 
 # Группа 1 — Пароли
@@ -29,6 +37,9 @@ def verify_password(plain: str, hashed: str) -> bool:
 def dummy_verify_password() -> None:
     # ИСПРАВЛЕНО: вызывается, когда юзер не найден, чтобы выровнять
     # время ответа с реальной bcrypt-верификацией.
+    global _DUMMY_BCRYPT_HASH
+    if _DUMMY_BCRYPT_HASH is None:
+        _DUMMY_BCRYPT_HASH = pwd_context.hash("dummy-password-for-timing")
     pwd_context.verify("dummy-password-for-timing", _DUMMY_BCRYPT_HASH)
 
 

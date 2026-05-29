@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Sequence
@@ -22,6 +23,8 @@ from app.models.notification import (
     Subscription,
 )
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------
@@ -191,8 +194,7 @@ async def mark_sent(db: AsyncSession, notification_id: uuid.UUID) -> bool:
     await db.commit()
     rowcount = getattr(result, "rowcount", 0)
     if rowcount == 0:
-        import logging
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "mark_sent: notification %s not found (rowcount=0)",
             notification_id,
         )
@@ -215,8 +217,7 @@ async def mark_failed(
     await db.commit()
     rowcount = getattr(result, "rowcount", 0)
     if rowcount == 0:
-        import logging
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "mark_failed: notification %s not found (rowcount=0)",
             notification_id,
         )

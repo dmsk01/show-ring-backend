@@ -51,3 +51,12 @@ def require_any_role(*roles: str):
         return user
 
     return dependency
+
+
+# ИСПРАВЛЕНО (review 2026-05-28): один helper вместо копии в
+# routers/classifieds.py, ads.py, tasks.py, shows.py. Не Dependency —
+# это чистая функция: вызывается из сервисов / роутеров уже после
+# get_current_user. Если завтра «кто такой admin» поменяется (например,
+# появится super_admin), правка в одном месте.
+def is_admin(user: User) -> bool:
+    return any(r.role.value == "admin" for r in user.roles)

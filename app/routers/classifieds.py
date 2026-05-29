@@ -12,7 +12,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, is_admin
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.classified import ClassifiedCategory, ClassifiedStatus
 from app.models.user import User
@@ -30,8 +30,10 @@ from app.services import classified as svc
 router = APIRouter(prefix="/classifieds", tags=["classifieds"])
 
 
-def _is_admin(user: User) -> bool:
-    return any(r.role.value == "admin" for r in user.roles)
+# ИСПРАВЛЕНО (review 2026-05-28): локальный _is_admin вынесен в
+# app.dependencies.is_admin. Алиас остаётся, чтобы не править все
+# call-site'ы внутри файла.
+_is_admin = is_admin
 
 
 def _raise_for_error(err: ValueError) -> None:

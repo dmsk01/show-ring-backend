@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, is_admin
 from app.models.show import ShowStatus
 from app.models.user import User
 from app.repositories import show as repo
@@ -43,8 +43,8 @@ from app.services import show as svc
 router = APIRouter(prefix="/shows", tags=["shows"])
 
 
-def _is_admin(user: User) -> bool:
-    return any(r.role.value == "admin" for r in user.roles)
+# ИСПРАВЛЕНО (review 2026-05-28): см. routers/classifieds.py.
+_is_admin = is_admin
 
 
 def _raise_for_error(err: ValueError) -> NoReturn:

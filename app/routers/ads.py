@@ -21,7 +21,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, is_admin
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
 from app.redis import get_redis
@@ -43,8 +43,10 @@ from app.services import ad as svc
 router = APIRouter(prefix="/ads", tags=["ads"])
 
 
-def _is_admin(user: User) -> bool:
-    return any(r.role.value == "admin" for r in user.roles)
+# ИСПРАВЛЕНО (review 2026-05-28): см. routers/classifieds.py — общий
+# helper в app.dependencies.is_admin. Алиас для совместимости с
+# вызовами внутри файла.
+_is_admin = is_admin
 
 
 def _raise_for_error(err: ValueError) -> NoReturn:

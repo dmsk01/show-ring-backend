@@ -18,7 +18,6 @@ import hashlib
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
 
 import json
 

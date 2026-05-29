@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import signal
+import uuid
 
 import aio_pika
 
@@ -84,9 +85,7 @@ async def on_document_message(message: aio_pika.abc.AbstractIncomingMessage):
             try:
                 # task_id приходит как строка UUID — переводим тут, чтобы
                 # хендлер работал с типизированным значением.
-                import uuid as _uuid
-
-                tid = _uuid.UUID(task_id)
+                tid = uuid.UUID(task_id)
                 await process_document_task(db, tid)
             except Exception:
                 logger.exception("Document task %s failed", task_id)

@@ -47,6 +47,17 @@ _HEADER = "Idempotency-Key"
 # TTL — страховка от утечки lock'а при крэше процесса.
 _IN_FLIGHT_TTL_SECONDS = 60
 
+# ИСПРАВЛЕНО (review 2026-05-28): лимит размера кэшируемого тела.
+# Раньше middleware безусловно буферизовал ВЕСЬ 2xx-ответ в Redis. Для
+# эндпоинтов, возвращающих большие JSON (агрегации, batch-операции) или
+# бинарь (если когда-нибудь PDF будут отдавать через POST), это удваивало
+# память на ответ и держало копию в Redis сутки. 256 KB покрывает
+# подавляющее большинство JSON-ответов API; для больших ответов
+# семантика остаётся — клиент получает результат, in-flight lock
+# защищает от двойной обработки, — но кэш просто не пишется, и второй
+# идентичный запрос пройдёт заново через handler.
+_MAX_CACHED_BODY_BYTES = 256 * 1024
+
 
 def _caller_identity(request: Request) -> str:
     """
@@ -209,21 +220,32 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                     body_chunks.append(chunk)
             full_body = b"".join(body_chunks)
 
-            snapshot = {
-                "body": full_body.decode("utf-8", errors="replace"),
-                "encoding": "utf-8",
-                "status": response.status_code,
-                "headers": dict(response.headers),
-                "media_type": response.media_type,
-            }
-            try:
-                await redis_client.set(
-                    cache_key,
-                    json.dumps(snapshot),
-                    ex=settings.idempotency_ttl_seconds,
+            # ИСПРАВЛЕНО (review 2026-05-28): кешируем только если тело
+            # вписывается в _MAX_CACHED_BODY_BYTES. Большие ответы
+            # отдаём клиенту как есть, но в Redis не пишем — см.
+            # обоснование на константе.
+            if len(full_body) <= _MAX_CACHED_BODY_BYTES:
+                snapshot = {
+                    "body": full_body.decode("utf-8", errors="replace"),
+                    "encoding": "utf-8",
+                    "status": response.status_code,
+                    "headers": dict(response.headers),
+                    "media_type": response.media_type,
+                }
+                try:
+                    await redis_client.set(
+                        cache_key,
+                        json.dumps(snapshot),
+                        ex=settings.idempotency_ttl_seconds,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("idempotency cache SET failed: %s", e)
+            else:
+                logger.info(
+                    "idempotency cache skip: body %d bytes > limit %d",
+                    len(full_body),
+                    _MAX_CACHED_BODY_BYTES,
                 )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("idempotency cache SET failed: %s", e)
 
             # Lock освобождаем ПОСЛЕ записи в кэш. Если бы делали наоборот,
             # параллельный запрос (попавший в окно "lock освобождён, кэш

@@ -92,6 +92,12 @@ async def process_document_task(
             raise ValueError(f"unknown task type: {task.type}")
     except Exception as e:  # noqa: BLE001 — последняя черта обороны воркера
         logger.exception("Task %s failed", task_id)
+        # ИСПРАВЛЕНО (review 2026-05-28): _upload_and_register больше не
+        # коммитит UploadedFile сразу — он сидит в pending-стейте сессии.
+        # При исключении откатываем pending INSERT, иначе следующий
+        # mark_failed (UPDATE + commit) затянул бы файл-сироту в БД,
+        # ссылающийся на ничего в S3 (если падение случилось ДО upload'а).
+        await db.rollback()
         # mark_failed теперь возвращает bool: False означает, что задача
         # уже не в processing (другой воркер опередил или ручной apgrade).
         # Просто логируем — в любом случае работать дальше нечего.
@@ -187,6 +193,18 @@ async def _upload_and_register(
     Расширение всегда "pdf" — этап 8 работает только с PDF. Когда
     добавятся другие форматы (CSV экспорт, JPG ресайз), функция получит
     параметр extension.
+
+    ИСПРАВЛЕНО (review 2026-05-28): убрали внутренний commit/refresh.
+    Раньше последовательность была: upload_bytes → INSERT UploadedFile
+    + commit → mark_done (отдельный commit). Если процесс убивали между
+    двумя commit'ами, UploadedFile оставался в БД, а task — в processing.
+    Scheduler через час re-публиковал задачу → новый upload → дубликат
+    UploadedFile, первый сиротеет.
+    Сейчас UploadedFile только flush'ится (id уже назначен default'ом),
+    а commit делает один вызов mark_done в process_document_task —
+    UPDATE Task и INSERT UploadedFile попадают в одну транзакцию. При
+    крэше до mark_done вся работа откатывается: задача возвращается в
+    pending через cleanup-cron (см. requeue_stuck_tasks).
     """
     s3_key, size_bytes = await file_storage.upload_bytes(
         body,
@@ -202,6 +220,9 @@ async def _upload_and_register(
         size_bytes=size_bytes,
     )
     db.add(file_obj)
-    await db.commit()
-    await db.refresh(file_obj)
+    # flush — заставляет SQLAlchemy выполнить INSERT и применить
+    # default=uuid.uuid4 (id назначается в Python до INSERT, см.
+    # UploadedFile-модель). refresh не делаем — created_at нам тут не
+    # нужен, а лишний SELECT не хочется. commit будет в mark_done.
+    await db.flush()
     return file_obj.id

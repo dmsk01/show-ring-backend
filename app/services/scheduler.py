@@ -21,17 +21,19 @@ from __future__ import annotations
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import delete, update
+from sqlalchemy import delete, func, select, update
 
 from app import redis as redis_module
 from app.database import async_session_factory
 from app.models.classified import Classified, ClassifiedStatus
 from app.models.task import Task, TaskStatusEnum
 from app.models.user import RefreshToken
+from app.repositories import outbox as outbox_repo
+from app.schemas.task import TaskMessage
 
 logger = logging.getLogger(__name__)
 
@@ -234,11 +236,6 @@ async def requeue_stuck_tasks() -> None:
     транзакции, что и UPDATE status. Outbox-воркер подберёт и
     опубликует — гарантия "статус pending ⇔ событие в очереди".
     """
-    from datetime import timedelta
-
-    from app.repositories import outbox as outbox_repo
-    from app.schemas.task import TaskMessage
-
     cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
     async with _scheduler_lock("requeue_stuck_tasks") as acquired:
         if not acquired:
@@ -246,8 +243,6 @@ async def requeue_stuck_tasks() -> None:
         async with async_session_factory() as db:
             # SELECT + UPDATE построчно — нужны type и payload для
             # правильной публикации в очередь конкретного типа.
-            from sqlalchemy import select
-
             select_stmt = select(Task).where(
                 Task.status == TaskStatusEnum.processing,
                 Task.updated_at < cutoff,
@@ -313,9 +308,13 @@ async def archive_old_classifieds() -> None:
     90 дней — типичный TTL для "продажи щенков". Если объявление
     провисело так долго и не закрыто автором — скорее всего щенки
     уже распроданы либо объявление потеряло актуальность.
-    """
-    from datetime import timedelta
 
+    ИСПРАВЛЕНО (review 2026-05-28): раньше cutoff проверялся по
+    `created_at`. Это игнорировало активность автора: если объявление
+    создано 95 дней назад, но 2 дня назад в нём правили цену, оно
+    всё равно архивировалось. Теперь учитываем оба времени и берём
+    более позднее — свежие правки задерживают архивацию.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=90)
     async with _scheduler_lock("archive_classifieds") as acquired:
         if not acquired:
@@ -325,7 +324,12 @@ async def archive_old_classifieds() -> None:
                 update(Classified)
                 .where(
                     Classified.status == ClassifiedStatus.active,
-                    Classified.created_at < cutoff,
+                    # GREATEST(created_at, updated_at) — стандартный PG-
+                    # приём. SQLAlchemy не знает GREATEST как ANSI-функцию,
+                    # делаем через generic func.greatest (PG-native).
+                    func.greatest(
+                        Classified.created_at, Classified.updated_at
+                    ) < cutoff,
                 )
                 .values(status=ClassifiedStatus.archived)
             )

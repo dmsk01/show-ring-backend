@@ -47,8 +47,22 @@ async def register_user(db: AsyncSession, email: str, password: str):
             db, user.id, token_hash, expires_at
         )
 
-        # заглушка отправки почты
-        logger.info("[DEV] Verify token for %s: %s", email, raw_token)
+        # ИСПРАВЛЕНО (review 2026-05-28): токен подтверждения — sensitive
+        # данные. Раньше logger.info писал raw_token в общий info-лог;
+        # при log_json=true (prod) он улетал в ELK/Loki и любой с
+        # доступом к лог-агрегатору мог подтвердить чужой email.
+        # Теперь:
+        #   - в debug-режиме всё ещё печатаем сам токен (удобно для dev-flow
+        #     без работающего SMTP);
+        #   - в prod пишем только факт через security_logger, без токена.
+        # TODO: подключить отправку через publish_event/email-worker
+        # (этап 9 готов, осталось интегрировать в register_user).
+        if settings.debug:
+            logger.info("[DEV] Verify token for %s: %s", email, raw_token)
+        else:
+            security_logger.info(
+                "email_verification_requested user_id=%s", user.id
+            )
         await db.commit()
         return user
     except IntegrityError:

@@ -25,6 +25,7 @@ import io
 import logging
 from pathlib import Path
 from typing import Iterable
+from xml.sax.saxutils import escape as _xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -44,6 +45,22 @@ from reportlab.platypus import (
 from app.services.document import CatalogData, DiplomaData
 
 logger = logging.getLogger(__name__)
+
+
+# ИСПРАВЛЕНО (review 2026-05-28): ReportLab Paragraph использует
+# XML-подобную разметку (`<b>`, `<i>`, `<font>` …). Пользовательские
+# значения — клички собак, имена владельцев, названия питомников —
+# попадали в Paragraph через f-string без эскейпа. Кличка `<i>Bobby</i>`
+# не только не отображалась бы корректно, но при `<` без закрытия
+# Paragraph падал бы на парсинге XML, ронив весь каталог (PDF на 1000
+# собак — крэш из-за одной "битой" записи).
+# _esc — единая обёртка: None → пустая строка, остальное прогоняется
+# через xml.sax.saxutils.escape (тот же набор &/<,>/"/').
+def _esc(value: object | None) -> str:
+    """Безопасное преобразование произвольного значения в Paragraph-текст."""
+    if value is None:
+        return ""
+    return _xml_escape(str(value), {'"': "&quot;", "'": "&apos;"})
 
 
 # ---------------------------------------------------------------------
@@ -184,17 +201,17 @@ def render_catalog(data: CatalogData) -> bytes:
     styles = _make_styles()
     story: list = []
 
-    # Шапка.
-    story.append(Paragraph(data.show_name, styles["title"]))
+    # Шапка. Все user-supplied поля прогоняем через _esc — см. модуль выше.
+    story.append(Paragraph(_esc(data.show_name), styles["title"]))
     period = (
         f"{data.date_start.strftime('%d.%m.%Y')}"
         + (f" — {data.date_end.strftime('%d.%m.%Y')}" if data.date_end else "")
     )
     story.append(
         Paragraph(
-            f"Ранг: {data.show_rank} &nbsp; • &nbsp; Даты: {period}"
-            + (f" &nbsp; • &nbsp; Город: {data.city}" if data.city else "")
-            + (f" &nbsp; • &nbsp; Место: {data.venue}" if data.venue else ""),
+            f"Ранг: {_esc(data.show_rank)} &nbsp; • &nbsp; Даты: {period}"
+            + (f" &nbsp; • &nbsp; Город: {_esc(data.city)}" if data.city else "")
+            + (f" &nbsp; • &nbsp; Место: {_esc(data.venue)}" if data.venue else ""),
             styles["body"],
         )
     )
@@ -208,7 +225,10 @@ def render_catalog(data: CatalogData) -> bytes:
         story.append(Paragraph("Судьи", styles["h2"]))
         for j in data.judges:
             story.append(
-                Paragraph(f"• {j.name} — {j.breeds_or_groups}", styles["body"])
+                Paragraph(
+                    f"• {_esc(j.name)} — {_esc(j.breeds_or_groups)}",
+                    styles["body"],
+                )
             )
         story.append(Spacer(1, 0.4 * cm))
 
@@ -217,19 +237,22 @@ def render_catalog(data: CatalogData) -> bytes:
         group_label = (
             f"FCI группа {section.group_number}, " if section.group_number else ""
         )
-        fci_label = f" (FCI №{section.fci_number})" if section.fci_number else ""
+        fci_label = f" (FCI №{_esc(section.fci_number)})" if section.fci_number else ""
         story.append(
             Paragraph(
-                f"{group_label}{section.breed_name}{fci_label}",
+                f"{group_label}{_esc(section.breed_name)}{fci_label}",
                 styles["h1"],
             )
         )
         if section.judge_name:
             story.append(
-                Paragraph(f"Судья: {section.judge_name}", styles["body"])
+                Paragraph(
+                    f"Судья: {_esc(section.judge_name)}",
+                    styles["body"],
+                )
             )
         for cls in section.classes:
-            story.append(Paragraph(cls.class_name, styles["h2"]))
+            story.append(Paragraph(_esc(cls.class_name), styles["h2"]))
             story.append(_entries_table(cls.entries, styles))
             story.append(Spacer(1, 0.3 * cm))
 
@@ -262,15 +285,17 @@ def _entries_table(
                     f"{e.catalog_number:03d}" if e.catalog_number else "—",
                     styles["body"],
                 ),
-                Paragraph(e.dog_name or "—", styles["body"]),
+                # Все строки от пользователя (кличка, окрас, имена) —
+                # через _esc, чтобы Paragraph не падал на "<", "&" и т. п.
+                Paragraph(_esc(e.dog_name) or "—", styles["body"]),
                 Paragraph(
                     e.date_of_birth.strftime("%d.%m.%Y") if e.date_of_birth else "—",
                     styles["body"],
                 ),
-                Paragraph(e.color or "—", styles["body"]),
-                Paragraph(e.rkf_number or "—", styles["body"]),
-                Paragraph(e.owner_name or "—", styles["body"]),
-                Paragraph(e.breeder_name or "—", styles["body"]),
+                Paragraph(_esc(e.color) or "—", styles["body"]),
+                Paragraph(_esc(e.rkf_number) or "—", styles["body"]),
+                Paragraph(_esc(e.owner_name) or "—", styles["body"]),
+                Paragraph(_esc(e.breeder_name) or "—", styles["body"]),
             ]
         )
     table = Table(rows, colWidths=[1.2 * cm, 4 * cm, 2 * cm, 2.5 * cm, 2 * cm, 3 * cm, 3 * cm])
@@ -311,36 +336,53 @@ def render_diploma(data: DiplomaData) -> bytes:
 
     story.append(Paragraph("ДИПЛОМ", styles["title"]))
     story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph(data.show_name, styles["h1"]))
+    story.append(Paragraph(_esc(data.show_name), styles["h1"]))
     story.append(
         Paragraph(
-            f"Ранг: {data.show_rank} &nbsp; • &nbsp; "
+            f"Ранг: {_esc(data.show_rank)} &nbsp; • &nbsp; "
             f"Дата: {data.date_start.strftime('%d.%m.%Y')}"
-            + (f" &nbsp; • &nbsp; Город: {data.city}" if data.city else ""),
+            + (f" &nbsp; • &nbsp; Город: {_esc(data.city)}" if data.city else ""),
             styles["body"],
         )
     )
     story.append(Spacer(1, 1 * cm))
 
-    story.append(Paragraph(f"Порода: {data.breed_name}", styles["body"]))
-    story.append(Paragraph(f"Класс: {data.class_name}", styles["body"]))
+    story.append(Paragraph(f"Порода: {_esc(data.breed_name)}", styles["body"]))
+    story.append(Paragraph(f"Класс: {_esc(data.class_name)}", styles["body"]))
     story.append(Spacer(1, 0.4 * cm))
 
-    story.append(Paragraph(f"Кличка: <b>{data.dog_name}</b>", styles["body"]))
+    # Кличка/имена/титулы — пользовательские. <b>/<i>/markup ставим в
+    # шаблоне САМИ, а в подставляемые значения попадают только эскейпленные
+    # строки (иначе ввод <i>Bobby</i> ломал бы XML-парсер Paragraph'а).
+    story.append(
+        Paragraph(f"Кличка: <b>{_esc(data.dog_name)}</b>", styles["body"])
+    )
     if data.rkf_number:
-        story.append(Paragraph(f"РКФ №: {data.rkf_number}", styles["body"]))
+        story.append(
+            Paragraph(f"РКФ №: {_esc(data.rkf_number)}", styles["body"])
+        )
     if data.owner_name:
-        story.append(Paragraph(f"Владелец: {data.owner_name}", styles["body"]))
+        story.append(
+            Paragraph(f"Владелец: {_esc(data.owner_name)}", styles["body"])
+        )
     story.append(Spacer(1, 0.8 * cm))
 
     if data.grade_name:
-        story.append(Paragraph(f"Оценка: <b>{data.grade_name}</b>", styles["body"]))
+        story.append(
+            Paragraph(
+                f"Оценка: <b>{_esc(data.grade_name)}</b>", styles["body"]
+            )
+        )
     if data.placement is not None:
-        story.append(Paragraph(f"Место: <b>{data.placement}</b>", styles["body"]))
+        story.append(
+            Paragraph(f"Место: <b>{_esc(data.placement)}</b>", styles["body"])
+        )
     if data.titles:
         story.append(
             Paragraph(
-                "Титулы: <b>" + ", ".join(data.titles) + "</b>",
+                "Титулы: <b>"
+                + ", ".join(_esc(t) for t in data.titles)
+                + "</b>",
                 styles["body"],
             )
         )
@@ -348,7 +390,9 @@ def render_diploma(data: DiplomaData) -> bytes:
 
     if data.judge_name:
         story.append(
-            Paragraph(f"Судья: <i>{data.judge_name}</i>", styles["body"])
+            Paragraph(
+                f"Судья: <i>{_esc(data.judge_name)}</i>", styles["body"]
+            )
         )
 
     doc.build(story)
@@ -370,37 +414,45 @@ def render_diplomas_batch(items: Iterable[DiplomaData]) -> bytes:
         # render_diploma напрямую (он сам строит SimpleDocTemplate),
         # а строим элементы в общую story. PageBreak между ними.
         story.append(Paragraph("ДИПЛОМ", styles["title"]))
-        story.append(Paragraph(d.show_name, styles["h1"]))
+        story.append(Paragraph(_esc(d.show_name), styles["h1"]))
         story.append(
             Paragraph(
-                f"{d.show_rank} • {d.date_start.strftime('%d.%m.%Y')}"
-                + (f" • {d.city}" if d.city else ""),
+                f"{_esc(d.show_rank)} • {d.date_start.strftime('%d.%m.%Y')}"
+                + (f" • {_esc(d.city)}" if d.city else ""),
                 styles["body"],
             )
         )
         story.append(Spacer(1, 0.8 * cm))
-        story.append(Paragraph(f"Порода: {d.breed_name}", styles["body"]))
-        story.append(Paragraph(f"Класс: {d.class_name}", styles["body"]))
+        story.append(Paragraph(f"Порода: {_esc(d.breed_name)}", styles["body"]))
+        story.append(Paragraph(f"Класс: {_esc(d.class_name)}", styles["body"]))
         story.append(
-            Paragraph(f"Кличка: <b>{d.dog_name}</b>", styles["body"])
+            Paragraph(f"Кличка: <b>{_esc(d.dog_name)}</b>", styles["body"])
         )
         if d.rkf_number:
-            story.append(Paragraph(f"РКФ №: {d.rkf_number}", styles["body"]))
+            story.append(
+                Paragraph(f"РКФ №: {_esc(d.rkf_number)}", styles["body"])
+            )
         if d.grade_name:
             story.append(
-                Paragraph(f"Оценка: <b>{d.grade_name}</b>", styles["body"])
+                Paragraph(
+                    f"Оценка: <b>{_esc(d.grade_name)}</b>", styles["body"]
+                )
             )
         if d.titles:
             story.append(
                 Paragraph(
-                    "Титулы: <b>" + ", ".join(d.titles) + "</b>",
+                    "Титулы: <b>"
+                    + ", ".join(_esc(t) for t in d.titles)
+                    + "</b>",
                     styles["body"],
                 )
             )
         if d.judge_name:
             story.append(Spacer(1, 1 * cm))
             story.append(
-                Paragraph(f"Судья: <i>{d.judge_name}</i>", styles["body"])
+                Paragraph(
+                    f"Судья: <i>{_esc(d.judge_name)}</i>", styles["body"]
+                )
             )
         if i + 1 < len(items_list):
             story.append(PageBreak())

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import aiosmtplib
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound, select_autoescape
+from markupsafe import escape as _html_escape
 
 from app.config import settings
 
@@ -79,9 +80,16 @@ def render_email(
         template = _env.get_template(f"{template_name}.html.j2")
     except TemplateNotFound:
         logger.warning("Email template not found: %s", template_name)
+        # ИСПРАВЛЕНО (review 2026-05-28): template_name приходит из
+        # event.event_type. Сейчас он внутренний enum, но если когда-нибудь
+        # источник событий расширится на внешний publisher, event_type
+        # может стать управляемым. Подстановка через f-string в HTML без
+        # экранирования давала бы XSS в письме. markupsafe.escape — тот же
+        # механизм, что использует Jinja для autoescape. text-fallback
+        # оставляем как есть (это plain/text, без HTML-парсинга у клиента).
         return (
             f"ShowTail: {template_name}",
-            f"<p>Событие: {template_name}</p>",
+            f"<p>Событие: {_html_escape(template_name)}</p>",
             f"Событие: {template_name}",
         )
 

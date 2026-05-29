@@ -9,7 +9,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import engine
 from app.logging_config import setup_logging
-from app.middleware.error_handler import ErrorHandlerMiddleware
+from app.middleware.error_handler import register_error_handlers
 from app.middleware.idempotency import IdempotencyMiddleware
 from app.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.middleware.request_id import RequestIdMiddleware
@@ -91,20 +91,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# ИСПРАВЛЕНО (review 2026-05-28): обработка ошибок вынесена в
+# FastAPI exception handlers (см. app/middleware/error_handler.py).
+# Раньше это был BaseHTTPMiddleware, добавлявшийся 2-м — Starlette
+# оборачивал middleware в обратном порядке, и ErrorHandler оказывался
+# ВНУТРИ Sanitization/Idempotency/ProxyHeaders. Их исключения не
+# ловились → дефолтный 500 без request_id. exception_handler работает
+# на уровне ServerErrorMiddleware (обёртка над всем стеком), охватывает
+# любые middleware.
+register_error_handlers(app)
+
 # Порядок middleware важен: FastAPI применяет их в обратном порядке
 # добавления к запросу. Значит первым ВЫПОЛНЯЕТСЯ последний добавленный.
 # Идём от "ближе к handler'у" → "ближе к сети":
 #   1. RequestId      — добавить ID до всего остального (логи)
-#   2. ErrorHandler   — ловить исключения handler'ов
-#   3. Sanitization   — чистить тело до бизнес-логики
-#   4. Idempotency    — после sanitization (тело уже чистое), но до handler'а
-#   5. SecurityHeaders — на ответ всегда, последним в pipeline
-#   6. ProxyHeaders   — ВЫПОЛНЯЕТСЯ ПЕРВЫМ (сетевой уровень): подменяем
+#   2. Sanitization   — чистить тело до бизнес-логики
+#   3. Idempotency    — после sanitization (тело уже чистое), но до handler'а
+#   4. SecurityHeaders — на ответ всегда, последним в pipeline
+#   5. ProxyHeaders   — ВЫПОЛНЯЕТСЯ ПЕРВЫМ (сетевой уровень): подменяем
 #                       client IP до того, как rate-limit/ad-fraud его
 #                       прочитают.
-#   7. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
+#   6. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
 app.add_middleware(RequestIdMiddleware)
-app.add_middleware(ErrorHandlerMiddleware)
 app.add_middleware(SanitizationMiddleware)
 app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
@@ -119,13 +127,24 @@ if settings.allowed_hosts:
 # ИСПРАВЛЕНО: CORSMiddleware подключается только если список доменов задан.
 # Пустой список = CORS не настраивается (без * по умолчанию) — иначе
 # фронт с любого домена мог бы дёргать API.
+#
+# ИСПРАВЛЕНО (review 2026-05-28): allow_methods/allow_headers ранее
+# были ["*"]. По CORS-спецификации wildcards НЕ разрешены при
+# allow_credentials=True — Chrome/Firefox блокируют такие preflight'ы.
+# Перечисляем явно методы и заголовки, которые реально использует
+# фронт. При появлении новых кастомных заголовков расширяем список.
 if settings.cors_allow_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "X-Request-ID",
+        ],
     )
 
 app.include_router(health.router)
