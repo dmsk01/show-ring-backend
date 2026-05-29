@@ -181,6 +181,28 @@ async def build_diploma_context(
     )
 
 
+async def build_diplomas_batch_context(
+    db: AsyncSession, show_id: uuid.UUID
+) -> dict:
+    """Контекст для одного файла со всеми дипломами выставки.
+
+    Каждый диплом — это словарь от build_diploma_context. Битые записи
+    (нет собаки/результата) пропускаем, не валя всю пачку.
+    """
+    entry_ids = (
+        await db.execute(
+            select(ShowEntry.id).where(ShowEntry.show_id == show_id)
+        )
+    ).scalars().all()
+    diplomas: list[dict] = []
+    for eid in entry_ids:
+        try:
+            diplomas.append(await build_diploma_context(db, eid))
+        except ValueError:
+            continue
+    return {"diplomas": diplomas}
+
+
 # ---------------------------------------------------------------------
 # Ринговая ведомость
 # ---------------------------------------------------------------------

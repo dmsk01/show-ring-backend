@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -22,8 +23,8 @@ from app.models.file import UploadedFile
 from app.models.task import TaskStatusEnum
 from app.repositories import task as task_repo
 from app.schemas.task import DocumentKind
-from app.services import document, file_storage
-from app.utils import pdf
+from app.services import document, document_official, file_storage
+from app.utils import docx_render, pdf
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,22 @@ async def process_document_task(
             file_id = await _handle_diploma(db, task.payload, task.created_by)
         elif task.type == DocumentKind.DIPLOMAS_BATCH.value:
             file_id = await _handle_diplomas_batch(
+                db, task.payload, task.created_by
+            )
+        elif task.type == DocumentKind.CATALOG_OFFICIAL.value:
+            file_id = await _handle_catalog_official(
+                db, task.payload, task.created_by
+            )
+        elif task.type == DocumentKind.DIPLOMA_OFFICIAL.value:
+            file_id = await _handle_diploma_official(
+                db, task.payload, task.created_by
+            )
+        elif task.type == DocumentKind.DIPLOMAS_BATCH_OFFICIAL.value:
+            file_id = await _handle_diplomas_batch_official(
+                db, task.payload, task.created_by
+            )
+        elif task.type == DocumentKind.RING_SHEETS_OFFICIAL.value:
+            file_id = await _handle_ring_sheets_official(
                 db, task.payload, task.created_by
             )
         else:
@@ -185,14 +202,14 @@ async def _upload_and_register(
     *,
     content_type: str,
     created_by: uuid.UUID | None,
+    extension: str = "pdf",
 ) -> uuid.UUID:
     """
     Загружает байты в MinIO и регистрирует UploadedFile в БД.
     Возвращает file_id для сохранения в task.result.
 
-    Расширение всегда "pdf" — этап 8 работает только с PDF. Когда
-    добавятся другие форматы (CSV экспорт, JPG ресайз), функция получит
-    параметр extension.
+    extension по умолчанию "pdf" (этап 8). Официальные документы (этап
+    docs) передают "docx" или "pdf" в зависимости от запрошенного формата.
 
     ИСПРАВЛЕНО (review 2026-05-28): убрали внутренний commit/refresh.
     Раньше последовательность была: upload_bytes → INSERT UploadedFile
@@ -209,7 +226,7 @@ async def _upload_and_register(
     s3_key, size_bytes = await file_storage.upload_bytes(
         body,
         content_type=content_type,
-        extension="pdf",
+        extension=extension,
         folder="documents",
     )
     file_obj = UploadedFile(
@@ -226,3 +243,98 @@ async def _upload_and_register(
     # нужен, а лишний SELECT не хочется. commit будет в mark_done.
     await db.flush()
     return file_obj.id
+
+
+# ---------------------------------------------------------------------
+# Официальные документы РКФ (DOCX-шаблоны + опц. конвертация в PDF)
+# ---------------------------------------------------------------------
+
+
+async def _render_official(
+    template_name: str, context: dict, fmt: str, basename: str
+) -> tuple[bytes, str, str, str]:
+    """
+    Рендерит docx из шаблона и (опц.) конвертит в pdf. Блокирующие вызовы
+    (docxtpl-рендер, LibreOffice-конвертация) уводим в отдельный поток,
+    чтобы не вешать event loop воркера.
+
+    Возвращает (body, extension, content_type, filename).
+    """
+    docx_bytes = await asyncio.to_thread(
+        docx_render.render_docx, template_name, context
+    )
+    if fmt == "pdf":
+        pdf_bytes = await asyncio.to_thread(
+            docx_render.convert_docx_to_pdf, docx_bytes
+        )
+        return pdf_bytes, "pdf", "application/pdf", f"{basename}.pdf"
+    return (
+        docx_bytes,
+        "docx",
+        docx_render.DOCX_CONTENT_TYPE,
+        f"{basename}.docx",
+    )
+
+
+async def _handle_catalog_official(
+    db: AsyncSession, payload: dict, created_by: uuid.UUID | None
+) -> uuid.UUID:
+    show_id = uuid.UUID(payload["show_id"])
+    fmt = payload.get("format", "docx")
+    ctx = await document_official.build_catalog_context(db, show_id)
+    body, ext, ctype, filename = await _render_official(
+        "catalog.docx", ctx, fmt, f"catalog_official_{show_id}"
+    )
+    return await _upload_and_register(
+        db, body, filename, content_type=ctype, created_by=created_by,
+        extension=ext,
+    )
+
+
+async def _handle_diploma_official(
+    db: AsyncSession, payload: dict, created_by: uuid.UUID | None
+) -> uuid.UUID:
+    entry_id = uuid.UUID(payload["entry_id"])
+    fmt = payload.get("format", "docx")
+    ctx = await document_official.build_diploma_context(db, entry_id)
+    body, ext, ctype, filename = await _render_official(
+        "diploma.docx", ctx, fmt, f"diploma_official_{entry_id}"
+    )
+    return await _upload_and_register(
+        db, body, filename, content_type=ctype, created_by=created_by,
+        extension=ext,
+    )
+
+
+async def _handle_diplomas_batch_official(
+    db: AsyncSession, payload: dict, created_by: uuid.UUID | None
+) -> uuid.UUID:
+    show_id = uuid.UUID(payload["show_id"])
+    fmt = payload.get("format", "docx")
+    ctx = await document_official.build_diplomas_batch_context(db, show_id)
+    body, ext, ctype, filename = await _render_official(
+        "diplomas_batch.docx", ctx, fmt, f"diplomas_official_{show_id}"
+    )
+    return await _upload_and_register(
+        db, body, filename, content_type=ctype, created_by=created_by,
+        extension=ext,
+    )
+
+
+async def _handle_ring_sheets_official(
+    db: AsyncSession, payload: dict, created_by: uuid.UUID | None
+) -> uuid.UUID:
+    show_id = uuid.UUID(payload["show_id"])
+    fmt = payload.get("format", "docx")
+    ring_id = payload.get("ring_id")
+    ring_uuid = uuid.UUID(ring_id) if ring_id else None
+    ctx = await document_official.build_ring_sheets_context(
+        db, show_id, ring_uuid
+    )
+    body, ext, ctype, filename = await _render_official(
+        "ring_sheet.docx", ctx, fmt, f"ring_sheets_{show_id}"
+    )
+    return await _upload_and_register(
+        db, body, filename, content_type=ctype, created_by=created_by,
+        extension=ext,
+    )
