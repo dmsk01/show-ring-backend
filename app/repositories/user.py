@@ -5,7 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import EmailVerificationToken, RefreshToken, User
+from app.models.user import EmailVerificationToken, RefreshToken, User, UserProfile
 
 
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
@@ -139,3 +139,22 @@ async def set_user_email_verified(db: AsyncSession, user_id: UUID) -> None:
     stmt = update(User).where(User.id == user_id).values(is_email_verified=True)
 
     await db.execute(stmt)
+
+
+async def get_profile(db: AsyncSession, user_id: UUID) -> UserProfile | None:
+    return await db.get(UserProfile, user_id)
+
+
+async def upsert_profile(
+    db: AsyncSession, user_id: UUID, **fields
+) -> UserProfile:
+    """Создаёт или обновляет профиль. fields — только не-None значения."""
+    profile = await db.get(UserProfile, user_id)
+    if profile is None:
+        profile = UserProfile(user_id=user_id, **fields)
+        db.add(profile)
+    else:
+        for key, value in fields.items():
+            setattr(profile, key, value)
+    await db.flush()
+    return profile
