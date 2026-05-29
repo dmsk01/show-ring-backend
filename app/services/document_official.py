@@ -559,3 +559,74 @@ async def build_catalog_context(
         judges=judges_meta,
     )
     return _shape_catalog(meta, inputs)
+
+
+# ---------------------------------------------------------------------
+# Readiness (чек-лист пробелов перед печатью)
+# ---------------------------------------------------------------------
+
+
+@dataclass
+class EntryCheck:
+    catalog_number: int | None
+    dog_name: str
+    owner_present: bool
+    breeder_present: bool
+    has_tattoo: bool
+    has_microchip: bool
+    has_pedigree: bool
+
+
+def _entry_issues(c: EntryCheck) -> list[dict]:
+    issues: list[dict] = []
+    if c.catalog_number is None:
+        issues.append({"code": "no_catalog_number", "message": "нет номера каталога"})
+    if not c.owner_present:
+        issues.append({"code": "no_owner", "message": "не указан владелец (ФИО)"})
+    if not c.breeder_present:
+        issues.append({"code": "no_breeder", "message": "не указан заводчик"})
+    if not (c.has_tattoo or c.has_microchip):
+        issues.append({"code": "no_id", "message": "нет клейма и чипа"})
+    if not c.has_pedigree:
+        issues.append({"code": "no_pedigree", "message": "нет № родословной"})
+    return issues
+
+
+async def build_documents_readiness(
+    db: AsyncSession, show_id: uuid.UUID
+) -> dict:
+    """Список записей с проблемами, мешающими корректной печати документов."""
+    show = await db.get(Show, show_id)
+    if show is None:
+        raise ValueError("not_found")
+    entries = (
+        await db.execute(select(ShowEntry).where(ShowEntry.show_id == show_id))
+    ).scalars().all()
+
+    problems: list[dict] = []
+    for e in entries:
+        dog = await db.get(Dog, e.dog_id)
+        if dog is None:
+            continue
+        owner = await _resolve_owner(db, dog)
+        breeder, _p = await _resolve_breeder(db, dog)
+        check = EntryCheck(
+            catalog_number=e.catalog_number,
+            dog_name=dog.name,
+            owner_present=bool(owner),
+            breeder_present=bool(breeder),
+            has_tattoo=bool(dog.tattoo),
+            has_microchip=bool(dog.microchip),
+            has_pedigree=bool(dog.rkf_number),
+        )
+        issues = _entry_issues(check)
+        if issues:
+            problems.append(
+                {
+                    "entry_id": str(e.id),
+                    "dog_name": dog.name,
+                    "catalog_number": e.catalog_number,
+                    "issues": issues,
+                }
+            )
+    return {"total_entries": len(entries), "problems": problems}

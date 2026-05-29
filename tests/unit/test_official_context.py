@@ -155,3 +155,33 @@ def test_shape_catalog_groups_sorts_and_formats():
     assert cls0["entries"][0]["catalog_number"] == "1"
     assert cls0["entries"][0]["dog_name"] == "Bella"
     assert ctx["total_entries"] == 2
+
+
+from app.services.document_official import _entry_issues, EntryCheck
+
+
+def test_entry_issues_flags_missing():
+    issues = _entry_issues(
+        EntryCheck(
+            catalog_number=None, dog_name="Rex",
+            owner_present=False, breeder_present=False,
+            has_tattoo=False, has_microchip=False, has_pedigree=False,
+        )
+    )
+    codes = {i["code"] for i in issues}
+    assert "no_catalog_number" in codes
+    assert "no_owner" in codes
+    assert "no_breeder" in codes
+    assert "no_id" in codes  # ни клейма, ни чипа
+    assert "no_pedigree" in codes
+
+
+def test_entry_issues_clean():
+    issues = _entry_issues(
+        EntryCheck(
+            catalog_number=1, dog_name="Rex",
+            owner_present=True, breeder_present=True,
+            has_tattoo=True, has_microchip=False, has_pedigree=True,
+        )
+    )
+    assert issues == []
