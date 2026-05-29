@@ -109,3 +109,49 @@ def test_shape_ring_sheet_rows_and_blank_columns():
     assert "RKF1" in row["pedigree_marks"]
     assert "Сидорова Анна" in row["breeder_owner"]
     assert "Петров Пётр" in row["breeder_owner"]
+
+
+from app.services.document_official import (
+    _shape_catalog,
+    CatalogMeta,
+    CatalogEntryInput,
+)
+
+
+def test_shape_catalog_groups_sorts_and_formats():
+    meta = CatalogMeta(
+        show_name="Выставка",
+        show_rank="САС",
+        period="13.07.2025",
+        city="Москва",
+        venue=None,
+        judges=[{"name": "Судья А", "assignment": "группа FCI 1"}],
+    )
+    entries = [
+        CatalogEntryInput(
+            group_number=2, group_name="Пинчеры", breed_name="Доберман",
+            fci_number="143", breed_judge="Судья Б",
+            class_name="откр.", sex="male", catalog_number=10,
+            dog_name="Rex", date_of_birth="01.01.2022", color="чёрный",
+            pedigree="RKF10", tattoo="T", microchip="C",
+            breeder="Зав1", owner="Вл1", sire="Отец", dam="Мать",
+        ),
+        CatalogEntryInput(
+            group_number=1, group_name="Овчарки", breed_name="Аусси",
+            fci_number="342", breed_judge="Судья А",
+            class_name="щенков", sex="female", catalog_number=1,
+            dog_name="Bella", date_of_birth="02.02.2024", color="мерль",
+            pedigree="RKF1", tattoo=None, microchip=None,
+            breeder="Зав2", owner="Вл2", sire=None, dam=None,
+        ),
+    ]
+    ctx = _shape_catalog(meta, entries)
+    assert ctx["show_name"] == "Выставка"
+    assert [g["group_number"] for g in ctx["groups"]] == ["1", "2"]
+    g1 = ctx["groups"][0]
+    assert g1["breeds"][0]["breed_name"] == "Аусси"
+    cls0 = g1["breeds"][0]["classes"][0]
+    assert cls0["class_name"] == "щенков"
+    assert cls0["entries"][0]["catalog_number"] == "1"
+    assert cls0["entries"][0]["dog_name"] == "Bella"
+    assert ctx["total_entries"] == 2

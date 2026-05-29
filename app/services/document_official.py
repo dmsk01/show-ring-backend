@@ -344,3 +344,218 @@ async def build_ring_sheets_context(
             )
 
     return {"sheets": sheets}
+
+
+# ---------------------------------------------------------------------
+# Каталог
+# ---------------------------------------------------------------------
+
+
+@dataclass
+class CatalogMeta:
+    show_name: str
+    show_rank: str
+    period: str
+    city: str | None
+    venue: str | None
+    judges: list[dict]  # [{"name":..., "assignment":...}]
+
+
+@dataclass
+class CatalogEntryInput:
+    group_number: int | None
+    group_name: str | None
+    breed_name: str
+    fci_number: str | None
+    breed_judge: str | None
+    class_name: str
+    sex: str  # "male"|"female"
+    catalog_number: int | None
+    dog_name: str
+    date_of_birth: str
+    color: str | None
+    pedigree: str | None
+    tattoo: str | None
+    microchip: str | None
+    breeder: str | None
+    owner: str | None
+    sire: str | None
+    dam: str | None
+
+
+def _shape_catalog_entry(e: CatalogEntryInput) -> dict:
+    marks = " / ".join(x for x in [_s(e.tattoo), _s(e.microchip)] if x)
+    return {
+        "catalog_number": _s(e.catalog_number),
+        "dog_name": _s(e.dog_name),
+        "dob": _s(e.date_of_birth),
+        "color": _s(e.color),
+        "pedigree": _s(e.pedigree),
+        "marks": marks,
+        "breeder": _s(e.breeder),
+        "owner": _s(e.owner),
+        "sire": _s(e.sire),
+        "dam": _s(e.dam),
+    }
+
+
+def _shape_catalog(meta: CatalogMeta, entries: list[CatalogEntryInput]) -> dict:
+    """Группирует плоский список записей в группы FCI → породы → классы(+пол)."""
+    def gkey(n: int | None) -> int:
+        return n if n is not None else 999
+
+    groups: dict[int, dict] = {}
+    for e in entries:
+        g = groups.setdefault(
+            gkey(e.group_number),
+            {
+                "group_number": _s(e.group_number),
+                "group_name": _s(e.group_name),
+                "_breeds": {},
+            },
+        )
+        b = g["_breeds"].setdefault(
+            e.breed_name,
+            {
+                "breed_name": _s(e.breed_name),
+                "fci_number": _s(e.fci_number),
+                "judge": _s(e.breed_judge),
+                "_classes": {},
+            },
+        )
+        ckey = (e.class_name, e.sex)
+        c = b["_classes"].setdefault(
+            ckey,
+            {
+                "class_name": _s(e.class_name),
+                "sex": _SEX_RU.get(e.sex, _s(e.sex)),
+                "entries": [],
+            },
+        )
+        c["entries"].append(_shape_catalog_entry(e))
+
+    out_groups = []
+    for gnum in sorted(groups.keys()):
+        g = groups[gnum]
+        breeds = []
+        for bname in sorted(g["_breeds"].keys()):
+            b = g["_breeds"][bname]
+            classes = [b["_classes"][k] for k in b["_classes"]]
+            breeds.append(
+                {
+                    "breed_name": b["breed_name"],
+                    "fci_number": b["fci_number"],
+                    "judge": b["judge"],
+                    "classes": classes,
+                }
+            )
+        out_groups.append(
+            {
+                "group_number": g["group_number"],
+                "group_name": g["group_name"],
+                "breeds": breeds,
+            }
+        )
+
+    return {
+        "show_name": _s(meta.show_name),
+        "show_rank": _s(meta.show_rank),
+        "period": _s(meta.period),
+        "city": _s(meta.city),
+        "venue": _s(meta.venue),
+        "judges": meta.judges,
+        "groups": out_groups,
+        "total_entries": len(entries),
+    }
+
+
+async def build_catalog_context(
+    db: AsyncSession, show_id: uuid.UUID
+) -> dict:
+    show = await db.get(Show, show_id)
+    if show is None:
+        raise ValueError("not_found")
+    rank = await db.get(ShowRank, show.rank_id)
+
+    judges = (
+        await db.execute(select(ShowJudge).where(ShowJudge.show_id == show_id))
+    ).scalars().all()
+    judges_meta: list[dict] = []
+    judge_for_breed: dict[uuid.UUID, str] = {}
+    for j in judges:
+        assignment = "—"
+        if j.breed_id is not None:
+            br = await db.get(Breed, j.breed_id)
+            if br is not None:
+                assignment = f"порода: {br.name}"
+            ju = await _load_user_with_profile(db, j.judge_id)
+            if ju is not None:
+                judge_for_breed[j.breed_id] = judge_display(ju)
+        elif j.breed_group_id is not None:
+            grp = await db.get(BreedGroup, j.breed_group_id)
+            if grp is not None:
+                assignment = f"группа FCI {grp.number}: {grp.name}"
+        ju = await _load_user_with_profile(db, j.judge_id)
+        judges_meta.append(
+            {"name": judge_display(ju) if ju else "—", "assignment": assignment}
+        )
+
+    entries = (
+        await db.execute(
+            select(ShowEntry)
+            .where(ShowEntry.show_id == show_id)
+            .order_by(ShowEntry.catalog_number.asc().nullslast())
+        )
+    ).scalars().all()
+
+    inputs: list[CatalogEntryInput] = []
+    for e in entries:
+        dog = await db.get(Dog, e.dog_id)
+        if dog is None:
+            continue
+        breed = await db.get(Breed, dog.breed_id)
+        group = (
+            await db.get(BreedGroup, breed.breed_group_id)
+            if breed and breed.breed_group_id
+            else None
+        )
+        cls = await db.get(ShowClass, e.show_class_id)
+        breeder, _prefix = await _resolve_breeder(db, dog)
+        owner = await _resolve_owner(db, dog)
+        sire = await db.get(Dog, dog.father_id) if dog.father_id else None
+        dam = await db.get(Dog, dog.mother_id) if dog.mother_id else None
+        inputs.append(
+            CatalogEntryInput(
+                group_number=group.number if group else None,
+                group_name=group.name if group else None,
+                breed_name=breed.name if breed else "",
+                fci_number=breed.fci_number if breed else None,
+                breed_judge=judge_for_breed.get(dog.breed_id),
+                class_name=cls.name if cls else "",
+                sex=dog.sex.value,
+                catalog_number=e.catalog_number,
+                dog_name=dog.name,
+                date_of_birth=_fmt_date(dog.date_of_birth),
+                color=dog.color,
+                pedigree=dog.rkf_number,
+                tattoo=dog.tattoo,
+                microchip=dog.microchip,
+                breeder=breeder,
+                owner=owner,
+                sire=sire.name if sire else None,
+                dam=dam.name if dam else None,
+            )
+        )
+
+    period = _fmt_date(show.date_start) + (
+        f" — {_fmt_date(show.date_end)}" if show.date_end else ""
+    )
+    meta = CatalogMeta(
+        show_name=show.name,
+        show_rank=rank.name if rank else "",
+        period=period,
+        city=show.city,
+        venue=show.venue,
+        judges=judges_meta,
+    )
+    return _shape_catalog(meta, inputs)
