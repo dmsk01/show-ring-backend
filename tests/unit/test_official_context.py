@@ -66,3 +66,46 @@ def test_shape_diploma_empty_fields_become_blank_strings():
     assert ctx["dob"] == ""
     assert ctx["place"] == ""
     assert ctx["judge"] == ""
+
+
+from app.services.document_official import (
+    _shape_ring_sheet,
+    RingSheetInput,
+    RingRowInput,
+)
+
+
+def test_shape_ring_sheet_rows_and_blank_columns():
+    sheet = _shape_ring_sheet(
+        RingSheetInput(
+            city="г. Москва",
+            date="13.07.2025",
+            judge="Никитина Ольга (Россия)",
+            breed="Австралийская овчарка",
+            ring_number=1,
+            class_name="класс щенков",
+            sex="male",
+            rows=[
+                RingRowInput(
+                    catalog_number=1,
+                    dog_name="Bobby",
+                    date_of_birth="01.03.2024",
+                    color="блю-мерль",
+                    pedigree="RKF1",
+                    tattoo="T1",
+                    microchip="C1",
+                    breeder="Сидорова Анна",
+                    owner="Петров Пётр",
+                ),
+            ],
+        )
+    )
+    assert sheet["sex"] == "кобели"
+    assert sheet["ring_number"] == "1"
+    row = sheet["rows"][0]
+    assert row["catalog_number"] == "1"
+    assert "Bobby" in row["name_dob_color"]
+    assert "01.03.2024" in row["name_dob_color"]
+    assert "RKF1" in row["pedigree_marks"]
+    assert "Сидорова Анна" in row["breeder_owner"]
+    assert "Петров Пётр" in row["breeder_owner"]
