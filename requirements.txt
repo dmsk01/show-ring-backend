@@ -30,6 +30,7 @@ python-magic>=0.4.27            # Magic bytes определение типов 
 # --- Этап 8: RabbitMQ + PDF ---
 aio-pika>=9.5.0                 # RabbitMQ async клиент
 reportlab>=4.2.0                # Программная генерация PDF
+docxtpl>=0.18.0                # DOCX-шаблоны с Jinja-плейсхолдерами (официальные документы РКФ)
 # weasyprint>=62.0              # HTML→PDF (альтернатива reportlab, тяжёлые системные зависимости)
 
 # --- Этап 9: Email + Scheduler ---

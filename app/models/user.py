@@ -61,6 +61,11 @@ class User(Base, TimestampMixin):
     email_verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    profile: Mapped["UserProfile | None"] = relationship(
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class UserRole(Base):
@@ -135,3 +140,27 @@ class EmailVerificationToken(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="email_verification_tokens")
+
+
+class UserProfile(Base, TimestampMixin):
+    """
+    Профиль пользователя с человекочитаемыми данными (ФИО, страна).
+
+    Вынесен в отдельную таблицу 1:1, чтобы не раздувать users (модель
+    аутентификации) и заполнять опционально. Нужен для официальных
+    документов: ФИО владельца/заводчика/эксперта и страна эксперта.
+    """
+
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    patronymic: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="profile")

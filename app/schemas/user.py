@@ -65,3 +65,19 @@ class TokenResponse(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str
+
+
+class UserProfileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    last_name: str | None = None
+    first_name: str | None = None
+    patronymic: str | None = None
+    country: str | None = None
+
+
+class UserProfileUpdate(BaseModel):
+    last_name: str | None = None
+    first_name: str | None = None
+    patronymic: str | None = None
+    country: str | None = None

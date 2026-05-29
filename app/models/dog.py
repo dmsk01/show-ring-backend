@@ -80,6 +80,19 @@ class Dog(Base, TimestampMixin):
     # Микрочип — стандарт ISO, 15-значный.
     microchip: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # Питомник-заводчик: где собака рождена. Отличается от kennel_id
+    # (текущий питомник владельца), не меняется при продаже. Источник
+    # графы «Заводчик»/«Питомник» в документах.
+    breeder_kennel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("kennels.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # Free-text заводчик для собак, рождённых вне платформы (импорт):
+    # когда breeder_kennel_id неизвестен.
+    breeder_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # Самореферентные FK для родословной. SET NULL — если отца удалили
     # из БД, ребёнок остаётся с пустым полем (родословная неизвестна),
     # а не каскадно удаляется.
@@ -98,7 +111,12 @@ class Dog(Base, TimestampMixin):
 
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    kennel: Mapped["Kennel | None"] = relationship(back_populates="dogs")  # noqa: F821
+    kennel: Mapped["Kennel | None"] = relationship(
+        back_populates="dogs", foreign_keys=[kennel_id]
+    )  # noqa: F821
+    breeder_kennel: Mapped["Kennel | None"] = relationship(  # noqa: F821
+        foreign_keys=[breeder_kennel_id]
+    )
     # Используем remote_side для self-ref relationship — иначе SQLAlchemy
     # не понимает, какая сторона "родитель", какая "ребёнок".
     father: Mapped["Dog | None"] = relationship(

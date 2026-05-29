@@ -8,11 +8,19 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
 from app.repositories.user import (
+    get_profile,
     get_user_by_id,
     revoke_all_refresh_tokens_for_user,
     update_user,
+    upsert_profile,
 )
-from app.schemas.user import PublicUserResponse, UserResponse, UserUpdate
+from app.schemas.user import (
+    PublicUserResponse,
+    UserProfileResponse,
+    UserProfileUpdate,
+    UserResponse,
+    UserUpdate,
+)
 from app.utils.security import verify_password
 
 # Отдельный логгер security-событий, чтобы можно было направлять в SIEM
@@ -105,6 +113,39 @@ async def change_user_info(
 # название + redundant (полный список с пагинацией и ролями уже
 # есть в /admin/users из routers/admin/moderation.py). Удалён,
 # чтобы не плодить две точки правды и не путать клиентов API.
+
+
+@router.get(
+    "/me/profile",
+    response_model=UserProfileResponse,
+    summary="Мой профиль (ФИО/страна)",
+)
+async def get_my_profile(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    profile = await get_profile(db, current_user.id)
+    if profile is None:
+        # Профиль не заведён — отдаём пустой каркас, чтобы фронт показал
+        # форму без 404.
+        return UserProfileResponse()
+    return UserProfileResponse.model_validate(profile)
+
+
+@router.patch(
+    "/me/profile",
+    response_model=UserProfileResponse,
+    summary="Обновить мой профиль (ФИО/страна)",
+)
+async def update_my_profile(
+    payload: UserProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    fields = payload.model_dump(exclude_unset=True)
+    profile = await upsert_profile(db, current_user.id, **fields)
+    await db.commit()
+    return UserProfileResponse.model_validate(profile)
 
 
 @router.get(
