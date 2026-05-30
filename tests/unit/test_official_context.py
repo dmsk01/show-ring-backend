@@ -27,12 +27,17 @@ def test_shape_diploma_full():
             kennel="От Каховки",
             breeder="Сидорова Анна",
             pedigree="RKF1234567",
+            catalog_number=20,
+            fci_number="342",
         )
     )
     assert ctx["show_name"] == "WORLD DOG SHOW 2025"
     assert ctx["judge"] == "Никитина Ольга (Россия)"
     assert ctx["sex_male"] is True
     assert ctx["sex_female"] is False
+    assert ctx["sex_word"] == "Кобель"
+    assert ctx["catalog_number"] == "20"
+    assert ctx["breed_line"] == "(FCI 342) Австралийская овчарка"
     assert ctx["dob"] == "01.03.2024"
     assert ctx["place"] == "1"
     assert ctx["dog_name"] == "Bobby vom Haus"
@@ -62,6 +67,8 @@ def test_shape_diploma_empty_fields_become_blank_strings():
     )
     assert ctx["sex_female"] is True
     assert ctx["sex_male"] is False
+    assert ctx["sex_word"] == "Сука"
+    assert ctx["catalog_number"] == ""
     assert ctx["grade"] == ""
     assert ctx["dob"] == ""
     assert ctx["place"] == ""
