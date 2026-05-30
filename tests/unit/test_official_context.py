@@ -160,6 +160,11 @@ def test_shape_catalog_groups_sorts_and_formats():
     # Сводные поля породы (для таблицы «Породы по группам»).
     assert g1["breeds"][0]["entry_count"] == 1
     assert g1["breeds"][0]["catalog_range"] == "1"
+    # detail_line: пустые поля (клеймо/чип, родители) выпадают без лишних запятых.
+    assert (
+        cls0["entries"][0]["detail_line"]
+        == "RKF1, д.р. 02.02.2024, мерль, зав. Зав2, вл. Вл2"
+    )
     assert ctx["total_entries"] == 2
 
 

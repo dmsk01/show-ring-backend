@@ -411,17 +411,37 @@ class CatalogEntryInput:
 
 def _shape_catalog_entry(e: CatalogEntryInput) -> dict:
     marks = " / ".join(x for x in [_s(e.tattoo), _s(e.microchip)] if x)
+    dob = _s(e.date_of_birth)
+    color = _s(e.color)
+    pedigree = _s(e.pedigree)
+    breeder = _s(e.breeder)
+    owner = _s(e.owner)
+    parents = " x ".join(x for x in [_s(e.sire), _s(e.dam)] if x)
+    # Готовая строка-описание для тела каталога: только непустые части,
+    # чтобы не было «висячих» запятых при отсутствующих полях.
+    detail_line = ", ".join(
+        p for p in [
+            pedigree,
+            marks,
+            f"д.р. {dob}" if dob else "",
+            color,
+            parents,
+            f"зав. {breeder}" if breeder else "",
+            f"вл. {owner}" if owner else "",
+        ] if p
+    )
     return {
         "catalog_number": _s(e.catalog_number),
         "dog_name": _s(e.dog_name),
-        "dob": _s(e.date_of_birth),
-        "color": _s(e.color),
-        "pedigree": _s(e.pedigree),
+        "dob": dob,
+        "color": color,
+        "pedigree": pedigree,
         "marks": marks,
-        "breeder": _s(e.breeder),
-        "owner": _s(e.owner),
+        "breeder": breeder,
+        "owner": owner,
         "sire": _s(e.sire),
         "dam": _s(e.dam),
+        "detail_line": detail_line,
     }
 
 
