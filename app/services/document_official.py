@@ -76,6 +76,7 @@ class DiplomaInput:
     breeder: str | None
     pedigree: str | None
     catalog_number: int | None = None
+    fci_number: str | None = None
 
 
 # Пол словом — реальный бланк диплома РКФ печатает «Кобель»/«Сука», а не
@@ -84,10 +85,17 @@ _SEX_WORD = {"male": "Кобель", "female": "Сука"}
 
 
 def _shape_diploma_context(data: DiplomaInput) -> dict:
+    # Строка породы в бланке: «(FCI 327) НАЗВАНИЕ». Если номера FCI нет —
+    # только название.
+    breed_line = _s(data.breed)
+    if data.fci_number:
+        breed_line = f"(FCI {data.fci_number}) {breed_line}".strip()
     return {
         "show_name": _s(data.show_name),
         "judge": _s(data.judge),
         "breed": _s(data.breed),
+        "fci_number": _s(data.fci_number),
+        "breed_line": breed_line,
         "sex_male": data.sex == "male",
         "sex_female": data.sex == "female",
         "sex_word": _SEX_WORD.get(data.sex, ""),
@@ -186,6 +194,7 @@ async def build_diploma_context(
             breeder=breeder,
             pedigree=dog.rkf_number,
             catalog_number=entry.catalog_number,
+            fci_number=breed.fci_number if breed else None,
         )
     )
 

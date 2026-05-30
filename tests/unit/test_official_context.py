@@ -28,6 +28,7 @@ def test_shape_diploma_full():
             breeder="Сидорова Анна",
             pedigree="RKF1234567",
             catalog_number=20,
+            fci_number="342",
         )
     )
     assert ctx["show_name"] == "WORLD DOG SHOW 2025"
@@ -36,6 +37,7 @@ def test_shape_diploma_full():
     assert ctx["sex_female"] is False
     assert ctx["sex_word"] == "Кобель"
     assert ctx["catalog_number"] == "20"
+    assert ctx["breed_line"] == "(FCI 342) Австралийская овчарка"
     assert ctx["dob"] == "01.03.2024"
     assert ctx["place"] == "1"
     assert ctx["dog_name"] == "Bobby vom Haus"
