@@ -60,6 +60,7 @@ async def _load_user_with_profile(
 @dataclass
 class DiplomaInput:
     show_name: str
+    show_rank: str | None
     judge: str | None
     breed: str
     sex: str  # "male" | "female"
@@ -92,6 +93,7 @@ def _shape_diploma_context(data: DiplomaInput) -> dict:
         breed_line = f"(FCI {data.fci_number}) {breed_line}".strip()
     return {
         "show_name": _s(data.show_name),
+        "show_rank": _s(data.show_rank),
         "judge": _s(data.judge),
         "breed": _s(data.breed),
         "fci_number": _s(data.fci_number),
@@ -145,6 +147,7 @@ async def build_diploma_context(
     show = await db.get(Show, entry.show_id)
     if show is None:
         raise ValueError("not_found")
+    rank = await db.get(ShowRank, show.rank_id)
     dog = await db.get(Dog, entry.dog_id)
     if dog is None:
         raise ValueError("dog_not_found")
@@ -178,6 +181,7 @@ async def build_diploma_context(
     return _shape_diploma_context(
         DiplomaInput(
             show_name=show.name,
+            show_rank=rank.name if rank else None,
             judge=judge,
             breed=breed.name if breed else "",
             sex=dog.sex.value,

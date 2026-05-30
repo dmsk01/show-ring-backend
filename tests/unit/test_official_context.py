@@ -12,6 +12,7 @@ def test_shape_diploma_full():
     ctx = _shape_diploma_context(
         DiplomaInput(
             show_name="WORLD DOG SHOW 2025",
+            show_rank="CAC",
             judge="Никитина Ольга (Россия)",
             breed="Австралийская овчарка",
             sex="male",
@@ -37,6 +38,7 @@ def test_shape_diploma_full():
     assert ctx["sex_female"] is False
     assert ctx["sex_word"] == "Кобель"
     assert ctx["catalog_number"] == "20"
+    assert ctx["show_rank"] == "CAC"
     assert ctx["breed_line"] == "(FCI 342) Австралийская овчарка"
     assert ctx["dob"] == "01.03.2024"
     assert ctx["place"] == "1"
@@ -48,6 +50,7 @@ def test_shape_diploma_empty_fields_become_blank_strings():
     ctx = _shape_diploma_context(
         DiplomaInput(
             show_name="X",
+            show_rank=None,
             judge=None,
             breed="Y",
             sex="female",
