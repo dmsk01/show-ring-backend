@@ -31,17 +31,15 @@
 в конце цикла.
 
 ### ring_sheet.docx
-Весь блок одного листа (шапка + таблица) обернуть в
+Один бланк = одна порода (шапка 5×5 + сетка номеров 12×9 + таблица
+титулов 6×6). Весь блок одной породы обернуть в
 `{% for sheet in sheets %}` … `{% endfor %}`, внутри — разрыв страницы.
-Шапка: `{{ sheet.city }}`, `{{ sheet.date }}`, `{{ sheet.judge }}`,
-`{{ sheet.breed }}`, `{{ sheet.ring_number }}`, `{{ sheet.class_name }}`,
-`{{ sheet.sex }}`.
-Строка таблицы участников — повторяемая через docxtpl row-теги: в первой
-ячейке строки-образца `{%tr for row in sheet.rows %}`, в последней
-`{%tr endfor %}`. Ячейки: `{{ row.catalog_number }}`,
-`{{ row.name_dob_color }}`, `{{ row.pedigree_marks }}`,
-`{{ row.breeder_owner }}`, и пустые (судья пишет от руки) `{{ row.grade }}`,
-`{{ row.titles }}`, `{{ row.place }}`, `{{ row.litter }}`, `{{ row.total }}`.
+Шапка: `{{ sheet.organizer }}`, `{{ sheet.show_title }}`,
+`{{ sheet.breed }}`, `{{ sheet.judge }}`, `{{ sheet.date }}`,
+`{{ sheet.ring_number }}`.
+Номера по каталогу: либо строкой `{{ sheet.numbers_str }}` (через запятую),
+либо в сетке — повторяемой ячейкой `{%tc for n in sheet.numbers %}{{ n }}{%tc endfor %}`.
+Оценки и титулы судья заполняет от руки — тегов в них нет.
 
 ### catalog.docx
 Шапка: `{{ show_name }}`, `{{ show_rank }}`, `{{ period }}`, `{{ city }}`,

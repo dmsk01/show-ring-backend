@@ -80,45 +80,38 @@ def test_shape_diploma_empty_fields_become_blank_strings():
 
 from app.services.document_official import (
     _shape_ring_sheet,
+    _fmt_date_long,
     RingSheetInput,
-    RingRowInput,
 )
 
 
-def test_shape_ring_sheet_rows_and_blank_columns():
+def test_fmt_date_long_russian_month():
+    import datetime as _dt
+    assert _fmt_date_long(_dt.date(2025, 11, 22)) == "22 ноября 2025 г."
+    assert _fmt_date_long(None) == ""
+
+
+def test_shape_ring_sheet_per_breed_blank():
     sheet = _shape_ring_sheet(
         RingSheetInput(
-            city="г. Москва",
-            date="13.07.2025",
-            judge="Никитина Ольга (Россия)",
-            breed="Австралийская овчарка",
+            organizer="МОО КПС Красный Маяк",
+            show_title="Красный Маяк ранга CAC",
+            breed="Русский чёрный терьер",
+            judge="Мордвинова Татьяна Александровна",
+            date="22 ноября 2025 г.",
             ring_number=1,
-            class_name="класс щенков",
-            sex="male",
-            rows=[
-                RingRowInput(
-                    catalog_number=1,
-                    dog_name="Bobby",
-                    date_of_birth="01.03.2024",
-                    color="блю-мерль",
-                    pedigree="RKF1",
-                    tattoo="T1",
-                    microchip="C1",
-                    breeder="Сидорова Анна",
-                    owner="Петров Пётр",
-                ),
-            ],
+            catalog_numbers=[20, 68, None],
         )
     )
-    assert sheet["sex"] == "кобели"
+    assert sheet["organizer"] == "МОО КПС Красный Маяк"
+    assert sheet["show_title"] == "Красный Маяк ранга CAC"
+    assert sheet["breed"] == "Русский чёрный терьер"
+    assert sheet["judge"] == "Мордвинова Татьяна Александровна"
+    assert sheet["date"] == "22 ноября 2025 г."
     assert sheet["ring_number"] == "1"
-    row = sheet["rows"][0]
-    assert row["catalog_number"] == "1"
-    assert "Bobby" in row["name_dob_color"]
-    assert "01.03.2024" in row["name_dob_color"]
-    assert "RKF1" in row["pedigree_marks"]
-    assert "Сидорова Анна" in row["breeder_owner"]
-    assert "Петров Пётр" in row["breeder_owner"]
+    # None-номер не попадает в строку, но в список входит как пустой.
+    assert sheet["numbers"] == ["20", "68", ""]
+    assert sheet["numbers_str"] == "20, 68"
 
 
 from app.services.document_official import (

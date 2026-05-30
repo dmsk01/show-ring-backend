@@ -44,20 +44,14 @@ def _ring_ctx() -> dict:
     return {
         "sheets": [
             {
-                "city": "г. Москва", "date": "13.07.2025",
-                "judge": "Никитина Ольга (Россия)",
-                "breed": "Австралийская овчарка", "ring_number": "1",
-                "class_name": "класс щенков", "sex": "кобели",
-                "rows": [
-                    {
-                        "catalog_number": "1",
-                        "name_dob_color": "Bobby, 01.03.2024, блю-мерль",
-                        "pedigree_marks": "RKF1 / T1 / C1",
-                        "breeder_owner": "Сидорова Анна / Петров Пётр",
-                        "grade": "", "titles": "", "place": "",
-                        "litter": "", "total": "",
-                    }
-                ],
+                "organizer": "МОО КПС Красный Маяк",
+                "show_title": "Красный Маяк ранга CAC",
+                "breed": "Русский чёрный терьер",
+                "judge": "Мордвинова Татьяна Александровна",
+                "date": "22 ноября 2025 г.",
+                "ring_number": "1",
+                "numbers": ["20", "68", "69"],
+                "numbers_str": "20, 68, 69",
             }
         ]
     }

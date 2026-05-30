@@ -232,69 +232,50 @@ async def build_diplomas_batch_context(
 
 _SEX_RU = {"male": "кобели", "female": "суки"}
 
+# Месяцы в родительном падеже для длинной даты бланка («22 ноября 2025 г.»).
+_MONTHS_RU = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
 
-@dataclass
-class RingRowInput:
-    catalog_number: int | None
-    dog_name: str
-    date_of_birth: str  # уже форматированная дата
-    color: str | None
-    pedigree: str | None
-    tattoo: str | None
-    microchip: str | None
-    breeder: str | None
-    owner: str | None
+
+def _fmt_date_long(value: date | None) -> str:
+    """«22 ноября 2025 г.» — формат даты в шапке ринговой ведомости."""
+    if value is None:
+        return ""
+    return f"{value.day} {_MONTHS_RU[value.month - 1]} {value.year} г."
 
 
 @dataclass
 class RingSheetInput:
-    city: str | None
-    date: str
-    judge: str | None
+    """
+    Один бланк ринговой ведомости — НА ПОРОДУ (как в образце РКФ): шапка
+    (организатор / выставка / порода / судья / дата / ринг) + список
+    номеров по каталогу собак этой породы. Оценки и титулы судья
+    заполняет от руки, поэтому в контекст не входят.
+    """
+
+    organizer: str | None
+    show_title: str  # название + ранг выставки
     breed: str
+    judge: str | None
+    date: str  # уже форматированная (длинная) дата
     ring_number: int | None
-    class_name: str
-    sex: str
-    rows: list[RingRowInput]
-
-
-def _shape_ring_row(r: RingRowInput) -> dict:
-    name_dob_color = ", ".join(
-        x for x in [_s(r.dog_name), _s(r.date_of_birth), _s(r.color)] if x
-    )
-    marks = ", ".join(
-        x for x in [_s(r.tattoo), _s(r.microchip)] if x
-    )
-    pedigree_marks = " / ".join(
-        x for x in [_s(r.pedigree), marks] if x
-    )
-    breeder_owner = " / ".join(
-        x for x in [_s(r.breeder), _s(r.owner)] if x
-    )
-    return {
-        "catalog_number": _s(r.catalog_number),
-        "name_dob_color": name_dob_color,
-        "pedigree_marks": pedigree_marks,
-        "breeder_owner": breeder_owner,
-        # Пустые колонки — судья заполняет от руки.
-        "grade": "",
-        "titles": "",
-        "place": "",
-        "litter": "",
-        "total": "",
-    }
+    catalog_numbers: list[int | None]
 
 
 def _shape_ring_sheet(data: RingSheetInput) -> dict:
     return {
-        "city": _s(data.city),
-        "date": _s(data.date),
-        "judge": _s(data.judge),
+        "organizer": _s(data.organizer),
+        "show_title": _s(data.show_title),
         "breed": _s(data.breed),
+        "judge": _s(data.judge),
+        "date": _s(data.date),
         "ring_number": _s(data.ring_number),
-        "class_name": _s(data.class_name),
-        "sex": _SEX_RU.get(data.sex, _s(data.sex)),
-        "rows": [_shape_ring_row(r) for r in data.rows],
+        # Номера по каталогу: и списком (для цикла), и строкой (для
+        # вставки «через запятую», если в шаблоне нет сетки-цикла).
+        "numbers": [_s(n) for n in data.catalog_numbers],
+        "numbers_str": ", ".join(_s(n) for n in data.catalog_numbers if _s(n)),
     }
 
 
@@ -304,88 +285,89 @@ async def build_ring_sheets_context(
     ring_id: uuid.UUID | None = None,
 ) -> dict:
     """
-    Контекст для одного файла со всеми ведомостями выставки (или одного
-    ринга, если задан ring_id). Группировка: ринг → порода/класс → пол.
+    Контекст файла с ринговыми ведомостями. Один бланк = одна порода
+    (как в образце РКФ): шапка + список номеров по каталогу.
 
-    Ведомость в образце сделана на (ринг + порода + класс + пол). Здесь
-    собираем по рингам из ShowRing, а внутри ринга — по записям нужной
-    породы/класса, разбивая по полу.
+    Группировка: записи выставки → по породе собаки. Для каждой породы
+    шапка берёт назначенного судью и номер ринга из ShowRing (если есть),
+    дату — из ShowRing.ring_date или show.date_start.
+
+    ring_id оставлен для совместимости сигнатуры: если задан, ограничиваем
+    одним рингом (его породой).
     """
     show = await db.get(Show, show_id)
     if show is None:
         raise ValueError("not_found")
+    rank = await db.get(ShowRank, show.rank_id)
+    show_title = show.name + (f" ранга {rank.name}" if rank else "")
 
-    rings_stmt = select(ShowRing).where(ShowRing.show_id == show_id)
+    # Назначения по рингам: breed_id → (ring_number, judge_id, ring_date).
+    rings = (
+        await db.execute(select(ShowRing).where(ShowRing.show_id == show_id))
+    ).scalars().all()
+    ring_by_breed: dict[uuid.UUID, ShowRing] = {
+        r.breed_id: r for r in rings if r.breed_id is not None
+    }
+    # Запасной источник судьи — назначения ShowJudge на породу.
+    show_judges = (
+        await db.execute(select(ShowJudge).where(ShowJudge.show_id == show_id))
+    ).scalars().all()
+    judge_id_by_breed: dict[uuid.UUID, uuid.UUID] = {
+        j.breed_id: j.judge_id for j in show_judges if j.breed_id is not None
+    }
+
+    only_breed_id: uuid.UUID | None = None
     if ring_id is not None:
-        rings_stmt = rings_stmt.where(ShowRing.id == ring_id)
-    rings_stmt = rings_stmt.order_by(ShowRing.ring_number.asc())
-    rings = (await db.execute(rings_stmt)).scalars().all()
+        ring = await db.get(ShowRing, ring_id)
+        only_breed_id = ring.breed_id if ring is not None else None
+
+    # Группируем номера по каталогу по породе собаки.
+    entries = (
+        await db.execute(
+            select(ShowEntry)
+            .where(ShowEntry.show_id == show_id)
+            .order_by(ShowEntry.catalog_number.asc().nullslast())
+        )
+    ).scalars().all()
+    numbers_by_breed: dict[uuid.UUID, list[int | None]] = {}
+    breed_obj: dict[uuid.UUID, Breed] = {}
+    for e in entries:
+        dog = await db.get(Dog, e.dog_id)
+        if dog is None:
+            continue
+        if only_breed_id is not None and dog.breed_id != only_breed_id:
+            continue
+        if dog.breed_id not in breed_obj:
+            br = await db.get(Breed, dog.breed_id)
+            if br is None:
+                continue
+            breed_obj[dog.breed_id] = br
+        numbers_by_breed.setdefault(dog.breed_id, []).append(e.catalog_number)
 
     sheets: list[dict] = []
-    for ring in rings:
-        if ring.breed_id is None:
-            continue  # ведомость строится по конкретной породе ринга
-        breed = await db.get(Breed, ring.breed_id)
-        judge_user = await _load_user_with_profile(db, ring.judge_id)
+    for breed_id in sorted(numbers_by_breed, key=lambda b: breed_obj[b].name):
+        breed = breed_obj[breed_id]
+        ring = ring_by_breed.get(breed_id)
+        judge_id = ring.judge_id if ring and ring.judge_id else judge_id_by_breed.get(breed_id)
+        judge_user = await _load_user_with_profile(db, judge_id)
         judge = judge_display(judge_user) if judge_user else None
-
-        # Записи этой породы (через собак) в нужном классе ринга.
-        entries = (
-            await db.execute(
-                select(ShowEntry)
-                .where(ShowEntry.show_id == show_id)
-                .order_by(ShowEntry.catalog_number.asc().nullslast())
-            )
-        ).scalars().all()
-
-        cls = (
-            await db.get(ShowClass, ring.show_class_id)
-            if ring.show_class_id
-            else None
+        ring_date = (
+            _fmt_date_long(ring.ring_date) if ring and ring.ring_date
+            else _fmt_date_long(show.date_start)
         )
-
-        # Разбиваем по полу.
-        rows_by_sex: dict[str, list[RingRowInput]] = {"male": [], "female": []}
-        for e in entries:
-            dog = await db.get(Dog, e.dog_id)
-            if dog is None or dog.breed_id != ring.breed_id:
-                continue
-            if ring.show_class_id and e.show_class_id != ring.show_class_id:
-                continue
-            breeder, _prefix = await _resolve_breeder(db, dog)
-            owner = await _resolve_owner(db, dog)
-            rows_by_sex[dog.sex.value].append(
-                RingRowInput(
-                    catalog_number=e.catalog_number,
-                    dog_name=dog.name,
-                    date_of_birth=_fmt_date(dog.date_of_birth),
-                    color=dog.color,
-                    pedigree=dog.rkf_number,
-                    tattoo=dog.tattoo,
-                    microchip=dog.microchip,
-                    breeder=breeder,
-                    owner=owner,
+        sheets.append(
+            _shape_ring_sheet(
+                RingSheetInput(
+                    organizer=show.venue or show.city,
+                    show_title=show_title,
+                    breed=breed.name,
+                    judge=judge,
+                    date=ring_date,
+                    ring_number=ring.ring_number if ring else None,
+                    catalog_numbers=numbers_by_breed[breed_id],
                 )
             )
-
-        ring_date = _fmt_date(ring.ring_date) or _fmt_date(show.date_start)
-        for sex, rows in rows_by_sex.items():
-            if not rows:
-                continue
-            sheets.append(
-                _shape_ring_sheet(
-                    RingSheetInput(
-                        city=show.city,
-                        date=ring_date,
-                        judge=judge,
-                        breed=breed.name if breed else "",
-                        ring_number=ring.ring_number,
-                        class_name=cls.name if cls else "",
-                        sex=sex,
-                        rows=rows,
-                    )
-                )
-            )
+        )
 
     return {"sheets": sheets}
 
