@@ -75,6 +75,12 @@ class DiplomaInput:
     kennel: str | None
     breeder: str | None
     pedigree: str | None
+    catalog_number: int | None = None
+
+
+# Пол словом — реальный бланк диплома РКФ печатает «Кобель»/«Сука», а не
+# галочку. sex_male/sex_female оставлены для шаблонов с отметкой-галочкой.
+_SEX_WORD = {"male": "Кобель", "female": "Сука"}
 
 
 def _shape_diploma_context(data: DiplomaInput) -> dict:
@@ -84,10 +90,12 @@ def _shape_diploma_context(data: DiplomaInput) -> dict:
         "breed": _s(data.breed),
         "sex_male": data.sex == "male",
         "sex_female": data.sex == "female",
+        "sex_word": _SEX_WORD.get(data.sex, ""),
         "class_name": _s(data.class_name),
         "grade": _s(data.grade),
         "title": _s(data.title),
         "place": _s(data.placement),
+        "catalog_number": _s(data.catalog_number),
         "dog_name": _s(data.dog_name),
         "tattoo": _s(data.tattoo),
         "microchip": _s(data.microchip),
@@ -177,6 +185,7 @@ async def build_diploma_context(
             kennel=kennel_prefix,
             breeder=breeder,
             pedigree=dog.rkf_number,
+            catalog_number=entry.catalog_number,
         )
     )
 
