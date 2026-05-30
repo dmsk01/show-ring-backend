@@ -467,11 +467,29 @@ def _shape_catalog(meta: CatalogMeta, entries: list[CatalogEntryInput]) -> dict:
         for bname in sorted(g["_breeds"].keys()):
             b = g["_breeds"][bname]
             classes = [b["_classes"][k] for k in b["_classes"]]
+            # Для сводной таблицы «Породы по группам»: диапазон номеров по
+            # каталогу (РКФ нумерует породу подряд) и число участников.
+            nums: list[int] = []
+            entry_count = 0
+            for cls in classes:
+                for e in cls["entries"]:
+                    entry_count += 1
+                    cn = e["catalog_number"]
+                    if cn:
+                        nums.append(int(cn))
+            if not nums:
+                catalog_range = ""
+            elif len(nums) == 1:
+                catalog_range = str(nums[0])
+            else:
+                catalog_range = f"{min(nums)}-{max(nums)}"
             breeds.append(
                 {
                     "breed_name": b["breed_name"],
                     "fci_number": b["fci_number"],
                     "judge": b["judge"],
+                    "catalog_range": catalog_range,
+                    "entry_count": entry_count,
                     "classes": classes,
                 }
             )

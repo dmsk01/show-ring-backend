@@ -157,6 +157,9 @@ def test_shape_catalog_groups_sorts_and_formats():
     assert cls0["class_name"] == "щенков"
     assert cls0["entries"][0]["catalog_number"] == "1"
     assert cls0["entries"][0]["dog_name"] == "Bella"
+    # Сводные поля породы (для таблицы «Породы по группам»).
+    assert g1["breeds"][0]["entry_count"] == 1
+    assert g1["breeds"][0]["catalog_range"] == "1"
     assert ctx["total_entries"] == 2
 
 
