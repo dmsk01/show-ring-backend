@@ -25,7 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.redis import redis_client
+# Импортируем модуль, а не значение: init_redis() пере-присваивает
+# app.redis.redis_client уже после импорта health.py. `from app.redis import
+# redis_client` связал бы стейл-None, и /health всегда показывал бы redis down.
+from app import redis as redis_state
 from app.services.rabbit import rabbit_service
 
 logger = logging.getLogger(__name__)
@@ -43,13 +46,14 @@ async def _check_db(db: AsyncSession) -> str:
 
 
 async def _check_redis() -> str:
-    if redis_client is None:
+    client = redis_state.redis_client
+    if client is None:
         return "down"
     try:
         # type: ignore — redis-py stubs возвращают bool, но в async-режиме
         # это всегда awaitable Coroutine. См. также app/redis.py с тем же
         # обходом.
-        await redis_client.ping()  # type: ignore[misc]
+        await client.ping()  # type: ignore[misc]
         return "ok"
     except Exception as e:  # noqa: BLE001
         logger.warning("health: redis error %s", e)
