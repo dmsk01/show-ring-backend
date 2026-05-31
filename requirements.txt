@@ -16,6 +16,7 @@ python-dotenv>=1.0.0
 
 # --- Этап 2: Авторизация и безопасность ---
 passlib[bcrypt]>=1.7.4
+bcrypt<4.1                      # passlib 1.7.4 несовместим с bcrypt>=4.1 (ломает verify: "password > 72 bytes")
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.12
 redis[hiredis]>=5.2.0           # Progressive rate limiting, кэш, WS pub/sub
@@ -46,3 +47,5 @@ structlog>=24.4.0               # Structured logging (JSON)
 
 # --- Общие утилиты ---
 email-validator>=2.0.0          # Валидация email (используется Pydantic)
+httpx>=0.27.0                   # Async HTTP-клиент (worker book_handler — внешние API; рантайм, не только тесты)
+bleach>=6.0.0                   # Санитизация HTML/XSS (app/middleware/sanitization.py)
