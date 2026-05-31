@@ -6,8 +6,7 @@ r"""
     .\venv\Scripts\python.exe -m scripts.render_test_docs
 
 Кладёт catalog.docx / diploma.docx / ring_sheet.docx в output_docs/.
-PDF здесь не делаем — для него нужен LibreOffice (soffice); если он
-установлен, конвертацию делает воркер при format=pdf.
+Вывод только .docx (PDF в проекте не делаем — см. app/utils/docx_render.py).
 """
 
 from __future__ import annotations

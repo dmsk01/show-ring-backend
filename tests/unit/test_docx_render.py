@@ -1,17 +1,18 @@
 # tests/unit/test_docx_render.py
-import builtins
 import pytest
 
 from app.utils import docx_render
 
 
-def test_find_soffice_returns_none_when_absent(monkeypatch):
-    monkeypatch.setattr(docx_render.shutil, "which", lambda name: None)
-    monkeypatch.setattr(docx_render.Path, "exists", lambda self: False)
-    assert docx_render._find_soffice() is None
+def test_docx_content_type_is_wordprocessing():
+    assert docx_render.DOCX_CONTENT_TYPE.endswith("wordprocessingml.document")
 
 
-def test_convert_raises_when_soffice_missing(monkeypatch):
-    monkeypatch.setattr(docx_render, "_find_soffice", lambda: None)
-    with pytest.raises(docx_render.PdfConversionError):
-        docx_render.convert_docx_to_pdf(b"PK\x03\x04 fake docx")
+def test_render_docx_produces_valid_docx():
+    # render_docx читает шаблон из TEMPLATES_DIR; пустого контекста достаточно
+    # (отсутствующие плейсхолдеры рендерятся в '' — jinja default Undefined).
+    if not (docx_render.TEMPLATES_DIR / "diploma.docx").exists():
+        pytest.skip("diploma.docx отсутствует")
+    body = docx_render.render_docx("diploma.docx", {})
+    assert body[:2] == b"PK"
+    assert len(body) > 2000

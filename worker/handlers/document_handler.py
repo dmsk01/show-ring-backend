@@ -246,28 +246,23 @@ async def _upload_and_register(
 
 
 # ---------------------------------------------------------------------
-# Официальные документы РКФ (DOCX-шаблоны + опц. конвертация в PDF)
+# Официальные документы РКФ (DOCX-шаблоны)
 # ---------------------------------------------------------------------
 
 
 async def _render_official(
-    template_name: str, context: dict, fmt: str, basename: str
+    template_name: str, context: dict, basename: str
 ) -> tuple[bytes, str, str, str]:
     """
-    Рендерит docx из шаблона и (опц.) конвертит в pdf. Блокирующие вызовы
-    (docxtpl-рендер, LibreOffice-конвертация) уводим в отдельный поток,
-    чтобы не вешать event loop воркера.
+    Рендерит .docx из шаблона. Блокирующий docxtpl-рендер уводим в
+    отдельный поток, чтобы не вешать event loop воркера. Вывод только
+    .docx (PDF не делаем — см. app/utils/docx_render.py).
 
     Возвращает (body, extension, content_type, filename).
     """
     docx_bytes = await asyncio.to_thread(
         docx_render.render_docx, template_name, context
     )
-    if fmt == "pdf":
-        pdf_bytes = await asyncio.to_thread(
-            docx_render.convert_docx_to_pdf, docx_bytes
-        )
-        return pdf_bytes, "pdf", "application/pdf", f"{basename}.pdf"
     return (
         docx_bytes,
         "docx",
@@ -280,10 +275,9 @@ async def _handle_catalog_official(
     db: AsyncSession, payload: dict, created_by: uuid.UUID | None
 ) -> uuid.UUID:
     show_id = uuid.UUID(payload["show_id"])
-    fmt = payload.get("format", "docx")
     ctx = await document_official.build_catalog_context(db, show_id)
     body, ext, ctype, filename = await _render_official(
-        "catalog.docx", ctx, fmt, f"catalog_official_{show_id}"
+        "catalog.docx", ctx, f"catalog_official_{show_id}"
     )
     return await _upload_and_register(
         db, body, filename, content_type=ctype, created_by=created_by,
@@ -295,10 +289,9 @@ async def _handle_diploma_official(
     db: AsyncSession, payload: dict, created_by: uuid.UUID | None
 ) -> uuid.UUID:
     entry_id = uuid.UUID(payload["entry_id"])
-    fmt = payload.get("format", "docx")
     ctx = await document_official.build_diploma_context(db, entry_id)
     body, ext, ctype, filename = await _render_official(
-        "diploma.docx", ctx, fmt, f"diploma_official_{entry_id}"
+        "diploma.docx", ctx, f"diploma_official_{entry_id}"
     )
     return await _upload_and_register(
         db, body, filename, content_type=ctype, created_by=created_by,
@@ -310,10 +303,9 @@ async def _handle_diplomas_batch_official(
     db: AsyncSession, payload: dict, created_by: uuid.UUID | None
 ) -> uuid.UUID:
     show_id = uuid.UUID(payload["show_id"])
-    fmt = payload.get("format", "docx")
     ctx = await document_official.build_diplomas_batch_context(db, show_id)
     body, ext, ctype, filename = await _render_official(
-        "diplomas_batch.docx", ctx, fmt, f"diplomas_official_{show_id}"
+        "diplomas_batch.docx", ctx, f"diplomas_official_{show_id}"
     )
     return await _upload_and_register(
         db, body, filename, content_type=ctype, created_by=created_by,
@@ -325,14 +317,13 @@ async def _handle_ring_sheets_official(
     db: AsyncSession, payload: dict, created_by: uuid.UUID | None
 ) -> uuid.UUID:
     show_id = uuid.UUID(payload["show_id"])
-    fmt = payload.get("format", "docx")
     ring_id = payload.get("ring_id")
     ring_uuid = uuid.UUID(ring_id) if ring_id else None
     ctx = await document_official.build_ring_sheets_context(
         db, show_id, ring_uuid
     )
     body, ext, ctype, filename = await _render_official(
-        "ring_sheet.docx", ctx, fmt, f"ring_sheets_{show_id}"
+        "ring_sheet.docx", ctx, f"ring_sheets_{show_id}"
     )
     return await _upload_and_register(
         db, body, filename, content_type=ctype, created_by=created_by,

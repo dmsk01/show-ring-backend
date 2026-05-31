@@ -15,27 +15,26 @@
 
 - **`docxtpl`** (поверх `python-docx` + Jinja2) — подстановка данных в
   .docx-шаблон.
-- **LibreOffice headless** (`soffice --convert-to pdf`) — конвертация
-  готового .docx в PDF. На dev-машине без LibreOffice есть Word COM как
-  альтернатива для ручной конвертации; на сервере LibreOffice ставится в
-  Docker (этап 15).
+
+Вывод только **.docx**. PDF намеренно не делаем: точная конвертация
+.docx→PDF требует офисного движка (LibreOffice/Word) — тяжёлую зависимость
+не тащим. Готовый .docx при необходимости сохраняется в PDF из Word вручную.
 
 ## Поток данных
 
 ```
-POST /shows/{id}/official/<doc>?format=docx|pdf
+POST /shows/{id}/official/<doc>
   → создаётся Task(pending), публикуется в RabbitMQ (очередь document_task)
   → воркер: process_document_task → ветка по task.type
       → document_official.build_*_context(db, ...)   # сбор данных из БД
       → docx_render.render_docx(template, context)    # .docx (bytes)
-      → [если pdf] docx_render.convert_docx_to_pdf()   # LibreOffice
       → file_storage.upload_bytes(...) в MinIO
       → mark_done(file_id)
   → клиент опрашивает GET /tasks/{id}, затем GET /tasks/{id}/download
 ```
 
-Блокирующие вызовы (рендер, LibreOffice) в воркере уводятся в
-`asyncio.to_thread`, чтобы не вешать event loop.
+Блокирующий рендер в воркере уводится в `asyncio.to_thread`, чтобы не
+вешать event loop.
 
 ## Где что лежит
 
@@ -43,7 +42,7 @@ POST /shows/{id}/official/<doc>?format=docx|pdf
 |------|-----------------|
 | `app/templates/documents/*.docx` | шаблоны (поставляются вручную; см. README рядом) |
 | `app/services/document_official.py` | сбор контекста из БД + чистые шейперы |
-| `app/utils/docx_render.py` | `render_docx`, `convert_docx_to_pdf` |
+| `app/utils/docx_render.py` | `render_docx` (только .docx) |
 | `app/utils/names.py` | `full_name`, `judge_display` (ФИО, страна) |
 | `worker/handlers/document_handler.py` | ветки `*_OFFICIAL`, `_render_official` |
 | `app/routers/documents.py` | ручки `/official/*`, `/context`, `/readiness` |

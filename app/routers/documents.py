@@ -174,36 +174,28 @@ async def generate_diploma(
 
 # ---------------------------------------------------------------------
 # Официальные документы (формат РКФ) — отдельные ручки рядом со старыми.
-# Формат вывода — query-параметр format=docx|pdf, кладётся в payload задачи.
+# Вывод всегда .docx (PDF не делаем — см. app/utils/docx_render.py).
 # ---------------------------------------------------------------------
-
-
-def _norm_format(fmt: str) -> str:
-    if fmt not in ("docx", "pdf"):
-        raise HTTPException(400, "format must be docx or pdf")
-    return fmt
 
 
 @router.post(
     "/{show_id}/official/catalog",
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Каталог выставки в формате РКФ (docx/pdf)",
+    summary="Каталог выставки в формате РКФ (docx)",
 )
 async def generate_official_catalog(
     show_id: uuid.UUID,
-    format: str = "docx",
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    fmt = _norm_format(format)
     try:
         await _ensure_organizer(db, show_id, user)
     except ValueError as e:
         _raise_for_error(e)
     return await _publish_task(
         db, user, DocumentKind.CATALOG_OFFICIAL,
-        {"show_id": str(show_id), "format": fmt},
+        {"show_id": str(show_id)},
     )
 
 
@@ -211,22 +203,20 @@ async def generate_official_catalog(
     "/{show_id}/official/diplomas",
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Пакет дипломов в формате РКФ (docx/pdf)",
+    summary="Пакет дипломов в формате РКФ (docx)",
 )
 async def generate_official_diplomas(
     show_id: uuid.UUID,
-    format: str = "docx",
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    fmt = _norm_format(format)
     try:
         await _ensure_organizer(db, show_id, user)
     except ValueError as e:
         _raise_for_error(e)
     return await _publish_task(
         db, user, DocumentKind.DIPLOMAS_BATCH_OFFICIAL,
-        {"show_id": str(show_id), "format": fmt},
+        {"show_id": str(show_id)},
     )
 
 
@@ -234,23 +224,21 @@ async def generate_official_diplomas(
     "/{show_id}/entries/{entry_id}/official/diploma",
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Диплом участника в формате РКФ (docx/pdf)",
+    summary="Диплом участника в формате РКФ (docx)",
 )
 async def generate_official_diploma(
     show_id: uuid.UUID,
     entry_id: uuid.UUID,
-    format: str = "docx",
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    fmt = _norm_format(format)
     try:
         await _ensure_organizer(db, show_id, user)
     except ValueError as e:
         _raise_for_error(e)
     return await _publish_task(
         db, user, DocumentKind.DIPLOMA_OFFICIAL,
-        {"show_id": str(show_id), "entry_id": str(entry_id), "format": fmt},
+        {"show_id": str(show_id), "entry_id": str(entry_id)},
     )
 
 
@@ -258,21 +246,19 @@ async def generate_official_diploma(
     "/{show_id}/official/ring-sheets",
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Ринговые ведомости в формате РКФ (docx/pdf)",
+    summary="Ринговые ведомости в формате РКФ (docx)",
 )
 async def generate_official_ring_sheets(
     show_id: uuid.UUID,
-    format: str = "docx",
     ring_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    fmt = _norm_format(format)
     try:
         await _ensure_organizer(db, show_id, user)
     except ValueError as e:
         _raise_for_error(e)
-    payload = {"show_id": str(show_id), "format": fmt}
+    payload = {"show_id": str(show_id)}
     if ring_id is not None:
         payload["ring_id"] = str(ring_id)
     return await _publish_task(
