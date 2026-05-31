@@ -51,7 +51,9 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("seed-show")
 
 SHOW_NAME = "Тестовая национальная выставка (сид)"
-ORG_EMAIL = "organizer@test.local"
+# Домен dogshow.ru, а не *.local: EmailStr (валидатор /auth/login) отвергает
+# зарезервированные TLD вроде .local — иначе организатором не залогиниться.
+ORG_EMAIL = "organizer@dogshow.ru"
 ORG_PASSWORD = "TestPass123!"
 
 
@@ -105,19 +107,19 @@ async def seed(db: AsyncSession) -> None:
         role=RoleEnum.organizer,
     )
     judge1 = await _user_with_profile(
-        db, "judge1@test.local", last="Мордвинова", first="Татьяна",
+        db, "judge1@dogshow.ru", last="Мордвинова", first="Татьяна",
         patr="Александровна", role=RoleEnum.judge,
     )
     judge2 = await _user_with_profile(
-        db, "judge2@test.local", last="Гришина", first="Евгения",
+        db, "judge2@dogshow.ru", last="Гришина", first="Евгения",
         patr="Евгеньевна", role=RoleEnum.judge,
     )
     breeder_u = await _user_with_profile(
-        db, "breeder@test.local", last="Сидорова", first="Анна",
+        db, "breeder@dogshow.ru", last="Сидорова", first="Анна",
         role=RoleEnum.breeder,
     )
     owner_u = await _user_with_profile(
-        db, "owner@test.local", last="Петров", first="Пётр", patr="Петрович",
+        db, "owner@dogshow.ru", last="Петров", first="Пётр", patr="Петрович",
         role=RoleEnum.buyer,
     )
 
