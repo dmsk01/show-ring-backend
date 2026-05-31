@@ -60,7 +60,11 @@ class Kennel(Base, TimestampMixin):
         Boolean, default=False, server_default="false"
     )
 
+    # У Dog два FK на kennels (kennel_id — текущий питомник, breeder_kennel_id
+    # — питомник-заводчик). Явно указываем foreign_keys, иначе SQLAlchemy не
+    # может выбрать путь связи (AmbiguousForeignKeysError при конфигурации).
     dogs: Mapped[list["Dog"]] = relationship(  # noqa: F821
         back_populates="kennel",
         cascade="save-update",
+        foreign_keys="Dog.kennel_id",
     )
