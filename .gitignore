@@ -43,3 +43,6 @@ htmlcov/
 *.override.yml
 
 hints/
+
+# Сгенерированные тестовые документы (scripts/render_test_docs.py)
+output_docs/
