@@ -199,6 +199,34 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # Обработка изображений (превью + watermark) — очередь image_task.
+  worker-files:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
+      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: ["python", "-m", "worker.main", "--mode", "files"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'worker.main' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   # Отдельные сервисы под очереди этапа 9 (topic events + email).
   # На dev'е можно их выключить (profile: events), на проде они
   # самостоятельные процессы — каждый легко масштабируется.

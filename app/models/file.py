@@ -17,13 +17,16 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
+    Integer,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
@@ -62,3 +65,47 @@ class UploadedFile(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    # Обработанные варианты изображения (превью/средний с watermark).
+    # Генерируются асинхронно воркером; delete-orphan — варианты живут,
+    # пока жив оригинал.
+    variants: Mapped[list["FileVariant"]] = relationship(
+        back_populates="file", cascade="all, delete-orphan"
+    )
+
+
+class FileVariant(Base):
+    """
+    Обработанный вариант изображения (превью, средний с водяным знаком).
+    Генерируется асинхронно воркером (`process_image`) после загрузки
+    оригинала; сами байты — в MinIO под s3_key. 1:N к UploadedFile.
+    """
+
+    __tablename__ = "file_variants"
+    __table_args__ = (
+        UniqueConstraint("file_id", "kind", name="uq_file_variant_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        # CASCADE — варианты бессмысленны без оригинала.
+        ForeignKey("files.id", ondelete="CASCADE"),
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(32))  # "thumb" / "medium"
+    s3_key: Mapped[str] = mapped_column(String(512), unique=True)
+    content_type: Mapped[str] = mapped_column(String(128))
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    has_watermark: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    file: Mapped["UploadedFile"] = relationship(back_populates="variants")

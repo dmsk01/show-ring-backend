@@ -22,3 +22,18 @@ class FileResponse(BaseModel):
     content_type: str
     size_bytes: int
     created_at: datetime
+
+
+class FileVariantResponse(BaseModel):
+    """Обработанный вариант изображения (превью/средний). Байты —
+    через GET /files/variants/{id}."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    content_type: str
+    width: int
+    height: int
+    has_watermark: bool
+    size_bytes: int

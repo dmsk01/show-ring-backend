@@ -35,6 +35,7 @@ from worker.handlers.ad_handler import (
 )
 from worker.handlers.book_handler import process_book
 from worker.handlers.document_handler import process_document_task
+from worker.handlers.file_handler import process_image_task
 from worker.handlers.email_handler import process_email_task
 from worker.handlers.events_handler import (
     EMAIL_TASK_QUEUE,
@@ -55,6 +56,7 @@ logger = logging.getLogger("worker")
 # и ту же. Дублирование констант временно: на этапе 14 общие настройки
 # уедут в app.config.
 DOCUMENT_TASK_QUEUE = "document_task"
+IMAGE_TASK_QUEUE = "image_task"
 
 
 # ---------------------------------------------------------------------
@@ -89,6 +91,23 @@ async def on_document_message(message: aio_pika.abc.AbstractIncomingMessage):
                 await process_document_task(db, tid)
             except Exception:
                 logger.exception("Document task %s failed", task_id)
+
+
+async def on_image_message(message: aio_pika.abc.AbstractIncomingMessage):
+    """Обёртка вокруг process_image_task (см. on_document_message)."""
+    async with message.process(requeue=False):
+        body = message.body.decode()
+        try:
+            data = json.loads(body)
+            task_id = data["task_id"]
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error("Bad image task message: %s (%s)", body, e)
+            return
+        async with async_session_factory() as db:
+            try:
+                await process_image_task(db, uuid.UUID(task_id))
+            except Exception:
+                logger.exception("Image task %s failed", task_id)
 
 
 # ---------------------------------------------------------------------
@@ -181,6 +200,17 @@ async def run_documents() -> None:
     queue = await declare_workflow_queue(channel, DOCUMENT_TASK_QUEUE)
     await queue.consume(on_document_message)
     await _serve(connection, DOCUMENT_TASK_QUEUE)
+
+
+async def run_files() -> None:
+    """Воркер обработки изображений (генерация вариантов). См. run_documents."""
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    channel = await connection.channel()
+    # prefetch=1: ресайз — CPU-bound, не забираем пачку сообщений под себя.
+    await channel.set_qos(prefetch_count=1)
+    queue = await declare_workflow_queue(channel, IMAGE_TASK_QUEUE)
+    await queue.consume(on_image_message)
+    await _serve(connection, IMAGE_TASK_QUEUE)
 
 
 async def run_book() -> None:
@@ -350,19 +380,20 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["documents", "book", "events", "topic", "email", "ads", "outbox"],
+        choices=["documents", "files", "book", "events", "topic", "email", "ads", "outbox"],
         default="documents",
         help=(
-            "documents — PDF-задачи; book — учебный пример; "
-            "events — fanout-демо; topic — диспатчер событий этапа 9; "
-            "email — SMTP-воркер этапа 9; ads — batch-воркер рекламных "
-            "событий этапа 14; outbox — dispatcher outbox_events → "
-            "RabbitMQ (transactional outbox)."
+            "documents — генерация документов; files — обработка изображений "
+            "(варианты/watermark); book — учебный пример; events — fanout-демо; "
+            "topic — диспатчер событий этапа 9; email — SMTP-воркер этапа 9; "
+            "ads — batch-воркер рекламных событий этапа 14; outbox — dispatcher "
+            "outbox_events → RabbitMQ (transactional outbox)."
         ),
     )
     args = parser.parse_args()
     coro = {
         "documents": run_documents,
+        "files": run_files,
         "book": run_book,
         "events": run_events,
         "topic": run_topic_events,

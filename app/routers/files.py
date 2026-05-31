@@ -12,21 +12,53 @@ GET  /files/{id}    — публичный — браузер сразу мож�
 
 from __future__ import annotations
 
+import logging
 import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models.file import UploadedFile
+from app.models.file import FileVariant, UploadedFile
 from app.models.user import User
-from app.schemas.file import FileResponse
+from app.repositories import task as task_repo
+from app.schemas.file import FileResponse, FileVariantResponse
+from app.schemas.task import TaskMessage
 from app.services import file_storage
+from app.services.rabbit import rabbit_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/files", tags=["files"])
+
+# Очередь и тип задачи обработки изображений (см. worker/main.py run_files).
+IMAGE_TASK_QUEUE = "image_task"
+IMAGE_TASK_TYPE = "process_image"
+
+
+async def _queue_image_processing(
+    db: AsyncSession, file_id: uuid.UUID, user_id: uuid.UUID | None
+) -> None:
+    """
+    Создаёт Task(process_image) и публикует в image_task. Если RabbitMQ
+    недоступен — не валим загрузку: задача осталась в БД (pending), её
+    можно перепубликовать позже.
+    """
+    payload = {"file_id": str(file_id)}
+    task = await task_repo.create_task(
+        db, type_=IMAGE_TASK_TYPE, payload=payload, created_by=user_id
+    )
+    message = TaskMessage(
+        task_id=task.id, action=IMAGE_TASK_TYPE, payload=payload
+    ).to_json()
+    try:
+        await rabbit_service.publish(IMAGE_TASK_QUEUE, message)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to publish image task %s: %s", task.id, e)
 
 
 @router.post(
@@ -57,7 +89,47 @@ async def upload_file(
     db.add(db_file)
     await db.commit()
     await db.refresh(db_file)
+    # Изображения обрабатываем асинхронно: превью + средний с watermark.
+    if ct.startswith("image/"):
+        await _queue_image_processing(db, db_file.id, user.id)
     return db_file
+
+
+@router.get(
+    "/{file_id}/variants",
+    response_model=list[FileVariantResponse],
+    summary="Варианты изображения (превью/средний)",
+)
+async def list_file_variants(
+    file_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+):
+    variants = (
+        await db.execute(
+            select(FileVariant)
+            .where(FileVariant.file_id == file_id)
+            .order_by(FileVariant.width.asc())
+        )
+    ).scalars().all()
+    return list(variants)
+
+
+@router.get(
+    "/variants/{variant_id}",
+    summary="Скачать/показать вариант изображения",
+    response_class=Response,
+)
+async def get_file_variant(
+    variant_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+):
+    variant = await db.get(FileVariant, variant_id)
+    if variant is None:
+        raise HTTPException(status_code=404, detail="Вариант не найден")
+    body, content_type = await file_storage.get_file_stream(variant.s3_key)
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 @router.get(
