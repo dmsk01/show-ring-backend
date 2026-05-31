@@ -119,3 +119,21 @@ def test_diplomas_batch_template_renders():
     body = docx_render.render_docx("diplomas_batch.docx", ctx)
     assert body[:2] == b"PK"
     assert len(body) > 2000
+
+
+def _certificate_ctx() -> dict:
+    cert = {
+        "title": "CAC", "dog_name": "Rex",
+        "breed_line": "(FCI 143) Доберман", "catalog_number": "10",
+        "pedigree": "RKF10", "owner": "Вл", "breeder": "Зав",
+        "show_title": "Выставка ранга САС", "date": "22 ноября 2025 г.",
+        "city": "Москва", "judge": "Судья А",
+    }
+    return {"certificates": [cert, {**cert, "title": "ЛПП"}]}
+
+
+def test_certificate_template_renders():
+    _skip_if_absent("certificate.docx")
+    body = docx_render.render_docx("certificate.docx", _certificate_ctx())
+    assert body[:2] == b"PK"
+    assert len(body) > 2000

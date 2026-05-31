@@ -12,6 +12,7 @@
 | `diplomas_batch.docx` | все дипломы выставки в одном файле | `build_diplomas_batch_context` → `{"diplomas": [<ctx диплома>, ...]}` |
 | `ring_sheet.docx` | ринговые ведомости | `build_ring_sheets_context` → `{"sheets": [<sheet>, ...]}` |
 | `catalog.docx` | каталог выставки | `build_catalog_context` |
+| `certificate.docx` | сертификаты титулов (1 на пару собака×титул) | `build_certificates_context` → `{"certificates": [<cert>, ...]}` |
 
 ## Плейсхолдеры
 
@@ -55,6 +56,16 @@
       `{{ e.dob }}`, `{{ e.color }}`, `{{ e.pedigree }}`, `{{ e.marks }}`,
       `{{ e.breeder }}`, `{{ e.owner }}`, `{{ e.sire }}`, `{{ e.dam }}`
     `{%p endfor %}` `{%p endfor %}` `{%p endfor %}`
+
+### certificate.docx
+Образца РКФ нет — шаблон собран программно (`_build_certificate.py`-подобный
+скрипт из python-docx, в git его нет; .docx коммитится готовым). Один блок на
+страницу, обёрнут `{%p for c in certificates %}` … `{%p endfor %}`, разрыв
+страницы между через `{% if not loop.last %}` (как в ведомости). Поля:
+`{{ c.title }}` (крупно), `{{ c.dog_name }}`, `{{ c.breed_line }}`,
+`{{ c.catalog_number }}`, `{{ c.pedigree }}`, `{{ c.owner }}`,
+`{{ c.breeder }}`, `{{ c.show_title }}`, `{{ c.city }}`, `{{ c.date }}`,
+`{{ c.judge }}`.
 
 ## Проверка
 `tests/unit/test_official_templates.py` рендерит каждый шаблон на тестовом

@@ -63,11 +63,12 @@ class DocumentKind(str, Enum):
     CATALOG = "generate_catalog"
     DIPLOMA = "generate_diploma"
     DIPLOMAS_BATCH = "generate_diplomas_batch"
-    # Официальные документы РКФ (DOCX-шаблоны + опц. конвертация в PDF).
+    # Официальные документы РКФ (DOCX-шаблоны).
     CATALOG_OFFICIAL = "generate_catalog_official"
     DIPLOMA_OFFICIAL = "generate_diploma_official"
     DIPLOMAS_BATCH_OFFICIAL = "generate_diplomas_batch_official"
     RING_SHEETS_OFFICIAL = "generate_ring_sheets_official"
+    CERTIFICATES_OFFICIAL = "generate_certificates_official"
 
 
 class TaskResponse(BaseModel):

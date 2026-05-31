@@ -168,6 +168,42 @@ def test_shape_catalog_groups_sorts_and_formats():
     assert ctx["total_entries"] == 2
 
 
+from app.services.document_official import _shape_certificate, CertificateInput
+
+
+def test_shape_certificate_builds_breed_line():
+    cert = _shape_certificate(
+        CertificateInput(
+            title="CAC", dog_name="Rex", breed="Доберман", fci_number="143",
+            catalog_number=10, pedigree="RKF10", owner="Вл", breeder="Зав",
+            show_title="Выставка ранга САС", date="22 ноября 2025 г.",
+            city="Москва", judge="Судья А",
+        )
+    )
+    assert cert["title"] == "CAC"
+    assert cert["dog_name"] == "Rex"
+    assert cert["breed_line"] == "(FCI 143) Доберман"
+    assert cert["catalog_number"] == "10"
+    assert cert["pedigree"] == "RKF10"
+    assert cert["owner"] == "Вл"
+    assert cert["show_title"] == "Выставка ранга САС"
+    assert cert["judge"] == "Судья А"
+
+
+def test_shape_certificate_no_fci_and_empty_fields():
+    cert = _shape_certificate(
+        CertificateInput(
+            title="ЛПП", dog_name="Bella", breed="Аусси", fci_number=None,
+            catalog_number=None, pedigree=None, owner=None, breeder=None,
+            show_title="X", date="", city=None, judge=None,
+        )
+    )
+    assert cert["breed_line"] == "Аусси"  # без FCI — только название
+    assert cert["catalog_number"] == ""
+    assert cert["owner"] == ""
+    assert cert["judge"] == ""
+
+
 from app.services.document_official import _entry_issues, EntryCheck
 
 

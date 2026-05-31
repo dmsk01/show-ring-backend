@@ -694,3 +694,114 @@ async def build_documents_readiness(
                 }
             )
     return {"total_entries": len(entries), "problems": problems}
+
+
+# ---------------------------------------------------------------------
+# Сертификаты титулов
+# ---------------------------------------------------------------------
+
+
+@dataclass
+class CertificateInput:
+    """Один сертификат = пара (собака, титул)."""
+
+    title: str
+    dog_name: str
+    breed: str
+    fci_number: str | None
+    catalog_number: int | None
+    pedigree: str | None
+    owner: str | None
+    breeder: str | None
+    show_title: str  # название + ранг выставки
+    date: str  # уже форматированная (длинная) дата
+    city: str | None
+    judge: str | None
+
+
+def _shape_certificate(data: CertificateInput) -> dict:
+    breed_line = _s(data.breed)
+    if data.fci_number:
+        breed_line = f"(FCI {data.fci_number}) {breed_line}".strip()
+    return {
+        "title": _s(data.title),
+        "dog_name": _s(data.dog_name),
+        "breed_line": breed_line,
+        "catalog_number": _s(data.catalog_number),
+        "pedigree": _s(data.pedigree),
+        "owner": _s(data.owner),
+        "breeder": _s(data.breeder),
+        "show_title": _s(data.show_title),
+        "date": _s(data.date),
+        "city": _s(data.city),
+        "judge": _s(data.judge),
+    }
+
+
+async def build_certificates_context(
+    db: AsyncSession,
+    show_id: uuid.UUID,
+    entry_id: uuid.UUID | None = None,
+) -> dict:
+    """
+    Контекст файла с сертификатами титулов выставки. Один сертификат — на
+    каждый титул из ShowResult.titles_cache каждой записи (собаки с
+    оценкой). entry_id — если задан, ограничиваем одной записью.
+    """
+    show = await db.get(Show, show_id)
+    if show is None:
+        raise ValueError("not_found")
+    rank = await db.get(ShowRank, show.rank_id)
+    show_title = show.name + (f" ранга {rank.name}" if rank else "")
+    date_long = _fmt_date_long(show.date_start)
+
+    stmt = (
+        select(ShowEntry)
+        .where(ShowEntry.show_id == show_id)
+        .order_by(ShowEntry.catalog_number.asc().nullslast())
+    )
+    if entry_id is not None:
+        stmt = stmt.where(ShowEntry.id == entry_id)
+    entries = (await db.execute(stmt)).scalars().all()
+
+    certificates: list[dict] = []
+    for e in entries:
+        result = (
+            await db.execute(
+                select(ShowResult).where(ShowResult.show_entry_id == e.id)
+            )
+        ).scalar_one_or_none()
+        if result is None or not result.titles_cache:
+            continue
+        dog = await db.get(Dog, e.dog_id)
+        if dog is None:
+            continue
+        breed = await db.get(Breed, dog.breed_id)
+        owner = await _resolve_owner(db, dog)
+        breeder, _prefix = await _resolve_breeder(db, dog)
+        judge_user = await _load_user_with_profile(db, result.judge_id)
+        judge = judge_display(judge_user) if judge_user else None
+        for t in result.titles_cache:
+            title = t.get("name") or t.get("code") or ""
+            if not title:
+                continue
+            certificates.append(
+                _shape_certificate(
+                    CertificateInput(
+                        title=title,
+                        dog_name=dog.name,
+                        breed=breed.name if breed else "",
+                        fci_number=breed.fci_number if breed else None,
+                        catalog_number=e.catalog_number,
+                        pedigree=dog.rkf_number,
+                        owner=owner,
+                        breeder=breeder,
+                        show_title=show_title,
+                        date=date_long,
+                        city=show.city,
+                        judge=judge,
+                    )
+                )
+            )
+
+    return {"certificates": certificates}

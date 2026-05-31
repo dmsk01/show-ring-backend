@@ -105,6 +105,10 @@ async def process_document_task(
             file_id = await _handle_ring_sheets_official(
                 db, task.payload, task.created_by
             )
+        elif task.type == DocumentKind.CERTIFICATES_OFFICIAL.value:
+            file_id = await _handle_certificates_official(
+                db, task.payload, task.created_by
+            )
         else:
             raise ValueError(f"unknown task type: {task.type}")
     except Exception as e:  # noqa: BLE001 — последняя черта обороны воркера
@@ -324,6 +328,24 @@ async def _handle_ring_sheets_official(
     )
     body, ext, ctype, filename = await _render_official(
         "ring_sheet.docx", ctx, f"ring_sheets_{show_id}"
+    )
+    return await _upload_and_register(
+        db, body, filename, content_type=ctype, created_by=created_by,
+        extension=ext,
+    )
+
+
+async def _handle_certificates_official(
+    db: AsyncSession, payload: dict, created_by: uuid.UUID | None
+) -> uuid.UUID:
+    show_id = uuid.UUID(payload["show_id"])
+    entry_id = payload.get("entry_id")
+    entry_uuid = uuid.UUID(entry_id) if entry_id else None
+    ctx = await document_official.build_certificates_context(
+        db, show_id, entry_uuid
+    )
+    body, ext, ctype, filename = await _render_official(
+        "certificate.docx", ctx, f"certificates_{show_id}"
     )
     return await _upload_and_register(
         db, body, filename, content_type=ctype, created_by=created_by,

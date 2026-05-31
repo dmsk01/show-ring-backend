@@ -266,6 +266,49 @@ async def generate_official_ring_sheets(
     )
 
 
+@router.post(
+    "/{show_id}/official/certificates",
+    response_model=TaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Сертификаты титулов выставки в формате РКФ (docx)",
+)
+async def generate_official_certificates(
+    show_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await _ensure_organizer(db, show_id, user)
+    except ValueError as e:
+        _raise_for_error(e)
+    return await _publish_task(
+        db, user, DocumentKind.CERTIFICATES_OFFICIAL,
+        {"show_id": str(show_id)},
+    )
+
+
+@router.post(
+    "/{show_id}/entries/{entry_id}/official/certificates",
+    response_model=TaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Сертификаты титулов одной собаки в формате РКФ (docx)",
+)
+async def generate_official_entry_certificates(
+    show_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await _ensure_organizer(db, show_id, user)
+    except ValueError as e:
+        _raise_for_error(e)
+    return await _publish_task(
+        db, user, DocumentKind.CERTIFICATES_OFFICIAL,
+        {"show_id": str(show_id), "entry_id": str(entry_id)},
+    )
+
+
 # ---------------------------------------------------------------------
 # Удобство фронта: предпросмотр собранных данных и чек-лист готовности.
 # ---------------------------------------------------------------------
