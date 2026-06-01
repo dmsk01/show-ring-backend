@@ -21,6 +21,17 @@ VARIANTS: list[tuple[str, int, bool]] = [
 WATERMARK_TEXT = "ShowTail"
 JPEG_QUALITY = 85
 
+# Явный потолок числа пикселей — защита от decompression-bomb. Сильно
+# сжатый PNG/WebP в пределах upload-лимита (10 МБ) может развернуться в
+# сотни мегапикселей и съесть память воркера при декоде. Pillow по
+# умолчанию предупреждает лишь около 178 Мп; ставим доменный потолок
+# ниже и проверяем его ЯВНО до загрузки пикселей (Image.open ленив —
+# .size доступен из заголовка без полного декода). Присвоение
+# Image.MAX_IMAGE_PIXELS — backstop: Pillow сам бросит DecompressionBomb-
+# Error, если наш ручной чек кто-то обойдёт.
+MAX_IMAGE_PIXELS = 50_000_000  # 50 Мп — с запасом для фото с телефона
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
 
 def _apply_watermark(img: Image.Image, text: str) -> Image.Image:
     """Полупрозрачный текст в правом нижнем углу. Возвращает новый RGB."""
@@ -47,6 +58,14 @@ def make_variant(
     Возвращает (jpeg_bytes, width, height).
     """
     img = Image.open(io.BytesIO(image_bytes))
+    # Чек размеров ДО декода пикселей: .size читается из заголовка, а
+    # exif_transpose/thumbnail ниже уже грузят данные. Так бомба
+    # отбивается без затрат памяти на разворачивание.
+    width, height = img.size
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"image too large: {width}x{height} > {MAX_IMAGE_PIXELS}px"
+        )
     # EXIF-ориентация (фото с телефона) — нормализуем.
     img = ImageOps.exif_transpose(img)
     # JPEG не умеет альфу — RGBA/PNG кладём на белый фон.

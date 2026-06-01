@@ -140,7 +140,11 @@ async def get_file_variant(
 )
 async def get_file(file_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     db_file = await db.get(UploadedFile, file_id)
-    if db_file is None:
+    # is_public=False → приватный файл (сгенерированный документ с ПДн).
+    # Отдаём 404 (а не 403), чтобы не раскрывать сам факт существования
+    # файла анониму. Владелец/admin получают его через защищённый
+    # /tasks/{id}/download. См. UploadedFile.is_public (review 2026-06-01).
+    if db_file is None or not db_file.is_public:
         raise HTTPException(status_code=404, detail="Файл не найден")
     body, content_type = await file_storage.get_file_stream(db_file.s3_key)
     # ИСПРАВЛЕНО (bug_202): см. tasks.py — \r\n или " в original_filename

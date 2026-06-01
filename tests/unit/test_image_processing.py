@@ -1,7 +1,9 @@
 import io
 
+import pytest
 from PIL import Image
 
+import app.utils.image_processing as ip
 from app.utils.image_processing import VARIANTS, make_variant
 
 
@@ -41,3 +43,18 @@ def test_make_variant_watermark_changes_pixels():
 def test_make_variant_rgba_converts_to_jpeg():
     data, _, _ = make_variant(_png(300, 300, mode="RGBA"), 200, watermark=False)
     assert data[:2] == b"\xff\xd8"  # RGBA → JPEG без ошибок
+
+
+def test_make_variant_rejects_decompression_bomb(monkeypatch):
+    # Защита от decompression-bomb: размеры проверяются по заголовку ДО
+    # декода. Понижаем лимит и подаём картинку крупнее него.
+    monkeypatch.setattr(ip, "MAX_IMAGE_PIXELS", 100)  # 10x10
+    with pytest.raises(ValueError):
+        make_variant(_png(200, 200), 100, watermark=False)
+
+
+def test_make_variant_allows_within_pixel_limit(monkeypatch):
+    # Граница: 100x100 = 10000 ≤ лимит — проходит.
+    monkeypatch.setattr(ip, "MAX_IMAGE_PIXELS", 10_000)
+    data, _, _ = make_variant(_png(100, 100), 50, watermark=False)
+    assert data[:2] == b"\xff\xd8"

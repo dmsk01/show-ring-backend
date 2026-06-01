@@ -123,9 +123,13 @@ async def upload_file(
     # Возвращаемся в начало — нам нужно загрузить файл целиком.
     await upload.seek(0)
 
-    # Читаем чанками, чтобы не держать весь файл в памяти. Здесь
-    # загрузка идёт через put_object, для очень больших файлов в
-    # этапе 14 переедем на multipart upload (>5 МБ).
+    # Читаем чанками и считаем размер на лету, чтобы оборвать загрузку
+    # ДО полного вычитывания, если файл превысил лимит (защита от
+    # OOM/диск-флуда на гигабайтном загрузе). После проверки склеиваем
+    # тело и кладём одним put_object — при лимите 10 МБ это допустимо.
+    # ВНИМАНИЕ: само тело при этом всё же лежит в памяти целиком (до
+    # 10 МБ на загрузку); честный потоковый upload_fileobj/multipart —
+    # follow-up, когда поднимем лимит размера файла.
     chunks: list[bytes] = []
     total = 0
     chunk_size = 64 * 1024
@@ -200,14 +204,18 @@ async def upload_bytes(
 
 async def get_file_stream(s3_key: str):
     """
-    Возвращает (body_bytes, content_type) для скачивания.
-    Стриминг через StreamingResponse сделаем, если файлы вырастут.
+    Возвращает (body_bytes, content_type) — файл читается ЦЕЛИКОМ в память.
+
+    Подходит для небольших объектов и потребителей, которым нужны байты
+    целиком: воркер обработки изображений (Pillow требует полный буфер),
+    inline-отдача аватаров/фото. Для больших файлов (каталог выставки)
+    используйте stat_file + iter_file со StreamingResponse — они стримят
+    чанками и не держат файл в памяти.
     """
     try:
         async with _s3_client() as s3:
             obj = await s3.get_object(Bucket=settings.s3_bucket, Key=s3_key)
             # boto3 возвращает StreamingBody — читаем целиком.
-            # На больших файлах перейдём на iter_chunks().
             body = await obj["Body"].read()
             return body, obj.get("ContentType", "application/octet-stream")
     except ClientError as e:
@@ -218,6 +226,49 @@ async def get_file_stream(s3_key: str):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Файловое хранилище недоступно",
         )
+
+
+async def stat_file(s3_key: str) -> None:
+    """
+    Проверяет существование объекта через head_object: 404 если нет,
+    503 при недоступности хранилища.
+
+    Зачем отдельно от iter_file: ошибка, поднятая ВНУТРИ async-генератора
+    iter_file, всплывёт уже после того, как StreamingResponse отправил
+    клиенту статус 200 и заголовки — превратить её в чистый 404 уже
+    нельзя. Поэтому существование проверяем заранее, до возврата
+    StreamingResponse.
+    """
+    try:
+        async with _s3_client() as s3:
+            await s3.head_object(Bucket=settings.s3_bucket, Key=s3_key)
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in (
+            "NoSuchKey", "404", "NotFound",
+        ):
+            raise HTTPException(status_code=404, detail="Файл не найден")
+        logger.error("S3 head failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Файловое хранилище недоступно",
+        )
+
+
+async def iter_file(s3_key: str, chunk_size: int = 64 * 1024):
+    """
+    Async-генератор: стримит объект из S3 чанками, не загружая его целиком
+    в память. Возвращает только тело; content_type для StreamingResponse
+    берётся из БД (UploadedFile.content_type), а существование заранее
+    проверяется через stat_file.
+
+    S3-клиент держится открытым внутри генератора всё время стрима —
+    нельзя обернуть его контекст вокруг возврата StreamingResponse, т.к.
+    тело отдаётся уже после выхода из обработчика.
+    """
+    async with _s3_client() as s3:
+        obj = await s3.get_object(Bucket=settings.s3_bucket, Key=s3_key)
+        async for chunk in obj["Body"].iter_chunks(chunk_size):
+            yield chunk
 
 
 async def delete_file(s3_key: str) -> None:

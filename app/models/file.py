@@ -62,6 +62,17 @@ class UploadedFile(Base):
     original_filename: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(128))
     size_bytes: Mapped[int] = mapped_column(BigInteger)
+    # is_public — отдаётся ли файл анонимным GET /files/{id}.
+    # Фото собак/аватары публичны по идее платформы (True по умолчанию).
+    # Сгенерированные официальные документы (дипломы/каталоги/сертификаты
+    # содержат ПДн: ФИО владельца и заводчика, чип, клеймо, дату рождения)
+    # воркер помечает is_public=False — они доступны только автору задачи
+    # или admin через защищённый /tasks/{id}/download, а публичный
+    # /files/{id} их не отдаёт (review 2026-06-01: до этого тот же файл
+    # был доступен по UUID без авторизации в обход ACL на /tasks/download).
+    is_public: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

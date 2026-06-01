@@ -34,6 +34,7 @@ from app.models.task import Task, TaskStatusEnum
 from app.models.user import RefreshToken
 from app.repositories import outbox as outbox_repo
 from app.schemas.task import TaskMessage
+from app.services.task_queues import QUEUE_FOR_TASK_TYPE as _QUEUE_FOR_TASK_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -290,15 +291,13 @@ async def requeue_stuck_tasks() -> None:
             )
 
 
-# Map task.type → RabbitMQ queue. Должен совпадать с константами в
-# routers/documents.py (DOCUMENT_TASK_QUEUE) и worker/main.py. Когда
-# появятся новые DB-backed типы задач, добавляем сюда; единая точка
-# изменения избавляет от рассыпанных строковых литералов.
-_QUEUE_FOR_TASK_TYPE: dict[str, str] = {
-    "generate_catalog": "document_task",
-    "generate_diploma": "document_task",
-    "generate_diplomas_batch": "document_task",
-}
+# Карта task.type → RabbitMQ queue вынесена в app.services.task_queues
+# (единый источник, покрыт тестом). ИСПРАВЛЕНО (review 2026-06-01):
+# раньше карта жила здесь тремя строковыми литералами и знала только про
+# первые три типа документов — официальные документы РКФ и process_image
+# выпадали, и requeue_stuck_tasks переводил зависшую задачу в pending, но
+# НЕ публиковал её в очередь (тихая смерть: pending навсегда, requeue
+# выбирает только processing).
 
 
 async def archive_old_classifieds() -> None:

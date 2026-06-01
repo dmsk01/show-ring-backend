@@ -18,6 +18,7 @@ SMTP без auth и без TLS, удобный для разработки.
 from __future__ import annotations
 
 import logging
+import re
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -134,8 +135,6 @@ def _strip_html(html: str) -> str:
     text body используется только клиентами, которые не умеют HTML
     (древние, server-side). Простого strip достаточно.
     """
-    import re
-
     text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
     text = re.sub(r"</p>", "\n\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)

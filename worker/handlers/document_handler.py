@@ -239,6 +239,10 @@ async def _upload_and_register(
         original_filename=filename,
         content_type=content_type,
         size_bytes=size_bytes,
+        # Документы содержат ПДн (ФИО, чип, клеймо) — НЕ публичны.
+        # Доступ только через /tasks/{id}/download (ACL автор/admin);
+        # публичный GET /files/{id} приватные файлы не отдаёт.
+        is_public=False,
     )
     db.add(file_obj)
     # flush — заставляет SQLAlchemy выполнить INSERT и применить

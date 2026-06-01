@@ -162,16 +162,13 @@ async def download_task_result(
     if db_file is None:
         raise HTTPException(404, "file_not_found")
 
-    # Получаем байты из MinIO. StreamingResponse, а не Response, потому
-    # что PDF каталога на большой выставке весит мегабайты — стримим
-    # клиенту чанками вместо удержания всего в памяти.
-    body, content_type = await file_storage.get_file_stream(db_file.s3_key)
-
-    def _iter():
-        # Один чанк для совместимости со StreamingResponse. Когда
-        # get_file_stream научится отдавать iter_chunks (этап 14), эта
-        # функция получит реальный стрим вместо одного фрейма.
-        yield body
+    # ИСПРАВЛЕНО (review 2026-06-01): реальный стриминг. Раньше
+    # get_file_stream выкачивал весь PDF/DOCX в память и StreamingResponse
+    # отдавал его одним кадром — никакой экономии памяти. Теперь
+    # stat_file заранее проверяет существование (чистый 404 ДО отправки
+    # заголовков), а iter_file стримит объект из MinIO чанками по 64 КБ.
+    # content_type берём из БД — он известен без обращения к S3.
+    await file_storage.stat_file(db_file.s3_key)
 
     # ИСПРАВЛЕНО (bug_202): сериализуем имя файла через RFC 6266
     # filename* — без этого \r\n или " внутри original_filename
@@ -181,8 +178,8 @@ async def download_task_result(
     # как раз и предлагает filename*=UTF-8''<percent-encoded>.
     safe_name = quote(db_file.original_filename or "file", safe="")
     return StreamingResponse(
-        _iter(),
-        media_type=content_type or db_file.content_type or "application/octet-stream",
+        file_storage.iter_file(db_file.s3_key),
+        media_type=db_file.content_type or "application/octet-stream",
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}",
         },

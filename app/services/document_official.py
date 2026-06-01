@@ -17,6 +17,7 @@ from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.dog import Dog
 from app.models.kennel import Kennel
@@ -36,20 +37,145 @@ def _s(value: object | None) -> str:
 
 
 # ---------------------------------------------------------------------
-# Резолвер имён с профилем (async)
+# Пакетная загрузка связей (защита от N+1)
 # ---------------------------------------------------------------------
+#
+# ИСПРАВЛЕНО (review 2026-06-01): билдеры официальных документов делали
+# по 6–10 последовательных db.get на КАЖДУЮ запись выставки (собака,
+# порода, группа, класс, питомники владельца/заводчика + их юзеры с
+# профилем, отец, мать) — каталог на 1000 собак = тысячи round-trip'ов.
+# Теперь все связи загружаются пачкой: один SELECT ... WHERE id IN (...)
+# на тип сущности, дальше резолв из словарей в памяти. Профили юзеров
+# тянем через selectinload(User.profile) — ещё один запрос на всех, а не
+# awaitable_attrs на каждого.
 
 
-async def _load_user_with_profile(
-    db: AsyncSession, user_id: uuid.UUID | None
-) -> User | None:
-    if user_id is None:
-        return None
-    user = await db.get(User, user_id)
-    if user is not None:
-        # AsyncAttrs (Base) — ленивую связь profile грузим явно.
-        await user.awaitable_attrs.profile
-    return user
+async def _load_map(db: AsyncSession, model: type, ids) -> dict:
+    """{id: obj} для непустого множества id — один SELECT по IN."""
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(select(model).where(model.id.in_(ids)))
+    ).scalars().all()
+    return {obj.id: obj for obj in rows}
+
+
+async def _load_users(db: AsyncSession, ids) -> dict[uuid.UUID, User]:
+    """{user_id: User} с уже подгруженным profile (selectinload)."""
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(User)
+            .where(User.id.in_(ids))
+            .options(selectinload(User.profile))
+        )
+    ).scalars().all()
+    return {u.id: u for u in rows}
+
+
+@dataclass
+class _Bulk:
+    """Предзагруженные связи для шейпинга записей без обращений к БД.
+
+    owner_name/breeder воспроизводят прежние _resolve_owner/_resolve_breeder
+    один-в-один, но из словарей: тот же fallback на breeder_name, тот же
+    префикс питомника.
+    """
+
+    dogs: dict
+    parents: dict
+    breeds: dict
+    groups: dict
+    classes: dict
+    kennels: dict
+    results: dict  # show_entry_id -> ShowResult
+    grades: dict
+    users: dict
+
+    def owner_name(self, dog: Dog) -> str:
+        if dog.kennel_id is not None:
+            kennel = self.kennels.get(dog.kennel_id)
+            if kennel is not None:
+                return full_name(self.users.get(kennel.owner_id))
+        return ""
+
+    def breeder(self, dog: Dog) -> tuple[str, str]:
+        """(breeder_name, breeder_kennel_prefix)."""
+        if dog.breeder_kennel_id is not None:
+            kennel = self.kennels.get(dog.breeder_kennel_id)
+            if kennel is not None:
+                return (
+                    full_name(self.users.get(kennel.owner_id)),
+                    _s(kennel.kennel_prefix or kennel.name),
+                )
+        return _s(dog.breeder_name), ""
+
+
+async def _load_bulk(
+    db: AsyncSession,
+    entries,
+    *,
+    with_results: bool,
+    with_parents: bool,
+) -> _Bulk:
+    """Грузит все связи для набора записей выставки пачкой запросов."""
+    dogs = await _load_map(db, Dog, {e.dog_id for e in entries})
+
+    parent_ids: set[uuid.UUID] = set()
+    if with_parents:
+        for d in dogs.values():
+            if d.father_id:
+                parent_ids.add(d.father_id)
+            if d.mother_id:
+                parent_ids.add(d.mother_id)
+    parents = await _load_map(db, Dog, parent_ids)
+
+    breeds = await _load_map(db, Breed, {d.breed_id for d in dogs.values()})
+    groups = await _load_map(
+        db, BreedGroup,
+        {b.breed_group_id for b in breeds.values() if b.breed_group_id},
+    )
+    classes = await _load_map(
+        db, ShowClass, {e.show_class_id for e in entries}
+    )
+
+    kennel_ids: set[uuid.UUID] = set()
+    for d in dogs.values():
+        if d.kennel_id:
+            kennel_ids.add(d.kennel_id)
+        if d.breeder_kennel_id:
+            kennel_ids.add(d.breeder_kennel_id)
+    kennels = await _load_map(db, Kennel, kennel_ids)
+
+    results: dict = {}
+    grades: dict = {}
+    if with_results and entries:
+        rows = (
+            await db.execute(
+                select(ShowResult).where(
+                    ShowResult.show_entry_id.in_([e.id for e in entries])
+                )
+            )
+        ).scalars().all()
+        # ≤1 результат на запись (как и прежний scalar_one_or_none).
+        results = {r.show_entry_id: r for r in rows}
+        grades = await _load_map(
+            db, Grade, {r.grade_id for r in results.values() if r.grade_id}
+        )
+
+    user_ids = {k.owner_id for k in kennels.values()}
+    if with_results:
+        user_ids |= {r.judge_id for r in results.values() if r.judge_id}
+    users = await _load_users(db, user_ids)
+
+    return _Bulk(
+        dogs=dogs, parents=parents, breeds=breeds, groups=groups,
+        classes=classes, kennels=kennels, results=results, grades=grades,
+        users=users,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -117,25 +243,59 @@ def _shape_diploma_context(data: DiplomaInput) -> dict:
     }
 
 
-async def _resolve_breeder(
-    db: AsyncSession, dog: Dog
-) -> tuple[str, str]:
-    """Возвращает (breeder_name, breeder_kennel_prefix)."""
-    if dog.breeder_kennel_id is not None:
-        kennel = await db.get(Kennel, dog.breeder_kennel_id)
-        if kennel is not None:
-            owner = await _load_user_with_profile(db, kennel.owner_id)
-            return full_name(owner), _s(kennel.kennel_prefix or kennel.name)
-    return _s(dog.breeder_name), ""
+def _diploma_input(
+    show: Show, rank, entry: ShowEntry, dog: Dog, bulk: _Bulk
+) -> DiplomaInput:
+    """DiplomaInput из предзагруженного _Bulk (без обращений к БД).
 
+    Общий код одиночного и пакетного билдеров — гарантирует, что
+    /tasks diploma и diplomas_batch дают идентичный результат.
+    """
+    breed = bulk.breeds.get(dog.breed_id)
+    cls = bulk.classes.get(entry.show_class_id)
+    result = bulk.results.get(entry.id)
 
-async def _resolve_owner(db: AsyncSession, dog: Dog) -> str:
-    if dog.kennel_id is not None:
-        kennel = await db.get(Kennel, dog.kennel_id)
-        if kennel is not None:
-            owner = await _load_user_with_profile(db, kennel.owner_id)
-            return full_name(owner)
-    return ""
+    grade_name = None
+    judge = None
+    title = None
+    if result is not None:
+        if result.grade_id is not None:
+            grade = bulk.grades.get(result.grade_id)
+            grade_name = grade.name if grade else None
+        judge_user = (
+            bulk.users.get(result.judge_id) if result.judge_id else None
+        )
+        judge = judge_display(judge_user) if judge_user else None
+        titles = [
+            t.get("name", t.get("code", ""))
+            for t in (result.titles_cache or [])
+        ]
+        title = ", ".join(t for t in titles if t) or None
+
+    owner = bulk.owner_name(dog)
+    breeder, kennel_prefix = bulk.breeder(dog)
+
+    return DiplomaInput(
+        show_name=show.name,
+        show_rank=rank.name if rank else None,
+        judge=judge,
+        breed=breed.name if breed else "",
+        sex=dog.sex.value,
+        class_name=cls.name if cls else "",
+        grade=grade_name,
+        title=title,
+        placement=result.placement if result else None,
+        dog_name=dog.name,
+        tattoo=dog.tattoo,
+        microchip=dog.microchip,
+        date_of_birth=dog.date_of_birth,
+        owner=owner,
+        kennel=kennel_prefix,
+        breeder=breeder,
+        pedigree=dog.rkf_number,
+        catalog_number=entry.catalog_number,
+        fci_number=breed.fci_number if breed else None,
+    )
 
 
 async def build_diploma_context(
@@ -148,59 +308,11 @@ async def build_diploma_context(
     if show is None:
         raise ValueError("not_found")
     rank = await db.get(ShowRank, show.rank_id)
-    dog = await db.get(Dog, entry.dog_id)
+    bulk = await _load_bulk(db, [entry], with_results=True, with_parents=False)
+    dog = bulk.dogs.get(entry.dog_id)
     if dog is None:
         raise ValueError("dog_not_found")
-    breed = await db.get(Breed, dog.breed_id)
-    cls = await db.get(ShowClass, entry.show_class_id)
-
-    result = (
-        await db.execute(
-            select(ShowResult).where(ShowResult.show_entry_id == entry_id)
-        )
-    ).scalar_one_or_none()
-
-    grade_name = None
-    judge = None
-    title = None
-    if result is not None:
-        if result.grade_id is not None:
-            grade = await db.get(Grade, result.grade_id)
-            grade_name = grade.name if grade else None
-        judge_user = await _load_user_with_profile(db, result.judge_id)
-        judge = judge_display(judge_user) if judge_user else None
-        titles = [
-            t.get("name", t.get("code", ""))
-            for t in (result.titles_cache or [])
-        ]
-        title = ", ".join(t for t in titles if t) or None
-
-    owner = await _resolve_owner(db, dog)
-    breeder, kennel_prefix = await _resolve_breeder(db, dog)
-
-    return _shape_diploma_context(
-        DiplomaInput(
-            show_name=show.name,
-            show_rank=rank.name if rank else None,
-            judge=judge,
-            breed=breed.name if breed else "",
-            sex=dog.sex.value,
-            class_name=cls.name if cls else "",
-            grade=grade_name,
-            title=title,
-            placement=result.placement if result else None,
-            dog_name=dog.name,
-            tattoo=dog.tattoo,
-            microchip=dog.microchip,
-            date_of_birth=dog.date_of_birth,
-            owner=owner,
-            kennel=kennel_prefix,
-            breeder=breeder,
-            pedigree=dog.rkf_number,
-            catalog_number=entry.catalog_number,
-            fci_number=breed.fci_number if breed else None,
-        )
-    )
+    return _shape_diploma_context(_diploma_input(show, rank, entry, dog, bulk))
 
 
 async def build_diplomas_batch_context(
@@ -208,20 +320,30 @@ async def build_diplomas_batch_context(
 ) -> dict:
     """Контекст для одного файла со всеми дипломами выставки.
 
-    Каждый диплом — это словарь от build_diploma_context. Битые записи
-    (нет собаки/результата) пропускаем, не валя всю пачку.
+    Каждый диплом — словарь от _diploma_input. Битые записи (нет собаки)
+    пропускаем, не валя всю пачку. Все связи грузятся пачкой через
+    _load_bulk — без N+1 на каждую запись (review 2026-06-01).
     """
-    entry_ids = (
+    entries = (
         await db.execute(
-            select(ShowEntry.id).where(ShowEntry.show_id == show_id)
+            select(ShowEntry).where(ShowEntry.show_id == show_id)
         )
     ).scalars().all()
+    if not entries:
+        return {"diplomas": []}
+    show = await db.get(Show, show_id)
+    if show is None:
+        return {"diplomas": []}
+    rank = await db.get(ShowRank, show.rank_id)
+    bulk = await _load_bulk(db, entries, with_results=True, with_parents=False)
     diplomas: list[dict] = []
-    for eid in entry_ids:
-        try:
-            diplomas.append(await build_diploma_context(db, eid))
-        except ValueError:
+    for e in entries:
+        dog = bulk.dogs.get(e.dog_id)
+        if dog is None:
             continue
+        diplomas.append(
+            _shape_diploma_context(_diploma_input(show, rank, e, dog, bulk))
+        )
     return {"diplomas": diplomas}
 
 
@@ -321,7 +443,8 @@ async def build_ring_sheets_context(
         ring = await db.get(ShowRing, ring_id)
         only_breed_id = ring.breed_id if ring is not None else None
 
-    # Группируем номера по каталогу по породе собаки.
+    # Группируем номера по каталогу по породе собаки. Собаки и породы —
+    # пачкой (review 2026-06-01: было по db.get на каждую запись).
     entries = (
         await db.execute(
             select(ShowEntry)
@@ -329,27 +452,37 @@ async def build_ring_sheets_context(
             .order_by(ShowEntry.catalog_number.asc().nullslast())
         )
     ).scalars().all()
+    dogs = await _load_map(db, Dog, {e.dog_id for e in entries})
+    breeds = await _load_map(db, Breed, {d.breed_id for d in dogs.values()})
     numbers_by_breed: dict[uuid.UUID, list[int | None]] = {}
     breed_obj: dict[uuid.UUID, Breed] = {}
     for e in entries:
-        dog = await db.get(Dog, e.dog_id)
+        dog = dogs.get(e.dog_id)
         if dog is None:
             continue
         if only_breed_id is not None and dog.breed_id != only_breed_id:
             continue
         if dog.breed_id not in breed_obj:
-            br = await db.get(Breed, dog.breed_id)
+            br = breeds.get(dog.breed_id)
             if br is None:
                 continue
             breed_obj[dog.breed_id] = br
         numbers_by_breed.setdefault(dog.breed_id, []).append(e.catalog_number)
+
+    # Судьи ведомостей — пачкой: из ShowRing.judge_id и из ShowJudge
+    # (запасной источник judge_id_by_breed).
+    judge_users = await _load_users(
+        db,
+        {r.judge_id for r in rings if r.judge_id}
+        | set(judge_id_by_breed.values()),
+    )
 
     sheets: list[dict] = []
     for breed_id in sorted(numbers_by_breed, key=lambda b: breed_obj[b].name):
         breed = breed_obj[breed_id]
         ring = ring_by_breed.get(breed_id)
         judge_id = ring.judge_id if ring and ring.judge_id else judge_id_by_breed.get(breed_id)
-        judge_user = await _load_user_with_profile(db, judge_id)
+        judge_user = judge_users.get(judge_id) if judge_id else None
         judge = judge_display(judge_user) if judge_user else None
         ring_date = (
             _fmt_date_long(ring.ring_date) if ring and ring.ring_date
@@ -541,25 +674,34 @@ async def build_catalog_context(
         raise ValueError("not_found")
     rank = await db.get(ShowRank, show.rank_id)
 
+    # Судьи и их назначения — пачкой (review 2026-06-01: было по db.get
+    # на каждого судью + повторный для judges_meta).
     judges = (
         await db.execute(select(ShowJudge).where(ShowJudge.show_id == show_id))
     ).scalars().all()
+    judge_breeds = await _load_map(
+        db, Breed, {j.breed_id for j in judges if j.breed_id}
+    )
+    judge_groups = await _load_map(
+        db, BreedGroup, {j.breed_group_id for j in judges if j.breed_group_id}
+    )
+    judge_users = await _load_users(db, {j.judge_id for j in judges})
     judges_meta: list[dict] = []
     judge_for_breed: dict[uuid.UUID, str] = {}
     for j in judges:
         assignment = "—"
         if j.breed_id is not None:
-            br = await db.get(Breed, j.breed_id)
+            br = judge_breeds.get(j.breed_id)
             if br is not None:
                 assignment = f"порода: {br.name}"
-            ju = await _load_user_with_profile(db, j.judge_id)
+            ju = judge_users.get(j.judge_id)
             if ju is not None:
                 judge_for_breed[j.breed_id] = judge_display(ju)
         elif j.breed_group_id is not None:
-            grp = await db.get(BreedGroup, j.breed_group_id)
+            grp = judge_groups.get(j.breed_group_id)
             if grp is not None:
                 assignment = f"группа FCI {grp.number}: {grp.name}"
-        ju = await _load_user_with_profile(db, j.judge_id)
+        ju = judge_users.get(j.judge_id)
         judges_meta.append(
             {"name": judge_display(ju) if ju else "—", "assignment": assignment}
         )
@@ -572,22 +714,25 @@ async def build_catalog_context(
         )
     ).scalars().all()
 
+    # Все связи записей (собаки, породы, группы, классы, питомники+юзеры,
+    # родители) — пачкой запросов вместо ~8 db.get на запись.
+    bulk = await _load_bulk(db, entries, with_results=False, with_parents=True)
     inputs: list[CatalogEntryInput] = []
     for e in entries:
-        dog = await db.get(Dog, e.dog_id)
+        dog = bulk.dogs.get(e.dog_id)
         if dog is None:
             continue
-        breed = await db.get(Breed, dog.breed_id)
+        breed = bulk.breeds.get(dog.breed_id)
         group = (
-            await db.get(BreedGroup, breed.breed_group_id)
+            bulk.groups.get(breed.breed_group_id)
             if breed and breed.breed_group_id
             else None
         )
-        cls = await db.get(ShowClass, e.show_class_id)
-        breeder, _prefix = await _resolve_breeder(db, dog)
-        owner = await _resolve_owner(db, dog)
-        sire = await db.get(Dog, dog.father_id) if dog.father_id else None
-        dam = await db.get(Dog, dog.mother_id) if dog.mother_id else None
+        cls = bulk.classes.get(e.show_class_id)
+        breeder, _prefix = bulk.breeder(dog)
+        owner = bulk.owner_name(dog)
+        sire = bulk.parents.get(dog.father_id) if dog.father_id else None
+        dam = bulk.parents.get(dog.mother_id) if dog.mother_id else None
         inputs.append(
             CatalogEntryInput(
                 group_number=group.number if group else None,
@@ -667,13 +812,15 @@ async def build_documents_readiness(
         await db.execute(select(ShowEntry).where(ShowEntry.show_id == show_id))
     ).scalars().all()
 
+    # Собаки + питомники/владельцы/заводчики — пачкой (review 2026-06-01).
+    bulk = await _load_bulk(db, entries, with_results=False, with_parents=False)
     problems: list[dict] = []
     for e in entries:
-        dog = await db.get(Dog, e.dog_id)
+        dog = bulk.dogs.get(e.dog_id)
         if dog is None:
             continue
-        owner = await _resolve_owner(db, dog)
-        breeder, _p = await _resolve_breeder(db, dog)
+        owner = bulk.owner_name(dog)
+        breeder, _p = bulk.breeder(dog)
         check = EntryCheck(
             catalog_number=e.catalog_number,
             dog_name=dog.name,
@@ -764,22 +911,23 @@ async def build_certificates_context(
         stmt = stmt.where(ShowEntry.id == entry_id)
     entries = (await db.execute(stmt)).scalars().all()
 
+    # Результаты, собаки, породы, питомники+юзеры — пачкой (review
+    # 2026-06-01: было по запросу результата и db.get на каждую запись).
+    bulk = await _load_bulk(db, entries, with_results=True, with_parents=False)
     certificates: list[dict] = []
     for e in entries:
-        result = (
-            await db.execute(
-                select(ShowResult).where(ShowResult.show_entry_id == e.id)
-            )
-        ).scalar_one_or_none()
+        result = bulk.results.get(e.id)
         if result is None or not result.titles_cache:
             continue
-        dog = await db.get(Dog, e.dog_id)
+        dog = bulk.dogs.get(e.dog_id)
         if dog is None:
             continue
-        breed = await db.get(Breed, dog.breed_id)
-        owner = await _resolve_owner(db, dog)
-        breeder, _prefix = await _resolve_breeder(db, dog)
-        judge_user = await _load_user_with_profile(db, result.judge_id)
+        breed = bulk.breeds.get(dog.breed_id)
+        owner = bulk.owner_name(dog)
+        breeder, _prefix = bulk.breeder(dog)
+        judge_user = (
+            bulk.users.get(result.judge_id) if result.judge_id else None
+        )
         judge = judge_display(judge_user) if judge_user else None
         for t in result.titles_cache:
             title = t.get("name") or t.get("code") or ""
