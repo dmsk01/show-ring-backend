@@ -25,6 +25,11 @@
 services:
   postgres:
     image: postgres:17-alpine
+    # restart: unless-stopped — инфра-сервис должен сам подниматься после
+    # перезапуска Docker Desktop/демона. Иначе api/worker (у них своя
+    # restart-policy) оживут, а Postgres/Redis/Rabbit/MinIO — нет, и API
+    # будет отдавать 503 на мёртвые зависимости (инцидент 2026-06-01).
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-showtail}
       POSTGRES_USER: ${POSTGRES_USER:-showtail}
@@ -44,6 +49,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
+    restart: unless-stopped  # см. постгрес: инфра поднимается сама после рестарта Docker
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
@@ -63,6 +69,7 @@ services:
 
   redis:
     image: redis:8-alpine
+    restart: unless-stopped  # см. постгрес
     ports:
       - "6379:6379"
     volumes:
@@ -75,6 +82,7 @@ services:
 
   minio:
     image: minio/minio
+    restart: unless-stopped  # см. постгрес
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-showtail}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-showtailminio}
