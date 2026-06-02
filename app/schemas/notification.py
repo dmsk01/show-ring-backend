@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from app.models.notification import (
     EventType,
@@ -72,7 +72,16 @@ class NotificationResponse(BaseModel):
     status: NotificationStatus
     error: str | None
     sent_at: datetime | None
+    # read_at — момент прочтения в UI (NULL = непрочитано). status выше
+    # про доставку email, не про прочтение — не путать.
+    read_at: datetime | None
     created_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_read(self) -> bool:
+        """Удобный флаг для фронта: прочитано ли (read_at проставлен)."""
+        return self.read_at is not None
 
 
 # ---------------------------------------------------------------------

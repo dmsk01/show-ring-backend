@@ -187,6 +187,14 @@ class Notification(Base):
     sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # read_at — когда пользователь прочитал уведомление в интерфейсе.
+    # ОТДЕЛЬНО от status: status — это про доставку email
+    # (pending/sent/failed), а read_at — про действие пользователя в UI.
+    # NULL = непрочитано; в API отдаём is_read = (read_at IS NOT NULL),
+    # чтобы фронт не выводил «прочитано» из delivery-статуса.
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # created_at без updated_at: уведомление "родилось" один раз,
     # дальше только статус и sent_at меняются — не хочу шумить апдейтом
     # неважного timestamp. server_default=now() — БД сама проставит при

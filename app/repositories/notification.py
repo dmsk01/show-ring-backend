@@ -175,6 +175,30 @@ async def list_user_notifications(
     return (await db.execute(stmt)).scalars().all()
 
 
+async def mark_notification_read(
+    db: AsyncSession, notification_id: uuid.UUID, user_id: uuid.UUID
+) -> Notification | None:
+    """
+    Помечает уведомление прочитанным (read_at = now), если оно
+    принадлежит user_id. Возвращает обновлённый Notification — или None,
+    если записи нет ЛИБО она чужая (роутер отдаёт 404, не раскрывая
+    существование чужого уведомления — IDOR-safe по конструкции).
+
+    Идемпотентно: если read_at уже проставлен, повторный вызов его не
+    меняет и не делает лишний commit — просто возвращает запись. Гонка
+    двух параллельных «прочитать» безобидна (оба ставят ~один и тот же
+    момент), поэтому здесь достаточно ORM-пути без атомарного UPDATE.
+    """
+    n = await db.get(Notification, notification_id)
+    if n is None or n.user_id != user_id:
+        return None
+    if n.read_at is None:
+        n.read_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(n)
+    return n
+
+
 async def mark_sent(db: AsyncSession, notification_id: uuid.UUID) -> bool:
     """
     Перевод уведомления в sent. Возвращает True, если запись обновлена,

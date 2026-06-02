@@ -123,3 +123,22 @@ async def list_my_notifications(
         db, user.id, page=page, per_page=per_page
     )
     return [NotificationResponse.model_validate(n) for n in items]
+
+
+@router.patch(
+    "/notifications/{notification_id}/read",
+    response_model=NotificationResponse,
+    summary="Отметить уведомление прочитанным",
+)
+async def mark_notification_read(
+    notification_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    # Помечаем read_at только своему уведомлению. Идемпотентно: повторный
+    # PATCH вернёт ту же запись с уже проставленным read_at. Чужое/
+    # несуществующее → 404 (не раскрываем существование чужого).
+    n = await repo.mark_notification_read(db, notification_id, user.id)
+    if n is None:
+        raise HTTPException(404, "not_found")
+    return NotificationResponse.model_validate(n)
