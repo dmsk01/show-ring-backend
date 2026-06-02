@@ -84,6 +84,18 @@ class NotificationResponse(BaseModel):
         return self.read_at is not None
 
 
+class UnreadCountResponse(BaseModel):
+    """Ответ GET /notifications/unread-count — для бейджа."""
+
+    unread: int
+
+
+class MarkAllReadResponse(BaseModel):
+    """Ответ PATCH /notifications/read-all — сколько уведомлений отмечено."""
+
+    marked: int
+
+
 # ---------------------------------------------------------------------
 # Event сообщения (внутренний контракт между сервисами через RabbitMQ)
 # ---------------------------------------------------------------------

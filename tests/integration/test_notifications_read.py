@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 
+import app.config
 from app.models.notification import (
     Notification,
     NotificationChannel,
@@ -103,3 +104,47 @@ async def test_mark_read_idor_and_auth(client, db_session):
         headers={"Authorization": f"Bearer {_owner_token}"},
     )
     assert r.status_code == 404
+
+
+async def test_unread_count_and_read_all(client, db_session):
+    uid, token = await _make_user(client)
+    auth = {"Authorization": f"Bearer {token}"}
+    for _ in range(3):
+        await _make_notification(db_session, uid)
+
+    r = await client.get("/notifications/unread-count", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["unread"] == 3
+
+    # Отметить все → marked=3, счётчик обнуляется.
+    r = await client.patch("/notifications/read-all", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["marked"] == 3
+
+    r = await client.get("/notifications/unread-count", headers=auth)
+    assert r.json()["unread"] == 0
+
+    # Повторно нечего отмечать.
+    r = await client.patch("/notifications/read-all", headers=auth)
+    assert r.json()["marked"] == 0
+
+
+async def test_seed_endpoint_requires_debug(client, monkeypatch):
+    _uid, token = await _make_user(client)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    # DEBUG выключен (дефолт в тест-окружении) → ручки «нет» (404).
+    monkeypatch.setattr(app.config.settings, "debug", False)
+    r = await client.post("/notifications/_dev/seed?count=3", headers=auth)
+    assert r.status_code == 404
+
+    # DEBUG включён → набивает непрочитанные моки.
+    monkeypatch.setattr(app.config.settings, "debug", True)
+    r = await client.post("/notifications/_dev/seed?count=4", headers=auth)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body) == 4
+    assert all(item["is_read"] is False for item in body)
+
+    r = await client.get("/notifications/unread-count", headers=auth)
+    assert r.json()["unread"] == 4

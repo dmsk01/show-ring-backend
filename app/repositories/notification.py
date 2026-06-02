@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notification import (
@@ -173,6 +173,78 @@ async def list_user_notifications(
         .limit(per_page)
     )
     return (await db.execute(stmt)).scalars().all()
+
+
+async def count_unread_notifications(
+    db: AsyncSession, user_id: uuid.UUID
+) -> int:
+    """Число непрочитанных уведомлений пользователя (read_at IS NULL)."""
+    stmt = (
+        select(func.count())
+        .select_from(Notification)
+        .where(
+            Notification.user_id == user_id,
+            Notification.read_at.is_(None),
+        )
+    )
+    return (await db.execute(stmt)).scalar_one()
+
+
+async def mark_all_notifications_read(
+    db: AsyncSession, user_id: uuid.UUID
+) -> int:
+    """
+    Помечает все непрочитанные уведомления пользователя прочитанными
+    одним атомарным UPDATE. Возвращает число затронутых строк (сколько
+    реально пометили) — фронт может показать «отмечено N».
+    """
+    stmt = (
+        update(Notification)
+        .where(
+            Notification.user_id == user_id,
+            Notification.read_at.is_(None),
+        )
+        .values(read_at=datetime.now(timezone.utc))
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    return getattr(result, "rowcount", 0)
+
+
+# Образцы для dev-сидера моков (см. create_mock_notifications).
+_MOCK_NOTIFICATIONS: list[tuple[str, str]] = [
+    ("dog.title_earned", "Ваша собака получила титул CW"),
+    ("show.registration_opened", "Открыта регистрация на выставку «Весна-2026»"),
+    ("show.results_published", "Опубликованы результаты выставки"),
+    ("litter.announced", "Новый помёт у питомника, на который вы подписаны"),
+]
+
+
+async def create_mock_notifications(
+    db: AsyncSession, user_id: uuid.UUID, count: int
+) -> list[Notification]:
+    """
+    Создаёт count моковых уведомлений (все непрочитанные) для отладки UI.
+    Используется только dev-эндпоинтом под guard'ом settings.debug.
+    """
+    items: list[Notification] = []
+    for i in range(count):
+        event_type, subject = _MOCK_NOTIFICATIONS[i % len(_MOCK_NOTIFICATIONS)]
+        n = Notification(
+            user_id=user_id,
+            event_type=event_type,
+            channel=NotificationChannel.email,
+            subject=f"{subject} (#{i + 1})",
+            status=NotificationStatus.sent,
+            sent_at=datetime.now(timezone.utc),
+        )
+        db.add(n)
+        items.append(n)
+    await db.flush()
+    await db.commit()
+    for n in items:
+        await db.refresh(n)  # подтянуть server_default created_at для ответа
+    return items
 
 
 async def mark_notification_read(
