@@ -20,9 +20,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.dog import Dog, DogPhoto, SexEnum
 
 
+# Белый список полей сортировки (этап 18): защита от инъекции —
+# в order_by попадает только колонка из этой карты, не сырая строка.
+_DOG_SORT = {
+    "name": Dog.name,
+    "date_of_birth": Dog.date_of_birth,
+    "created_at": Dog.created_at,
+}
+
+
 def _dog_filter_stmt(
     breed_id: uuid.UUID | None,
     kennel_id: uuid.UUID | None,
+    litter_id: uuid.UUID | None,
     sex: SexEnum | None,
     search: str | None,
 ):
@@ -31,6 +41,8 @@ def _dog_filter_stmt(
         stmt = stmt.where(Dog.breed_id == breed_id)
     if kennel_id is not None:
         stmt = stmt.where(Dog.kennel_id == kennel_id)
+    if litter_id is not None:
+        stmt = stmt.where(Dog.litter_id == litter_id)
     if sex is not None:
         stmt = stmt.where(Dog.sex == sex)
     if search:
@@ -42,18 +54,35 @@ async def get_dog(db: AsyncSession, id_: uuid.UUID) -> Dog | None:
     return await db.get(Dog, id_)
 
 
+async def dogs_by_ids(
+    db: AsyncSession, ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, Dog]:
+    """{id: Dog} одним запросом (для резолва родителей помёта и т.п.)."""
+    uniq = list({i for i in ids if i is not None})
+    if not uniq:
+        return {}
+    rows = (
+        await db.execute(select(Dog).where(Dog.id.in_(uniq)))
+    ).scalars().all()
+    return {d.id: d for d in rows}
+
+
 async def list_dogs(
     db: AsyncSession,
     breed_id: uuid.UUID | None = None,
     kennel_id: uuid.UUID | None = None,
+    litter_id: uuid.UUID | None = None,
     sex: SexEnum | None = None,
     search: str | None = None,
+    sort_by: str = "name",
+    order: str = "asc",
     page: int = 1,
     per_page: int = 50,
 ) -> Sequence[Dog]:
+    col = _DOG_SORT.get(sort_by, Dog.name)
     stmt = (
-        _dog_filter_stmt(breed_id, kennel_id, sex, search)
-        .order_by(Dog.name)
+        _dog_filter_stmt(breed_id, kennel_id, litter_id, sex, search)
+        .order_by(col.asc() if order == "asc" else col.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
     )
@@ -64,10 +93,13 @@ async def count_dogs(
     db: AsyncSession,
     breed_id: uuid.UUID | None = None,
     kennel_id: uuid.UUID | None = None,
+    litter_id: uuid.UUID | None = None,
     sex: SexEnum | None = None,
     search: str | None = None,
 ) -> int:
-    base = _dog_filter_stmt(breed_id, kennel_id, sex, search).subquery()
+    base = _dog_filter_stmt(
+        breed_id, kennel_id, litter_id, sex, search
+    ).subquery()
     return int((await db.execute(select(func.count()).select_from(base))).scalar_one())
 
 
@@ -148,3 +180,33 @@ async def add_dog_photo(
     db.add(obj)
     await db.flush()
     return obj
+
+
+async def list_dog_photos(
+    db: AsyncSession, dog_id: uuid.UUID
+) -> list[DogPhoto]:
+    """Фото одной собаки, по position."""
+    stmt = (
+        select(DogPhoto)
+        .where(DogPhoto.dog_id == dog_id)
+        .order_by(DogPhoto.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def photos_by_dogs(
+    db: AsyncSession, dog_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, list[DogPhoto]]:
+    """{dog_id: [DogPhoto…]} одним запросом — анти-N+1 для списков."""
+    ids = list(dog_ids)
+    if not ids:
+        return {}
+    stmt = (
+        select(DogPhoto)
+        .where(DogPhoto.dog_id.in_(ids))
+        .order_by(DogPhoto.position)
+    )
+    out: dict[uuid.UUID, list[DogPhoto]] = {}
+    for p in (await db.execute(stmt)).scalars().all():
+        out.setdefault(p.dog_id, []).append(p)
+    return out

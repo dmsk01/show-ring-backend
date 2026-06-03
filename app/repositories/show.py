@@ -27,6 +27,10 @@ from app.models.show import (
 )
 
 
+# Белый список сортировки (этап 18).
+_SHOW_SORT = {"date_start": Show.date_start, "created_at": Show.created_at}
+
+
 def _show_filter_stmt(
     rank_id: uuid.UUID | None,
     city: str | None,
@@ -73,14 +77,17 @@ async def list_shows(
     date_from: date | None = None,
     date_to: date | None = None,
     status: ShowStatus | None = None,
+    sort_by: str = "date_start",
+    order: str = "asc",
     page: int = 1,
     per_page: int = 50,
 ) -> Sequence[Show]:
+    # Ближайшие сверху по умолчанию. По date_start, не created_at —
+    # пользователь ищет "что скоро будет", а не "что недавно создали".
+    col = _SHOW_SORT.get(sort_by, Show.date_start)
     stmt = (
         _show_filter_stmt(rank_id, city, date_from, date_to, status)
-        # Ближайшие сверху. По date_start, не created_at — пользователь
-        # ищет "что скоро будет", а не "что недавно создали".
-        .order_by(Show.date_start.asc())
+        .order_by(col.asc() if order == "asc" else col.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
     )

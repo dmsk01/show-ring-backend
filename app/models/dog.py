@@ -109,6 +109,16 @@ class Dog(Base, TimestampMixin):
         index=True,
     )
 
+    # Помёт, из которого эта собака (этап 18). SET NULL — собака переживает
+    # удаление помёта. index — под фильтр GET /dogs?litter_id= и
+    # GET /litters/{id}/puppies.
+    litter_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("litters.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     kennel: Mapped["Kennel | None"] = relationship(

@@ -32,6 +32,14 @@ from app.models.classified import (
 )
 
 
+# Белый список сортировки (этап 18).
+_CLASSIFIED_SORT = {
+    "created_at": Classified.created_at,
+    "price": Classified.price,
+    "views_count": Classified.views_count,
+}
+
+
 def _classified_filter_stmt(
     category: ClassifiedCategory | None,
     breed_id: uuid.UUID | None,
@@ -91,16 +99,19 @@ async def list_classifieds(
     price_from: Decimal | None = None,
     price_to: Decimal | None = None,
     author_id: uuid.UUID | None = None,
+    sort_by: str = "created_at",
+    order: str = "desc",
     page: int = 1,
     per_page: int = 50,
 ) -> Sequence[Classified]:
+    # Свежие сверху по умолчанию. По created_at, не updated_at — последняя
+    # правка автора не должна "выталкивать" объявление в топ списка.
+    col = _CLASSIFIED_SORT.get(sort_by, Classified.created_at)
     stmt = (
         _classified_filter_stmt(
             category, breed_id, city, status, price_from, price_to, author_id
         )
-        # Свежие сверху. По created_at, не updated_at — последняя правка
-        # автора не должна "выталкивать" объявление в топ списка.
-        .order_by(Classified.created_at.desc())
+        .order_by(col.asc() if order == "asc" else col.desc())
         .options(selectinload(Classified.images))
         .offset((page - 1) * per_page)
         .limit(per_page)

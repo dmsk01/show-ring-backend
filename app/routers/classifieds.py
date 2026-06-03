@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
@@ -122,6 +123,8 @@ async def list_classifieds(
     city: str | None = Query(None, max_length=128),
     price_from: Decimal | None = Query(None, ge=0),
     price_to: Decimal | None = Query(None, ge=0),
+    sort_by: Literal["created_at", "price", "views_count"] = Query("created_at"),
+    order: Literal["asc", "desc"] = Query("desc"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -135,6 +138,8 @@ async def list_classifieds(
         status=ClassifiedStatus.active,
         price_from=price_from,
         price_to=price_to,
+        sort_by=sort_by,
+        order=order,
         page=page,
         per_page=per_page,
     )

@@ -27,6 +27,7 @@ class DogBase(BaseModel):
     microchip: str | None = Field(None, max_length=32)
     father_id: uuid.UUID | None = None
     mother_id: uuid.UUID | None = None
+    litter_id: uuid.UUID | None = None
     description: str | None = None
 
 
@@ -46,7 +47,16 @@ class DogUpdate(BaseModel):
     microchip: str | None = Field(None, max_length=32)
     father_id: uuid.UUID | None = None
     mother_id: uuid.UUID | None = None
+    litter_id: uuid.UUID | None = None
     description: str | None = None
+
+
+class DogImageCreate(BaseModel):
+    """Привязка уже загруженного файла к собаке (см. POST /dogs/{id}/images)."""
+
+    file_id: uuid.UUID
+    position: int = 0
+    is_primary: bool = False
 
 
 class DogResponse(DogBase):
@@ -55,6 +65,34 @@ class DogResponse(DogBase):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+    # Фото (этап 18). avatar_file_id — главное фото (is_primary, иначе первое),
+    # photo_file_ids — вся галерея по position. Оба выводятся из dog_photos,
+    # без отдельной колонки. Файлы публичны: GET /files/{id}.
+    avatar_file_id: uuid.UUID | None = None
+    photo_file_ids: list[uuid.UUID] = Field(default_factory=list)
+
+    @classmethod
+    def from_orm_with_photos(cls, dog, photos) -> "DogResponse":
+        """DogResponse из ORM-собаки + список её DogPhoto (avatar/галерея)."""
+        ordered = sorted(photos, key=lambda p: p.position)
+        ids = [p.file_id for p in ordered]
+        avatar = next(
+            (p.file_id for p in ordered if p.is_primary), None
+        ) or (ids[0] if ids else None)
+        resp = cls.model_validate(dog)
+        resp.avatar_file_id = avatar
+        resp.photo_file_ids = ids
+        return resp
+
+
+class DogRef(BaseModel):
+    """Краткая ссылка на собаку (родитель помёта). avatar_file_id — главное фото."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    avatar_file_id: uuid.UUID | None = None
 
 
 class DogShort(BaseModel):

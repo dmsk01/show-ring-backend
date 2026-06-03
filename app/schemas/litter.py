@@ -14,6 +14,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.litter import LitterStatus
+from app.schemas.dog import DogRef
 
 
 class LitterBase(BaseModel):
@@ -89,6 +90,10 @@ class LitterResponse(LitterBase):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+    # Этап 18: развёрнутые родители (id/name/avatar) — чтобы фронт не делал
+    # доп. запрос /dogs/{id} ради имени. father_id/mother_id остаются.
+    father: DogRef | None = None
+    mother: DogRef | None = None
 
 
 class LitterPage(BaseModel):

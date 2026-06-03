@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,6 +116,8 @@ async def list_shows(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     status_: ShowStatus | None = Query(None, alias="status"),
+    sort_by: Literal["date_start", "created_at"] = Query("date_start"),
+    order: Literal["asc", "desc"] = Query("asc"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -127,6 +129,8 @@ async def list_shows(
         date_from=date_from,
         date_to=date_to,
         status=status_,
+        sort_by=sort_by,
+        order=order,
         page=page,
         per_page=per_page,
     )

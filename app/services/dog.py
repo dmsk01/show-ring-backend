@@ -130,6 +130,43 @@ async def update_dog(
         raise ValueError("duplicate_unique_field")
 
 
+async def add_images(
+    db: AsyncSession,
+    dog_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+    images: list[dict],
+) -> Dog:
+    """
+    Привязывает уже загруженные файлы к собаке (этап 18). Право — владелец
+    питомника собаки или admin; собака без питомника — только admin (нет
+    прямого FK dog→user). Зеркало classified.add_images.
+    """
+    dog = await repo.get_dog(db, dog_id)
+    if dog is None:
+        raise ValueError("not_found")
+    if dog.kennel_id is not None:
+        await _check_kennel_owner(db, dog.kennel_id, requester_id, is_admin)
+    elif not is_admin:
+        raise ValueError("forbidden")
+
+    try:
+        for img in images:
+            await repo.add_dog_photo(
+                db,
+                dog_id,
+                img["file_id"],
+                img.get("position", 0),
+                img.get("is_primary", False),
+            )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # UNIQUE(dog_id, file_id) — файл уже привязан.
+        raise ValueError("duplicate_unique_field")
+    return dog
+
+
 # ---------------------------------------------------------------------
 # Родословная
 # ---------------------------------------------------------------------

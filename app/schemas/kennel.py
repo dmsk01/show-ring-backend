@@ -58,3 +58,9 @@ class KennelResponse(KennelBase):
     avatar_file_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    # Этап 18: метка «проверенный питомник» (модерация, этап 12) + агрегаты
+    # для карточек витрины. is_verified читается из ORM; счётчики
+    # проставляются роутером (пачкой на списках, без N+1).
+    is_verified: bool = False
+    dogs_count: int = 0
+    litters_count: int = 0
