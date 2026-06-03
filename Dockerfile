@@ -49,12 +49,16 @@ FROM python:3.12-slim AS runtime
 # Минимально нужные системные пакеты:
 # - libpq5 — динамическая зависимость asyncpg в некоторых ситуациях;
 # - curl — для HEALTHCHECK на /health;
+# - procps — даёт pgrep, на который завязаны HEALTHCHECK'и воркеров
+#   в docker-compose.yml (pgrep -f 'worker.main'). Без него проверка
+#   падает с "command not found" и живой воркер помечается unhealthy.
 # - ttf-dejavu — TTF-шрифт для PDF (см. app/utils/pdf.py, рендер
 #   кириллицы).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libpq5 \
         curl \
+        procps \
         fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
