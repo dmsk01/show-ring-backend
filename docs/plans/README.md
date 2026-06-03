@@ -208,6 +208,14 @@
 | 14 | Production-readiness | Structured logging, reconnection, idempotency | [stage-14](stages/stage-14-production.md) |
 | 15 | Docker и деплой | Контейнеризация, compose, масштабирование | [stage-15](stages/stage-15-docker.md) |
 
+### Фаза 6: Realtime и вовлечение
+
+| # | Этап | Что появляется | Документация |
+|---|------|---------------|-------------|
+| 16 | Realtime-уведомления | WebSocket push (канал `in_app`), Redis Pub/Sub, живой колокольчик | [stage-16](stages/stage-16-realtime-notifications.md) |
+| 17 | Блог (Posts) | CRUD постов, публичная витрина, HTML-контент с санитизацией, slug | [stage-17](stages/stage-17-blog.md) |
+| 18 | Публичная витрина — доработки | Фото собак, сортировка, флаг верификации, помёт↔щенки, счётчики | [stage-18](stages/stage-18-public-showcase.md) |
+
 ### Будущее
 
 | Концепция | Описание | Документация |
