@@ -172,12 +172,16 @@ async def get_classified(
     obj = await repo.get_classified(db, classified_id, with_images=True)
     if obj is None:
         raise HTTPException(404, "Объявление не найдено")
-    # Инкрементируем счётчик просмотров атомарным UPDATE. После этого
-    # объект в нашей сессии "отстаёт" на единицу — но это не страшно:
-    # пользователь увидит актуальный counter на следующем заходе.
+    # Инкрементируем счётчик просмотров атомарным UPDATE + commit.
     await repo.increment_views(db, classified_id)
-    # Прибавляем в локальном объекте, чтобы ответ был сразу актуальным.
-    obj.views_count += 1
+    # ВАЖНО: bulk-UPDATE из increment_views экспайрит атрибуты уже
+    # загруженного obj (в т.ч. updated_at от onupdate=func.now()). Если
+    # вернуть тот же obj, FastAPI при сериализации полезет дочитывать
+    # эти поля из БД синхронно — а это IO вне greenlet-контекста →
+    # MissingGreenlet → 500. Поэтому перечитываем объект заново (с
+    # images) в async-контексте, как это уже делают create/update.
+    obj = await repo.get_classified(db, classified_id, with_images=True)
+    assert obj is not None  # invariant: только что инкрементировали — точно есть
     return obj
 
 
