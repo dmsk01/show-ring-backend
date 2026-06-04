@@ -1,27 +1,28 @@
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.exc import IntegrityError
+from fastapi import APIRouter, Depends, HTTPException, Request
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
+from app.redis import get_redis
 from app.repositories.user import (
     get_profile,
     get_user_by_id,
-    revoke_all_refresh_tokens_for_user,
-    update_user,
     upsert_profile,
 )
 from app.schemas.user import (
+    PasswordChange,
     PublicUserResponse,
     UserProfileResponse,
     UserProfileUpdate,
     UserResponse,
     UserUpdate,
 )
-from app.utils.security import verify_password
+from app.services.auth import change_password, request_email_change
 
 # Отдельный логгер security-событий, чтобы можно было направлять в SIEM
 # на этапе 14 (см. app/services/auth.py — тот же канал).
@@ -41,70 +42,78 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
 
 @router.put(
     "/me",
-    summary="Обновить профиль",
+    summary="Запросить смену email",
     description=(
-        "Обновляет поля профиля. Смена email требует подтверждения "
-        "текущим паролем (re-auth) и приводит к разлогину всех "
-        "активных сессий пользователя."
+        "Запускает смену email через подтверждение. Требует текущий "
+        "пароль (re-auth). Новый адрес НЕ применяется сразу — пишется "
+        "в pending_email, а на него уходит письмо со ссылкой. Реальная "
+        "смена и разлогин всех сессий — после POST /auth/confirm-email-change."
     ),
 )
 async def change_user_info(
+    request: Request,
     update_data: UserUpdate,
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
     current_user: User = Depends(get_current_user),
 ):
-    # exclude_none, чтобы не затирать поля у БД None'ами от Pydantic.
-    fields = update_data.model_dump(exclude_none=True)
-    # current_password из payload используется ТОЛЬКО для re-auth и
-    # никогда не попадает в БД. Изымаем заранее.
-    current_password = fields.pop("current_password", None)
-
-    email_changes = (
-        "email" in fields and fields["email"] != current_user.email
+    # Этап 19: rate-limit на смену email — раньше эндпоинт был
+    # единственным auth-чувствительным без защиты. fail_closed: при
+    # сбое Redis закрываемся (см. progressive_ban / bug_247).
+    await check_rate_limit(
+        request, limit=5, window=3600, redis=redis, fail_closed=True
     )
-    if email_changes:
-        # ИСПРАВЛЕНО (bug_203): три слоя защиты при смене email.
-        # Раньше PUT /me менял email мгновенно по одному access-токену,
-        # без re-auth и без отзыва сессий. Любой кто получил access-токен
-        # (XSS, lost device, MITM) мог поменять email на свой и потом
-        # через будущий "forgot password" забрать аккаунт.
-        #
-        # 1. Re-auth: пользователь должен предъявить текущий пароль.
-        #    Случай "украли access-token, но пароль не знают" блокируется.
-        if not current_password or not verify_password(
-            current_password, current_user.hashed_password
-        ):
-            security_logger.warning(
-                "email_change_bad_password user_id=%s", current_user.id
-            )
-            raise HTTPException(
-                status_code=403, detail="current_password_invalid"
-            )
-        # 2. is_email_verified=False: новый email считается
-        #    неподтверждённым до тех пор, пока пользователь не пройдёт
-        #    отдельный verify-flow (TODO: см. tech-debt — отдельный
-        #    эндпоинт verify-email-change с письмом на новый адрес).
-        fields["is_email_verified"] = False
-        # 3. Revoke all refresh tokens: если access-токен утёк и сейчас
-        #    им пользуется атакующий, после этой операции у него
-        #    останется только короткоживущий access (15 минут) — после
-        #    его истечения refresh не сработает, законный владелец
-        #    залогинится заново.
-        await revoke_all_refresh_tokens_for_user(db, current_user.id)
-        security_logger.info(
-            "email_change user_id=%s old=%s new=%s",
-            current_user.id, current_user.email, fields["email"],
-        )
 
-    # ИСПРАВЛЕНО: коллизия email (UNIQUE constraint) раньше валилась
-    # в 500. Теперь отдаём корректный 409 Conflict.
-    try:
-        user = await update_user(db, current_user, **fields)
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="Email уже занят")
-    return UserResponse.model_validate(user)
+    new_email = update_data.email
+    if new_email is None or new_email == current_user.email:
+        # Нечего менять — email тот же или не передан.
+        return UserResponse.model_validate(current_user)
+
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    # Вся логика (re-auth, pending_email, токен, письмо, аудит, commit)
+    # внутри сервиса — он же поднимает 403/409 с машиночитаемым detail.
+    await request_email_change(
+        db,
+        current_user,
+        new_email,
+        update_data.current_password,
+        ip=ip,
+        user_agent=user_agent,
+    )
+    return {"message": "Проверьте новый email для подтверждения смены"}
+
+
+@router.put(
+    "/me/password",
+    summary="Сменить пароль",
+    description=(
+        "Меняет пароль. Требует текущий пароль (re-auth). После смены "
+        "все refresh-токены отзываются (разлогин на других устройствах), "
+        "на текущий email уходит уведомление."
+    ),
+)
+async def change_user_password(
+    request: Request,
+    payload: PasswordChange,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    current_user: User = Depends(get_current_user),
+):
+    await check_rate_limit(
+        request, limit=5, window=3600, redis=redis, fail_closed=True
+    )
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    await change_password(
+        db,
+        current_user,
+        payload.current_password,
+        payload.new_password,
+        ip=ip,
+        user_agent=user_agent,
+    )
+    return {"message": "Пароль изменён"}
 
 
 # УДАЛЕНО (bug_009 ultrareview): эндпоинт /users/admin/list

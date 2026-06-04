@@ -57,6 +57,32 @@ class UserUpdate(BaseModel):
     current_password: str | None = None
 
 
+class PasswordChange(BaseModel):
+    # Этап 19: смена пароля авторизованным пользователем. current_password
+    # для re-auth (украденный access-токен без знания пароля не сменит
+    # его). new_password проходит ту же политику, что и регистрация.
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_pwd(cls, v: str) -> str:
+        validate_password(v)
+        return v
+
+
+class EmailChangeConfirm(BaseModel):
+    # Токен из письма подтверждения смены email.
+    token: str
+
+
+class ResendVerification(BaseModel):
+    # Повторная отправка письма подтверждения регистрации. Принимаем
+    # email (не current_user), чтобы работало и для незалогиненных.
+    # Ответ одинаков независимо от существования адреса (анти-enumeration).
+    email: EmailStr
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str

@@ -38,6 +38,12 @@ class User(Base, TimestampMixin):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    # Этап 19: новый email, ожидающий подтверждения по ссылке. В email
+    # выше попадает только после клика (POST /auth/confirm-email-change).
+    # Пока заполнен — старый email остаётся рабочим. NULL = смена не идёт.
+    pending_email: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(default=True)
     is_email_verified: Mapped[bool] = mapped_column(default=False)

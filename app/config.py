@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # воркера для подписок — обе стороны читают из этого поля.
     exchange_topic: str = "showtail.events"
 
+    # Этап 19: базовый URL фронтенда для ссылок в письмах
+    # (подтверждение смены email, в будущем — сброс пароля). Письмо
+    # ведёт на страницу фронта, та дёргает POST-эндпоинт с токеном.
+    frontend_base_url: str = "http://localhost:5173"
+
     # --- Этап 14: Production-readiness ---
     # log_json=true — JSON-логи для ELK/Loki. false — человекочитаемый
     # текст для разработки (см. app/logging_config.py).

@@ -6,13 +6,24 @@ from redis.asyncio import Redis
 from app.middleware.progressive_ban import check_rate_limit
 from app.database import get_db
 from app.services.auth import (
+    confirm_email_change,
     refresh_access_token,
     register_user,
+    resend_verification,
     verify_email,
     login_user,
     logout_user,
 )
-from app.schemas.user import RefreshRequest, TokenResponse, UserCreate
+from app.schemas.user import (
+    EmailChangeConfirm,
+    RefreshRequest,
+    ResendVerification,
+    TokenResponse,
+    UserCreate,
+)
+
+# Анти-enumeration: ответ одинаков, существует адрес или нет.
+_RESEND_RESPONSE = {"message": "Если адрес не подтверждён, письмо отправлено"}
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -76,6 +87,53 @@ async def verify_user_email(
         return {"message": "Email подтверждён"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/resend-verification",
+    summary="Повторная отправка письма подтверждения",
+    description=(
+        "Повторно отправляет письмо подтверждения email. Ответ одинаков "
+        "независимо от существования адреса (защита от перечисления). "
+        "Жёсткий rate-limit: 3 запроса в час."
+    ),
+)
+async def resend_verification_endpoint(
+    request: Request,
+    body: ResendVerification,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    await check_rate_limit(
+        request, limit=3, window=3600, redis=redis, fail_closed=True
+    )
+    await resend_verification(db, body.email)
+    return _RESEND_RESPONSE
+
+
+@router.post(
+    "/confirm-email-change",
+    summary="Подтверждение смены email",
+    description=(
+        "Принимает токен из письма, переносит pending_email в email, "
+        "помечает email подтверждённым и отзывает все refresh-токены."
+    ),
+)
+async def confirm_email_change_endpoint(
+    request: Request,
+    body: EmailChangeConfirm,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    await check_rate_limit(
+        request, limit=10, window=60, redis=redis, fail_closed=True
+    )
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    await confirm_email_change(
+        db, body.token, ip=ip, user_agent=user_agent
+    )
+    return {"message": "Email изменён"}
 
 
 @router.post(
