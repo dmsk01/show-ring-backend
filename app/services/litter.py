@@ -155,3 +155,20 @@ async def update_litter(
     await db.commit()
     await db.refresh(obj)
     return obj
+
+
+async def delete_litter(
+    db: AsyncSession,
+    litter_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    obj = await repo.get_litter(db, litter_id)
+    if obj is None:
+        raise ValueError("not_found")
+    # Право (как в update_litter): владелец питомника помёта или admin.
+    await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
+    # dogs.litter_id и classifieds.litter_id → SET NULL: щенки и
+    # объявления переживают удаление помёта, теряя лишь привязку к нему.
+    await db.delete(obj)
+    await db.commit()

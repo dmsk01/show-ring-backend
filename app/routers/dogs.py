@@ -159,6 +159,27 @@ async def update_dog(
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
 
 
+@router.delete(
+    "/{dog_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить собаку",
+)
+async def delete_dog(
+    dog_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.delete_dog(
+            db,
+            dog_id=dog_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
 @router.post(
     "/{dog_id}/images",
     response_model=DogResponse,

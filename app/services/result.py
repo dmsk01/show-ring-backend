@@ -235,6 +235,57 @@ async def upsert_class_result(
     return result
 
 
+async def delete_result(
+    db: AsyncSession,
+    *,
+    show_id: uuid.UUID,
+    result_id: uuid.UUID,
+    user_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    """
+    Удаляет результат записи и отзывает выданные на этой выставке титулы
+    собаки.
+
+    Почему можно снять ВСЕ титулы (dog_id, show_id): одна собака — одна
+    запись на выставку (UNIQUE show_id+dog_id) и один результат на запись
+    (UNIQUE show_entry_id). Значит все dog_titles собаки на этой выставке
+    «родились» в этом ринге — удаляя результат, отзываем их целиком, иначе
+    титул переживёт свой результат.
+
+    Статус-гейт и право — те же, что у ввода результата (_ensure_can_edit):
+    править/удалять можно, пока выставка registration_closed/in_progress,
+    после публикации (completed) — нельзя.
+    """
+    result = await repo.get_result(db, result_id)
+    if result is None:
+        raise ValueError("result_not_found")
+    entry = await db.get(ShowEntry, result.show_entry_id)
+    # Привязка к выставке из URL — как в роутере update_result (bug_208):
+    # результат чужой выставки здесь невидим, отдаём 404, не 403.
+    if entry is None or entry.show_id != show_id:
+        raise ValueError("result_not_found")
+    show = await show_repo.get_show_with_relations(db, show_id)
+    if show is None:
+        raise ValueError("not_found")
+    if show.status not in (
+        ShowStatus.in_progress,
+        ShowStatus.registration_closed,
+    ):
+        raise ValueError("show_not_in_progress")
+    if not _can_modify_results(show, user_id, is_admin):
+        raise ValueError("forbidden")
+
+    # Сначала отзываем титулы, потом удаляем сам результат — порядок не
+    # критичен (FK на show_results у dog_titles нет), но логически titles
+    # «принадлежат» результату.
+    await repo.delete_dog_titles_for_show(
+        db, dog_id=entry.dog_id, show_id=show_id
+    )
+    await db.delete(result)
+    await db.commit()
+
+
 # ---------------------------------------------------------------------
 # Лучшие на разных уровнях
 # ---------------------------------------------------------------------

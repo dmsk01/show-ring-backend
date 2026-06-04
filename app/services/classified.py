@@ -207,15 +207,26 @@ async def close_classified(
     classified_id: uuid.UUID,
     requester_id: uuid.UUID,
     is_admin: bool,
+    hard: bool = False,
 ) -> None:
     """
-    "Удаление" объявления — это перевод в статус closed. Объявление
-    остаётся в БД (для статистики, для отчётов), но скрывается из
-    публичных списков (где фильтр status='active').
+    Удаление объявления в двух режимах:
+
+    - soft (по умолчанию): перевод в статус closed. Объявление остаётся
+      в БД (для статистики/отчётов), но скрывается из публичных списков
+      (фильтр status='active').
+    - hard (hard=True): полное удаление строки из БД. Изображения
+      (classified_images) уходят по ON DELETE CASCADE. Истории не
+      остаётся — применять осознанно.
+
+    Право в обоих режимах — автор или admin.
     """
     obj = await repo.get_classified(db, classified_id, with_images=False)
     if obj is None:
         raise ValueError("not_found")
     await _check_owner(obj, requester_id, is_admin)
-    obj.status = ClassifiedStatus.closed
+    if hard:
+        await db.delete(obj)
+    else:
+        obj.status = ClassifiedStatus.closed
     await db.commit()

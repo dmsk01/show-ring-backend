@@ -189,3 +189,24 @@ async def update_litter(
     except ValueError as e:
         _raise_for_error(e)
     return await _build_litter(db, litter)
+
+
+@router.delete(
+    "/{litter_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить помёт",
+)
+async def delete_litter(
+    litter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.delete_litter(
+            db,
+            litter_id=litter_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)

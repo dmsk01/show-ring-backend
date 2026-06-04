@@ -130,6 +130,28 @@ async def update_dog(
         raise ValueError("duplicate_unique_field")
 
 
+async def delete_dog(
+    db: AsyncSession,
+    dog_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    obj = await repo.get_dog(db, dog_id)
+    if obj is None:
+        raise ValueError("not_found")
+    # Право (как в update_dog): владелец питомника собаки или admin.
+    # Собака без питомника — только admin (прямого FK dog→user нет).
+    if obj.kennel_id is not None:
+        await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
+    elif not is_admin:
+        raise ValueError("forbidden")
+    # Каскады БД: dog_photos, show_entries (а с ними show_results) и
+    # dog_titles удаляются (ON DELETE CASCADE). Ссылки детей/помётов на
+    # эту собаку как родителя (father_id/mother_id) → SET NULL.
+    await db.delete(obj)
+    await db.commit()
+
+
 async def add_images(
     db: AsyncSession,
     dog_id: uuid.UUID,

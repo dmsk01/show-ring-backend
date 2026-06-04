@@ -237,10 +237,17 @@ async def add_images(
 @router.delete(
     "/{classified_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Закрыть объявление (soft delete)",
+    summary="Закрыть объявление (soft) или удалить из БД (?hard=true)",
 )
 async def close_classified(
     classified_id: uuid.UUID,
+    hard: bool = Query(
+        False,
+        description=(
+            "false (по умолчанию) — мягкое закрытие (status=closed); "
+            "true — полное удаление строки из БД (CASCADE на изображения)."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -250,6 +257,7 @@ async def close_classified(
             classified_id=classified_id,
             requester_id=user.id,
             is_admin=_is_admin(user),
+            hard=hard,
         )
     except ValueError as e:
         _raise_for_error(e)

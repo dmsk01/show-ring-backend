@@ -120,6 +120,27 @@ async def update_campaign(
     return CampaignResponse.model_validate(obj)
 
 
+@router.delete(
+    "/campaigns/{campaign_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить кампанию",
+)
+async def delete_campaign(
+    campaign_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.delete_campaign(
+            db,
+            campaign_id=campaign_id,
+            user_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
 # ---------------------------------------------------------------------
 # Banners
 # ---------------------------------------------------------------------
@@ -172,6 +193,27 @@ async def update_banner(
     except ValueError as e:
         _raise_for_error(e)
     return BannerResponse.model_validate(obj)
+
+
+@router.delete(
+    "/banners/{banner_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить баннер",
+)
+async def delete_banner(
+    banner_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.delete_banner(
+            db,
+            banner_id=banner_id,
+            user_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
 
 
 # ---------------------------------------------------------------------

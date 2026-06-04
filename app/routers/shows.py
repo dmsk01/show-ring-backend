@@ -208,6 +208,27 @@ async def change_status(
         _raise_for_error(e)
 
 
+@router.delete(
+    "/{show_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить выставку",
+)
+async def delete_show(
+    show_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.delete_show(
+            db,
+            show_id=show_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
 # ---------------------------------------------------------------------
 # Judges
 # ---------------------------------------------------------------------
@@ -335,6 +356,29 @@ async def update_ring(
             requester_id=user.id,
             is_admin=_is_admin(user),
             fields=body.model_dump(exclude_unset=True),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
+@router.delete(
+    "/{show_id}/rings/{ring_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить ринг",
+)
+async def delete_ring(
+    show_id: uuid.UUID,
+    ring_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.delete_ring(
+            db,
+            show_id=show_id,
+            ring_id=ring_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
         )
     except ValueError as e:
         _raise_for_error(e)

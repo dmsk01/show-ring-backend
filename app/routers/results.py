@@ -142,6 +142,29 @@ async def update_result(
         _raise_for_error(e)
 
 
+@router.delete(
+    "/{result_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить результат (с отзывом выданных титулов)",
+)
+async def delete_result(
+    show_id: uuid.UUID,
+    result_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.delete_result(
+            db,
+            show_id=show_id,
+            result_id=result_id,
+            user_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
 @router.get(
     "",
     response_model=list[ShowResultResponse],

@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dog import Dog
@@ -232,6 +232,20 @@ async def create_dog_title(db: AsyncSession, **fields) -> DogTitle:
     db.add(obj)
     await db.flush()
     return obj
+
+
+async def delete_dog_titles_for_show(
+    db: AsyncSession, dog_id: uuid.UUID, show_id: uuid.UUID
+) -> None:
+    """
+    Отзывает все титулы собаки, выданные на конкретной выставке. Bulk
+    DELETE одним запросом — используется при удалении результата ринга
+    (см. result-сервис delete_result).
+    """
+    stmt = delete(DogTitle).where(
+        DogTitle.dog_id == dog_id, DogTitle.show_id == show_id
+    )
+    await db.execute(stmt)
 
 
 # ---------------------------------------------------------------------

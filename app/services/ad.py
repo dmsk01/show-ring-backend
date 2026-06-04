@@ -151,6 +151,41 @@ async def update_banner(
     return banner
 
 
+async def delete_campaign(
+    db: AsyncSession,
+    campaign_id: uuid.UUID,
+    user_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    obj = await repo.get_campaign(db, campaign_id)
+    if obj is None:
+        raise ValueError("not_found")
+    _ensure_owner(obj, user_id, is_admin)
+    # CASCADE: удаление кампании уносит её баннеры (ad_banners), а с ними
+    # — все их события (ad_events).
+    await db.delete(obj)
+    await db.commit()
+
+
+async def delete_banner(
+    db: AsyncSession,
+    banner_id: uuid.UUID,
+    user_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    banner = await repo.get_banner(db, banner_id)
+    if banner is None:
+        raise ValueError("not_found")
+    # Право — у владельца кампании баннера (или admin), как в update_banner.
+    campaign = await repo.get_campaign(db, banner.campaign_id)
+    if campaign is None:
+        raise ValueError("campaign_not_found")
+    _ensure_owner(campaign, user_id, is_admin)
+    # CASCADE уносит события баннера (ad_events).
+    await db.delete(banner)
+    await db.commit()
+
+
 # ---------------------------------------------------------------------
 # Serve
 # ---------------------------------------------------------------------

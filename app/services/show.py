@@ -86,6 +86,29 @@ async def update_show(
     return obj
 
 
+async def delete_show(
+    db: AsyncSession,
+    show_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    obj = await repo.get_show(db, show_id)
+    if obj is None:
+        raise ValueError("not_found")
+    await _ensure_organizer_owner(obj, requester_id, is_admin)
+    # Жёсткое удаление разрешено только для draft и cancelled. Активные и
+    # завершённые выставки несут записи/результаты/титулы — это история,
+    # которую нельзя терять. Для боевых выставок есть статус cancelled
+    # (PUT /shows/{id}/status). На completed БД и так заблокировала бы
+    # удаление: dog_titles.show_id = ON DELETE RESTRICT.
+    if obj.status not in (ShowStatus.draft, ShowStatus.cancelled):
+        raise ValueError("show_locked")
+    # Каскад (breeds/judges/rings/entries) отрабатывает на уровне ORM
+    # (delete-orphan) и БД (ON DELETE CASCADE) — связанные строки уйдут.
+    await db.delete(obj)
+    await db.commit()
+
+
 async def change_status(
     db: AsyncSession,
     show_id: uuid.UUID,
@@ -260,6 +283,27 @@ async def update_ring(
         setattr(ring, k, v)
     await db.commit()
     return ring
+
+
+async def delete_ring(
+    db: AsyncSession,
+    show_id: uuid.UUID,
+    ring_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    show = await repo.get_show(db, show_id)
+    if show is None:
+        raise ValueError("not_found")
+    await _ensure_organizer_owner(show, requester_id, is_admin)
+    ring = await repo.get_show_ring(db, ring_id)
+    if ring is None or ring.show_id != show_id:
+        raise ValueError("ring_not_found")
+    # Ринг — чистый элемент расписания: на show_rings никто не ссылается
+    # (результаты привязаны к ShowEntry, не к рингу), поэтому удаление
+    # безопасно в любом статусе. Симметрично add_ring/update_ring.
+    await db.delete(ring)
+    await db.commit()
 
 
 # ---------------------------------------------------------------------
