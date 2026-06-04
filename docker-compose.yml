@@ -278,6 +278,30 @@ services:
       interval: 30s
     restart: unless-stopped
 
+  # Dispatcher транзакционного outbox: опрашивает outbox_events и
+  # публикует pending-события в RabbitMQ (в т.ч. email_tasks). Без него
+  # transactional-outbox (этапы 9/10/19) не доставляет НИЧЕГО — события
+  # копятся в БД pending'ами. Тот же профиль "events", что и topic/email,
+  # чтобы весь email-pipeline поднимался одной командой:
+  #   docker compose --profile events up -d
+  worker-outbox:
+    build: .
+    profiles: ["events"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      SECRET_KEY: ${SECRET_KEY}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "worker.main", "--mode", "outbox"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'worker.main' || exit 1"]
+      interval: 30s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   rabbitmq_data:
