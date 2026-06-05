@@ -26,6 +26,7 @@ from app.routers import (
     kennels,
     litters,
     notifications,
+    posts,
     references,
     results,
     shows,
@@ -185,3 +186,5 @@ app.include_router(admin_analytics.show_report_router)
 app.include_router(admin_moderation.router)
 # Этап 11: онлайн-поддержка (тикеты + WebSocket чат).
 app.include_router(support.router)
+# Этап 17: блог (публичный read + write для admin/organizer).
+app.include_router(posts.router)

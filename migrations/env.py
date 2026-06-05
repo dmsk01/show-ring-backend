@@ -27,6 +27,7 @@ from app.models import support as _support_model  # noqa: F401
 from app.models import audit as _audit_model  # noqa: F401
 from app.models import outbox as _outbox_model  # noqa: F401
 from app.models import security_audit as _security_audit_model  # noqa: F401
+from app.models import post as _post_model  # noqa: F401
 
 from app.config import settings
 

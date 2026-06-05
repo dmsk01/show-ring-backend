@@ -23,11 +23,20 @@ SENSITIVE_FIELDS = frozenset(
     }
 )
 
+# Этап 17 (блог): поля с осмысленным HTML, который глобальный bleach
+# (tags=[], strip=True) вырезал бы целиком. Для них санитизация делается
+# СВОИМ allowlist'ом в сервисе (app/utils/html_sanitize.py), а здесь поле
+# пропускается как есть. Сейчас это только content блог-поста; имя «content»
+# больше нигде во входных телах не используется, так что дыры не открываем.
+RAW_HTML_FIELDS = frozenset({"content"})
+
 
 def _sanitize(value: Any, *, key: str | None = None) -> Any:
     # ИСПРАВЛЕНО: пропускаем чувствительные поля без модификации,
     # иначе ломается аутентификация и логика проверки токенов.
-    if key is not None and key in SENSITIVE_FIELDS:
+    # RAW_HTML_FIELDS пропускаем по той же механике — их чистит сервис
+    # своим allowlist-bleach, а не глобальный strip-all.
+    if key is not None and (key in SENSITIVE_FIELDS or key in RAW_HTML_FIELDS):
         return value
     if isinstance(value, str):
         return bleach.clean(value, tags=[], strip=True)
