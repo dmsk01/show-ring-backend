@@ -1,4 +1,14 @@
+import logging
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Аудит C1: заведомо небезопасные значения SECRET_KEY (пустой/дефолтные
+# плейсхолдеры из .env.example). Модульная константа, чтобы не попасть в
+# пространство полей pydantic-модели.
+_SECRET_PLACEHOLDERS = frozenset(
+    {"", "change-me-in-production", "change-me", "changeme", "secret"}
+)
 
 
 class Settings(BaseSettings):
@@ -115,6 +125,33 @@ class Settings(BaseSettings):
     # AWS RDS Proxy idle = 1800 → ставим 1500; managed PG idle = 3600
     # → 1800 норм. Тюнится через .env.
     db_pool_recycle_seconds: int = 1800
+
+    # Аудит C1: SECRET_KEY подписывает HS256 access-JWT (app/utils/security.py).
+    # Пустой/плейсхолдерный/короткий ключ делает токены подделываемыми
+    # (обход авторизации). В prod (debug=False) — падаем на старте; в dev
+    # (debug=True) — громкий warning, но поднимаемся, чтобы не ломать
+    # локальный стек. model_validator (а не field_validator), т.к. нужен
+    # доступ к debug, объявленному после secret_key.
+    @model_validator(mode="after")
+    def _validate_secret_key(self) -> "Settings":
+        key = self.secret_key.strip()
+        if key in _SECRET_PLACEHOLDERS:
+            reason = "пустой или плейсхолдер"
+        elif len(key) < 32:
+            reason = "короче 32 символов"
+        else:
+            return self
+        msg = (
+            f"SECRET_KEY небезопасен ({reason}). Сгенерируйте стойкий ключ: "
+            f"`openssl rand -hex 32` и задайте через переменную окружения."
+        )
+        if self.debug:
+            logging.getLogger("app.config").critical(
+                "НЕБЕЗОПАСНЫЙ SECRET_KEY: %s — допущено только из-за DEBUG=True",
+                msg,
+            )
+            return self
+        raise ValueError(msg)
 
 
 settings = Settings()  # type: ignore
