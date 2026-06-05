@@ -55,26 +55,32 @@ from app import redis as redis_state
 logger = logging.getLogger(__name__)
 
 
-def _channel(ticket_id: uuid.UUID) -> str:
-    """Имя Redis-канала для тикета."""
-    return f"support:{ticket_id}"
-
-
 class WSConnectionManager:
     """
-    Per-instance state. На один процесс API — один экземпляр.
+    Per-instance state. На один процесс API — один экземпляр на namespace.
+
+    Менеджер параметризован префиксом Redis-канала (этап 16): тот же
+    выверенный механизм cross-instance доставки переиспользуется и чатом
+    поддержки (`support:{ticket_id}`), и realtime-уведомлениями
+    (`notif:{user_id}`). Ключ — произвольный UUID: для поддержки это
+    ticket_id, для уведомлений — user_id.
 
     Структуры:
-    - `_connections`: ticket_id → set[WebSocket] — активные сокеты
-      ЭТОГО инстанса.
-    - `_subscriptions`: ticket_id → asyncio.Task — фоновая корутина,
-      слушающая Redis pubsub для этого тикета.
+    - `_connections`: key → set[WebSocket] — активные сокеты ЭТОГО
+      инстанса.
+    - `_subscriptions`: key → asyncio.Task — фоновая корутина,
+      слушающая Redis pubsub для этого ключа.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, channel_prefix: str) -> None:
+        self._prefix = channel_prefix
         self._connections: dict[uuid.UUID, set[WebSocket]] = {}
         self._subscriptions: dict[uuid.UUID, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+
+    def _channel(self, key: uuid.UUID) -> str:
+        """Имя Redis-канала для ключа: '<prefix>:<key>'."""
+        return f"{self._prefix}:{key}"
 
     # -----------------------------------------------------------------
     # Connect / disconnect
@@ -143,7 +149,7 @@ class WSConnectionManager:
         if client is not None:
             try:
                 await client.publish(
-                    _channel(ticket_id), json.dumps(payload)
+                    self._channel(ticket_id), json.dumps(payload)
                 )
                 return
             except Exception as e:  # noqa: BLE001
@@ -187,7 +193,7 @@ class WSConnectionManager:
         if client is None:
             return
         pubsub = client.pubsub()
-        channel = _channel(ticket_id)
+        channel = self._channel(ticket_id)
         try:
             await pubsub.subscribe(channel)
             async for message in pubsub.listen():
@@ -217,5 +223,9 @@ class WSConnectionManager:
                 logger.warning("PubSub close failed: %s", e)
 
 
-# Один менеджер на процесс. Импортируется в роутере поддержки.
-ws_manager = WSConnectionManager()
+# По одному менеджеру на namespace. Импортируются в соответствующих
+# роутерах: ws_manager — чат поддержки, notif_ws_manager — realtime
+# уведомления (этап 16). Разные префиксы → разные Redis-каналы, инстансы
+# не пересекаются.
+ws_manager = WSConnectionManager("support")
+notif_ws_manager = WSConnectionManager("notif")

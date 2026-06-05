@@ -162,13 +162,18 @@ async def list_user_notifications(
     db: AsyncSession,
     user_id: uuid.UUID,
     *,
+    channel: NotificationChannel | None = None,
     page: int = 1,
     per_page: int = 50,
 ) -> Sequence[Notification]:
+    # channel (этап 16): необязательный фильтр. Колокольчик передаёт
+    # in_app, чтобы не смешивать realtime-ленту с журналом email —
+    # дедуп между каналами решается этим фильтром by design.
+    stmt = select(Notification).where(Notification.user_id == user_id)
+    if channel is not None:
+        stmt = stmt.where(Notification.channel == channel)
     stmt = (
-        select(Notification)
-        .where(Notification.user_id == user_id)
-        .order_by(Notification.created_at.desc())
+        stmt.order_by(Notification.created_at.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
     )

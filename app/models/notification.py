@@ -57,6 +57,7 @@ class NotificationStatus(str, enum.Enum):
 class NotificationChannel(str, enum.Enum):
     email = "email"
     push = "push"  # резерв, пока не реализован
+    in_app = "in_app"  # realtime через WebSocket (этап 16)
 
 
 class EventType(str, enum.Enum):

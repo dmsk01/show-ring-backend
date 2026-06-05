@@ -4,16 +4,30 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import get_db
-from app.dependencies import get_current_user
+from app.database import async_session_factory, get_db
+from app.dependencies import (
+    authenticate_ws,
+    get_current_user,
+    ws_rate_limit,
+)
+from app.models.notification import NotificationChannel
 from app.models.user import User
 from app.repositories import notification as repo
 from app.schemas.notification import (
@@ -23,6 +37,9 @@ from app.schemas.notification import (
     SubscriptionResponse,
     UnreadCountResponse,
 )
+from app.services.ws_manager import notif_ws_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["notifications"])
 
@@ -117,13 +134,17 @@ async def delete_subscription(
     summary="Мои уведомления",
 )
 async def list_my_notifications(
+    # channel — необязательный фильтр по каналу (этап 16). Колокольчик
+    # запрашивает ?channel=in_app, чтобы realtime-лента не смешивалась с
+    # журналом email-рассылки. FastAPI сам валидирует значение enum.
+    channel: NotificationChannel | None = None,
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     items = await repo.list_user_notifications(
-        db, user.id, page=page, per_page=per_page
+        db, user.id, channel=channel, page=page, per_page=per_page
     )
     return [NotificationResponse.model_validate(n) for n in items]
 
@@ -191,3 +212,78 @@ async def mark_notification_read(
     if n is None:
         raise HTTPException(404, "not_found")
     return NotificationResponse.model_validate(n)
+
+
+# ---------------------------------------------------------------------
+# Realtime push (этап 16)
+# ---------------------------------------------------------------------
+
+
+@router.websocket("/ws/notifications")
+async def notifications_ws(websocket: WebSocket):
+    """
+    Realtime-канал in-app уведомлений (колокольчик).
+
+    Протокол:
+    1. accept() без авторизации — handshake свободный.
+    2. Клиент шлёт первый кадр {"type":"auth","token":"<access>"} с JWT
+       (токен в сообщении, а не в URL — не светится в логах прокси).
+    3. Сервер проверяет токен; при неудаче — close(4401).
+    4. Сервер шлёт {"type":"auth_ok"} и регистрирует сокет в
+       notif_ws_manager под ключом user.id.
+    5. Дальше клиент НИЧЕГО не шлёт — только принимает пуши
+       {"type":"notification","payload":<NotificationResponse>}, которые
+       прилетают из events-воркера через Redis Pub/Sub (notif:{user_id}).
+       Цикл receive_text нужен лишь чтобы поймать WebSocketDisconnect.
+
+    Сессия БД открыта только на время handshake (как в чате поддержки,
+    bug_205): отошедший клиент не держит соединение из пула.
+    """
+    await websocket.accept()
+
+    # Rate-limit хендшейка по IP (10 connect/мин) — защита от флуда
+    # соединений. При превышении ws_rate_limit сам закрывает сокет
+    # (code=4429), нам остаётся выйти.
+    if not await ws_rate_limit(websocket, limit=10, window=60):
+        return
+
+    # --- AUTH (короткая сессия БД только на handshake) ---
+    try:
+        first = await websocket.receive_json()
+    except (WebSocketDisconnect, ValueError):
+        await websocket.close(code=1003)  # unsupported_data
+        return
+    if not isinstance(first, dict) or first.get("type") != "auth":
+        await websocket.send_json(
+            {"type": "error", "payload": {"code": "auth_required"}}
+        )
+        await websocket.close(code=4401)
+        return
+
+    async with async_session_factory() as db:
+        user = await authenticate_ws(db, first.get("token"))
+    if user is None:
+        await websocket.send_json(
+            {"type": "error", "payload": {"code": "invalid_token"}}
+        )
+        await websocket.close(code=4401)
+        return
+
+    await websocket.send_json(
+        {"type": "auth_ok", "payload": {"user_id": str(user.id)}}
+    )
+    # connect — после закрытия handshake-сессии: subscribe в Redis не
+    # должен держать БД-коннект.
+    await notif_ws_manager.connect(user.id, websocket)
+    try:
+        while True:
+            # Клиент уведомлений не шлёт сообщений; receive держит
+            # соединение и ловит разрыв. Пуши приходят НЕ отсюда, а из
+            # notif_ws_manager._listen (Redis → сокет).
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("notifications WS loop error for user %s", user.id)
+    finally:
+        await notif_ws_manager.disconnect(user.id, websocket)

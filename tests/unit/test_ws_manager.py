@@ -120,7 +120,9 @@ def fake_redis(monkeypatch) -> _FakeRedis:
 
 @pytest_asyncio.fixture
 async def manager():
-    mgr = WSConnectionManager()
+    # Префикс "support" → каналы вида support:{ticket} (этап 16
+    # параметризовал менеджер; чат поддержки сохранил свой namespace).
+    mgr = WSConnectionManager("support")
     yield mgr
     # Чистим фоновые listen-таски, чтобы не текли между тестами.
     tasks = list(mgr._subscriptions.values())
@@ -224,3 +226,37 @@ async def test_second_socket_does_not_add_subscription(fake_redis, manager):
     await _wait_for(lambda: ws1.sent and ws2.sent)
     assert ws1.sent == [{"body": "всем"}]
     assert ws2.sent == [{"body": "всем"}]
+
+
+async def test_prefix_isolation(fake_redis):
+    """
+    Этап 16: два менеджера с разными префиксами на ОДИН и тот же ключ
+    не пересекаются по Redis-каналам. publish в support-менеджере не
+    долетает до сокета notif-менеджера (разные namespace'ы).
+    """
+    support = WSConnectionManager("support")
+    notif = WSConnectionManager("notif")
+    key = uuid.uuid4()  # один и тот же UUID-ключ в обоих менеджерах
+    ws_support, ws_notif = _FakeWS(), _FakeWS()
+    try:
+        await support.connect(key, ws_support)
+        await notif.connect(key, ws_notif)
+        # Разные каналы: support:{key} и notif:{key}.
+        await _wait_for(lambda: fake_redis.subscriber_count(f"support:{key}") == 1)
+        await _wait_for(lambda: fake_redis.subscriber_count(f"notif:{key}") == 1)
+
+        await support.publish(key, {"body": "тикет"})
+        await _wait_for(lambda: ws_support.sent == [{"body": "тикет"}])
+        # notif-сокет НЕ получил сообщение из support-канала.
+        assert ws_notif.sent == []
+
+        await notif.publish(key, {"type": "notification"})
+        await _wait_for(lambda: ws_notif.sent == [{"type": "notification"}])
+        # support-сокет не получил лишнего — у него по-прежнему одно.
+        assert ws_support.sent == [{"body": "тикет"}]
+    finally:
+        for mgr in (support, notif):
+            tasks = list(mgr._subscriptions.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

@@ -20,13 +20,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from datetime import datetime, timezone
 
 import aio_pika
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import redis as redis_state
 from app.config import settings
 from app.models.notification import (
     Notification,
@@ -35,7 +38,11 @@ from app.models.notification import (
 )
 from app.repositories import notification as notif_repo
 from app.repositories import outbox as outbox_repo
-from app.schemas.notification import EmailTaskMessage, EventMessage
+from app.schemas.notification import (
+    EmailTaskMessage,
+    EventMessage,
+    NotificationResponse,
+)
 from app.services.email import render_email
 from app.services.rabbit_dlx import declare_workflow_queue
 
@@ -58,6 +65,18 @@ def _recipient_message_id(
     return uuid.uuid5(uuid.NAMESPACE_OID, f"{event_id}:{user_id}")
 
 
+def _in_app_message_id(
+    event_id: uuid.UUID, user_id: uuid.UUID
+) -> uuid.UUID:
+    """
+    Идемпотентный ключ in_app-строки (этап 16). Отличается от email-ключа
+    суффиксом ":in_app", иначе UNIQUE на message_id не дал бы вставить
+    вторую строку для того же (event, user). Детерминированный → при
+    redelivery того же события дубль не плодится.
+    """
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"{event_id}:{user_id}:in_app")
+
+
 def _safe_uuid(value) -> uuid.UUID | None:
     """payload.breed_id может прийти как str (JSON) — конвертируем."""
     if value is None:
@@ -66,6 +85,69 @@ def _safe_uuid(value) -> uuid.UUID | None:
         return uuid.UUID(str(value))
     except (TypeError, ValueError):
         return None
+
+
+async def _create_in_app_notification(
+    db: AsyncSession,
+    *,
+    event: EventMessage,
+    user_id: uuid.UUID,
+    subject: str,
+) -> dict | None:
+    """
+    Создаёт in_app-строку (channel=in_app, status=sent) в собственной
+    транзакции и возвращает сериализованный NotificationResponse для
+    WS-пуша. None — если строка уже есть (redelivery): UNIQUE на
+    message_id отлавливает дубль, push не повторяем.
+    """
+    msg_id = _in_app_message_id(event.event_id, user_id)
+    try:
+        notif = Notification(
+            user_id=user_id,
+            event_type=event.event_type,
+            channel=NotificationChannel.in_app,
+            subject=subject,
+            status=NotificationStatus.sent,
+            sent_at=datetime.now(timezone.utc),
+            message_id=msg_id,
+        )
+        db.add(notif)
+        await db.flush()
+        # refresh — подтянуть server_default created_at до сериализации
+        # (NotificationResponse требует created_at непустым).
+        await db.refresh(notif)
+        payload = NotificationResponse.model_validate(notif).model_dump(
+            mode="json"
+        )
+        await db.commit()
+        return payload
+    except IntegrityError:
+        await db.rollback()
+        logger.debug(
+            "Skipping duplicate in_app: event=%s user=%s",
+            event.event_id, user_id,
+        )
+        return None
+
+
+async def _push_in_app(user_id: uuid.UUID, payload: dict) -> None:
+    """
+    Best-effort realtime-push в Redis-канал notif:{user_id}. Долетит до
+    подписанных API-инстансов (notif_ws_manager._listen) и дальше в
+    сокеты. Никто не подключён — Pub/Sub просто отбросит сообщение, при
+    следующем GET /notifications юзер всё увидит. Redis недоступен — push
+    тихо пропускается, строка в БД уже сохранена.
+    """
+    client = redis_state.redis_client
+    if client is None:
+        return
+    try:
+        await client.publish(
+            f"notif:{user_id}",
+            json.dumps({"type": "notification", "payload": payload}),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("notif push failed for user %s: %s", user_id, e)
 
 
 async def process_event(
@@ -180,6 +262,18 @@ async def process_event(
                 "Skipping duplicate notification: event=%s user=%s",
                 event.event_id, user.id,
             )
+
+        # --- in_app-уведомление (этап 16) ---
+        # Самостоятельная строка channel=in_app + realtime-push. Не
+        # зависит от исхода email-блока выше: свой message_id, своя
+        # транзакция. SMTP не нужен → status=sent сразу. Persistence
+        # (история/бейдж) отделена от push (best-effort поверх).
+        in_app_payload = await _create_in_app_notification(
+            db, event=event, user_id=user.id, subject=subject
+        )
+        if in_app_payload is not None:
+            await _push_in_app(user.id, in_app_payload)
+
         # sub переменная не используется — на будущее (аналитика
         # «какая подписка вызвала рассылку»).
         _ = sub

@@ -27,6 +27,7 @@ import aio_pika
 
 from app.config import settings
 from app.database import async_session_factory
+from app.redis import close_redis, init_redis
 from app.services.rabbit_dlx import declare_workflow_queue
 from worker.handlers.ad_handler import (
     AD_EVENTS_QUEUE,
@@ -294,6 +295,12 @@ async def run_topic_events() -> None:
     """
     global _topic_publish_channel
 
+    # init_redis (этап 16): events_handler публикует in_app-уведомления в
+    # Redis-канал notif:{user_id}. Без init_redis в процессе воркера
+    # app.redis.redis_client остался бы None и realtime-push молча не
+    # уходил бы (строка в БД при этом всё равно создаётся).
+    await init_redis()
+
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)
     consume_ch = await connection.channel()
     # prefetch=10: одно событие может породить много writes (Notification
@@ -305,7 +312,10 @@ async def run_topic_events() -> None:
 
     queue = await bind_topic_queue(consume_ch, pattern="#")
     await queue.consume(on_topic_event)
-    await _serve(connection, f"topic '{settings.exchange_topic}' (#)")
+    try:
+        await _serve(connection, f"topic '{settings.exchange_topic}' (#)")
+    finally:
+        await close_redis()
 
 
 async def on_ad_event(message: aio_pika.abc.AbstractIncomingMessage):

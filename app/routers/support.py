@@ -12,7 +12,6 @@ import logging
 import uuid
 from datetime import datetime
 from typing import NoReturn
-from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -23,11 +22,14 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_factory, get_db
-from app.dependencies import get_current_user, require_any_role
+from app.dependencies import (
+    authenticate_ws,
+    get_current_user,
+    require_any_role,
+)
 from app.models.support import TicketStatus
 from app.models.user import User
 from app.repositories import support as repo
@@ -42,7 +44,6 @@ from app.schemas.support import (
 )
 from app.services import support as svc
 from app.services.ws_manager import ws_manager
-from app.utils.security import decode_access_token
 
 logger = logging.getLogger(__name__)
 
@@ -233,26 +234,6 @@ def _serialize_message(msg) -> dict:
     }
 
 
-async def _authenticate_ws(
-    db: AsyncSession, token: str
-) -> User | None:
-    """Декодирует JWT (тот же формат, что и в REST) и возвращает User."""
-    try:
-        payload = decode_access_token(token)
-    except JWTError:
-        return None
-    if payload.get("type") != "access":
-        return None
-    try:
-        uid = UUID(payload.get("sub", ""))
-    except (ValueError, TypeError):
-        return None
-    user = await get_user_by_id(db, uid)
-    if user is None or not user.is_active:
-        return None
-    return user
-
-
 @router.websocket("/ws/{ticket_id}")
 async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
     """
@@ -299,7 +280,7 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
             )
             await websocket.close(code=4401)
             return
-        user = await _authenticate_ws(db, first["token"])
+        user = await authenticate_ws(db, first["token"])
         if user is None:
             await websocket.send_json(
                 {"type": "error", "payload": {"code": "invalid_token"}}
