@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.middleware.progressive_ban import check_rate_limit
+from app.redis import get_redis
 from app.dependencies import (
     get_current_user,
     get_current_user_optional,
@@ -48,6 +51,7 @@ _require_writer = require_any_role("admin", "organizer")
 
 @router.get("", response_model=PostPage, summary="Список постов (пагинация)")
 async def list_posts(
+    request: Request,
     publish: PostPublish | None = Query(
         None, description="Фильтр по статусу (published/draft)"
     ),
@@ -58,7 +62,13 @@ async def list_posts(
     per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(get_current_user_optional),
+    redis: Redis = Depends(get_redis),
 ):
+    # Аудит M1: публичный список + ILIKE-поиск (?query) — DoS-вектор на
+    # анонимной ручке. 60/мин на IP щедро для листания, режет флуд. Тот же
+    # check_rate_limit, что у /classifieds/search (bug_213). fail-open: при
+    # сбое Redis не ломаем публичную витрину (это не auth-ручка).
+    await check_rate_limit(request, limit=60, window=60, redis=redis)
     # Аудит H1: публичная витрина отдаёт только published. Черновики видит
     # лишь writer (admin/organizer) и только если сам их запросил.
     if not is_writer(user):

@@ -234,3 +234,17 @@ async def test_draft_visible_to_admin(client, db_session):
     r = await client.get("/posts?publish=draft", headers=_auth(token))
     slugs = [c["slug"] for c in r.json()["items"]]
     assert "draft-3" in slugs
+
+
+# ---------------------------------------------------------------------
+# rate-limit публичного списка/поиска (аудит M1)
+# ---------------------------------------------------------------------
+
+
+async def test_posts_list_under_rate_limit_ok(client, db_session):
+    author = await _author(db_session)
+    await _post(db_session, author, slug="rl-1", publish=PostPublish.published)
+    # Несколько запросов подряд в пределах лимита — все 200 (не 429).
+    for _ in range(5):
+        r = await client.get("/posts?query=rl")
+        assert r.status_code == 200, r.text
