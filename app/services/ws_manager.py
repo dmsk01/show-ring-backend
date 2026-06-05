@@ -45,7 +45,12 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from app.redis import redis_client
+# Импортируем МОДУЛЬ, а не значение: init_redis() переприсваивает
+# app.redis.redis_client уже после импорта. `from app.redis import
+# redis_client` связал бы вечный стейл-None — подписка/публикация в Redis
+# никогда бы не включались. Тот же приём (и подробный комментарий) — в
+# app/routers/health.py.
+from app import redis as redis_state
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +87,23 @@ class WSConnectionManager:
 
         WebSocket уже должен быть `.accept()`-нут роутером.
         """
+        # Проверка и регистрация подписки — под ОДНИМ lock'ом (раньше запись
+        # self._subscriptions делалась вне его). В однопоточном asyncio между
+        # чтением и записью нет await, поэтому реальной гонки не было, но
+        # держать оба шага под lock'ом надёжнее на будущее: появись внутри
+        # блока await — окно двойной подписки не откроется. asyncio.create_task
+        # синхронный (только планирует корутину), так что неблокирующий
+        # asyncio.Lock через него держать безопасно.
         async with self._lock:
             conns = self._connections.setdefault(ticket_id, set())
             conns.add(websocket)
-            need_subscribe = ticket_id not in self._subscriptions
-
-        if need_subscribe and redis_client is not None:
-            task = asyncio.create_task(self._listen(ticket_id))
-            self._subscriptions[ticket_id] = task
+            if (
+                ticket_id not in self._subscriptions
+                and redis_state.redis_client is not None
+            ):
+                self._subscriptions[ticket_id] = asyncio.create_task(
+                    self._listen(ticket_id)
+                )
 
     async def disconnect(
         self, ticket_id: uuid.UUID, websocket: WebSocket
@@ -125,9 +139,10 @@ class WSConnectionManager:
         клиентам. Это деградация (другие инстансы пропустят), но не
         падение.
         """
-        if redis_client is not None:
+        client = redis_state.redis_client
+        if client is not None:
             try:
-                await redis_client.publish(
+                await client.publish(
                     _channel(ticket_id), json.dumps(payload)
                 )
                 return
@@ -168,9 +183,10 @@ class WSConnectionManager:
 
         При cancel() корректно завершается через try/finally.
         """
-        if redis_client is None:
+        client = redis_state.redis_client
+        if client is None:
             return
-        pubsub = redis_client.pubsub()
+        pubsub = client.pubsub()
         channel = _channel(ticket_id)
         try:
             await pubsub.subscribe(channel)

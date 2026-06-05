@@ -9,6 +9,7 @@
 #   await check_rate_limit(request, "/auth/login", limit=5, window=60, redis=redis)
 
 import time
+import uuid
 import logging
 
 from fastapi import Request, HTTPException
@@ -52,8 +53,11 @@ if count >= limit then
     return {1, math.floor(ban_seconds)}
 end
 
--- 4. Запись текущего запроса в окно.
-redis.call('zadd', rate_key, now, tostring(now))
+-- 4. Запись текущего запроса в окно. ARGV[4] — уникальный member
+-- (now + uuid, сгенерирован в Python): раньше member был tostring(now),
+-- и два запроса в одну микросекунду делили один member → zadd обновлял
+-- score вместо добавления второй записи, окно недосчитывало запрос.
+redis.call('zadd', rate_key, now, ARGV[4])
 redis.call('expire', rate_key, window)
 return {0, 0}
 """
@@ -101,8 +105,13 @@ async def check_rate_limit(
 
     try:
         now = time.time()
+        # ИСПРАВЛЕНО: уникальный member для zadd (см. шаг 4 в скрипте).
+        # now + uuid гарантирует, что одновременные запросы не схлопнутся
+        # в один элемент sorted set'а. score остаётся now — для sliding
+        # window важен именно он, а не member.
+        member = f"{now}:{uuid.uuid4().hex}"
         # eval(script, numkeys, *keys_and_args). numkeys=3, дальше идут
-        # 3 ключа, потом ARGV.
+        # 3 ключа, потом ARGV (now, window, limit, member).
         result = await redis.eval(
             _RATE_LIMIT_SCRIPT,
             3,
@@ -112,6 +121,7 @@ async def check_rate_limit(
             now,
             window,
             limit,
+            member,
         )
         # Lua возвращает массив [banned, retry_after]
         banned, retry_after = int(result[0]), int(result[1])

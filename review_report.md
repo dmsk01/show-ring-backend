@@ -1,165 +1,249 @@
 # Code Review Report
-
-**Date:** 2026-06-01
-**Project:** ShowTail — Платформа управления выставками животных (FastAPI / SQLAlchemy 2.0 async / RabbitMQ / Redis / MinIO / Pydantic v2)
-**Scope:** Полный обзор `/app`, `/worker`, миграций, тестов, Docker-конфигурации. Встроенный `/review` по всему проекту + расширенный анализ (security / Python / performance / architecture / testing). Версии зависимостей прочитаны из `requirements.txt` / `requirements-dev.txt` (не предполагались). Inline-комментарии прочитаны и учтены; где автор задокументировал осознанный trade-off — он процитирован.
-
----
+**Date:** 2026-06-05
+**Project:** ShowTail — платформа управления выставками животных (FastAPI async, PostgreSQL/asyncpg, SQLAlchemy 2.0, RabbitMQ/aio-pika, Redis, MinIO)
 
 ## Executive Summary
 
-Кодовая база **зрелая** и заметно прогрессировала с прошлого аудита (`docs/reviews/`, `review_report.md` от 2026-05-28). Практически **все P0/P1 из прошлого отчёта закрыты и подтверждены чтением кода**:
+ShowTail is a mature, heavily-reviewed backend. The code carries an unusually
+dense trail of prior audit fixes (`bug_2xx audit 2026-05-28`, `ultrareview`,
+`review 2026-06-01`) and the inline comments explaining each decision are
+accurate and worth respecting. I read those comments before flagging anything;
+where a comment already addresses a concern I either dropped the finding or
+quote the comment below.
 
-- ✅ Verification-токен больше не утекает в prod-лог — обёрнут в `if settings.debug` (`app/services/auth.py:60`).
-- ✅ `_DUMMY_BCRYPT_HASH` стал ленивым (`app/utils/security.py:40-43`).
-- ✅ ErrorHandler переведён на FastAPI `exception_handlers` — охватывает весь middleware-стек (`app/main.py:102`).
-- ✅ CORS: wildcards заменены явными списками методов/заголовков (`app/main.py:141-147`).
-- ✅ PDF: пользовательский ввод эскейпится через `_esc` / `xml.sax.saxutils.escape` (`app/utils/pdf.py`).
-- ✅ Email-fallback эскейпит `template_name` (`app/services/email.py:92`); autoescape включён для `.j2`.
-- ✅ IDOR на скачивании результата задачи закрыт (`app/routers/tasks.py:147`).
-- ✅ Idempotency: добавлен лимит размера кэшируемого тела (256 KB).
-- ✅ Архивация classifieds по `GREATEST(created_at, updated_at)` (`app/services/scheduler.py:330`).
-- ✅ Document worker: INSERT `UploadedFile` + `mark_done` в одной транзакции (`worker/handlers/document_handler.py:218-249`).
+The high-value security surfaces are solid:
 
-**Новые находки этого ревью** касаются в основном кода, появившегося ПОСЛЕ прошлого аудита (официальные DOCX-документы РКФ, асинхронная обработка изображений), и пары хвостов, которые прошлый отчёт пометил, но фикс не доехал.
+- **Auth** — bcrypt with constant-time dummy verify against user-enumeration,
+  refresh-token rotation with reuse-detection, JWT decoded with explicit
+  `require_exp/require_sub`, re-auth required for email/password changes, all
+  auth endpoints `fail_closed=True` on rate-limit.
+- **Injection** — no f-string SQL anywhere; raw SQL (`analytics.py`,
+  `classified.py` FTS) uses bound `:params` exclusively; ORM filters use Core
+  expressions. DOCX template names are hardcoded literals (no path traversal).
+- **Files** — magic-bytes validation (not Content-Type), private documents
+  gated behind owner/admin ACL with `is_public=False`, `Content-Disposition`
+  hardened via RFC 6266 `filename*` (closes the bug_202 header-injection class).
+- **Async hygiene** — CPU-bound work (docxtpl, Pillow) is correctly offloaded
+  with `asyncio.to_thread`; one DB session per message in the worker.
 
-**Главные риски сейчас:**
+**No critical (RCE / SQLi / auth-bypass) issues were found.** The headline
+finding is a stale-import that left the support-chat Redis pub/sub permanently
+disabled (now fixed and covered by tests); the rest are a packaging/repro
+inconsistency and a set of minor doc/hygiene items.
 
-1. 🟠 **`requeue_stuck_tasks` молча теряет новые типы задач** (официальные документы + `process_image`): карта `_QUEUE_FOR_TASK_TYPE` неполная → задача переводится в `pending`, но в очередь не публикуется и не подбирается заново. Stuck-задача умирает тихо.
-2. 🟠 **`GET /files/{id}` отдаёт сгенерированные официальные документы без авторизации** — несогласованность ACL: тот же файл через `/tasks/{id}/download` защищён (автор/admin), а через `/files/{id}` — публичен. Документы содержат ПДн (ФИО владельца/заводчика, чип, клеймо, дата рождения).
-3. 🟠 **N+1 в билдерах официальных документов** (`app/services/document_official.py`): каталог на 1000 собак = тысячи последовательных `db.get`.
-4. 🟠 **`upload_file` всё ещё буферизует файл целиком в RAM** — комментарий теперь прямо противоречит коду.
-5. 🟡 **Тестовое покрытие по-прежнему unit-only** — нет интеграционных тестов, тестов middleware/репозиториев, и нет ни одного теста на новый код (официальные документы, image-варианты покрыты лишь частично).
-
-В целом проект близок к prod-готовности; ниже — конкретика.
+**Code fixes applied in this pass:** `ws_manager` stale-binding (Major, +tests),
+rate-limiter sorted-set member collision, and two stale comments
+(`main.py` middleware order, `worker/main.py` ack semantics). The
+packaging/pinning items below are left as decisions for the team, not changed.
 
 ---
 
 ## Critical Issues 🔴
 
-Новых проблем критической severity не обнаружено — все критические находки прошлого аудита (token-logging, PDF-injection, email XSS) подтверждённо устранены. Самый приоритетный security-вопрос (`GET /files/{id}` без auth для документов с ПДн) вынесен в Major #1, поскольку практическая эксплуатируемость ограничена неугадываемым `uuid4` `file_id`; при ужесточении модели данных его стоит переоценить до Critical.
+None found.
 
 ---
 
 ## Major Issues 🟠
 
-### [RELIABILITY] `requeue_stuck_tasks` не перепубликовывает новые типы задач — они тихо умирают
-- **File:** `app/services/scheduler.py:297-301`, использование `app/services/scheduler.py:254-268`
-- **Description:** Карта типов→очередь содержит только три старых типа:
-  ```python
-  _QUEUE_FOR_TASK_TYPE = {
-      "generate_catalog": "document_task",
-      "generate_diploma": "document_task",
-      "generate_diplomas_batch": "document_task",
-  }
-  ```
-  Но система с тех пор обзавелась пятью официальными типами (`generate_catalog_official`, `generate_diploma_official`, `generate_diplomas_batch_official`, `generate_ring_sheets_official`, `generate_certificates_official` — см. `app/schemas/task.py:63-71`) и типом `process_image` (`app/routers/files.py:40`). Для них `_QUEUE_FOR_TASK_TYPE.get(task.type)` вернёт `None`. В цикле `task.status` уже выставлен в `pending` **до** проверки карты, после чего идёт `continue` без `outbox_repo.enqueue`. Итог: зависшая задача официального документа или обработки изображения переводится в `pending`, но никогда не публикуется в очередь и больше не попадает под `requeue` (он выбирает только `processing`). Задача умирает молча — клиент вечно поллит `done`, которого не будет.
-- **Note:** Inline-комментарий честно описывает «для типов, которых нет в карте, перепубликацию пропускаем … можно перезапустить вручную», но (а) это новые штатные типы, а не экзотика, и (б) перевод в `pending` ДО проверки делает даже ручной перезапуск нетривиальным (статус уже не `processing`).
-- **Suggestion:** Дополнить карту всеми актуальными типами (официальные → `document_task`, `process_image` → `image_task`), а лучше — строить её из `DocumentKind` + явной константы image-очереди, чтобы новый тип нельзя было забыть. Альтернативно: выставлять `pending` только если очередь найдена.
+### [STALE-BINDING] WebSocket manager never engaged Redis pub/sub — `from app.redis import redis_client` captured a permanent `None` — ✅ FIXED
+- File: `app/services/ws_manager.py:48` (import), `:101`/`:128`/`:171` (uses)
+- Description: `ws_manager.py` imported the **value**
+  (`from app.redis import redis_client`), binding the name to whatever
+  `app.redis.redis_client` was at import time — i.e. `None`, since
+  `init_redis()` only assigns the real client later, during app startup. A
+  `from … import name` binding does not track that reassignment, so
+  `redis_client` stayed `None` for the life of the process. Effects on the
+  support chat:
+  - `connect()` — `redis_client is not None` was always `False` → the instance
+    **never subscribed** to the Redis channel; `_listen` never ran.
+  - `publish()` — always fell through to `_broadcast_local` → messages reached
+    only sockets on the *same* API instance; **cross-instance pub/sub was
+    silently dead** (broken the moment you `--scale api=2`).
+- Note: This is exactly the stale-binding trap that `health.py` explicitly
+  avoids, with a documented comment: *"Импортируем модуль, а не значение:
+  init_redis() пере-присваивает app.redis.redis_client уже после импорта.
+  `from app.redis import redis_client` связал бы стейл-None…"* (`health.py:30`).
+  `ws_manager` simply didn't follow the same rule.
+- Correction to the first draft of this report: an earlier version flagged a
+  *race* in `connect()` (need_subscribe read in-lock, task registered out-of-lock)
+  as the Major issue. On closer analysis that race is **not reachable** under
+  single-threaded asyncio — there is no `await` between the in-lock read and the
+  out-of-lock write, so two `connect()` coroutines cannot interleave there — and
+  it was moot anyway because `redis_client` was always `None`. The real defect is
+  the import above.
+- Fix applied: import the module (`from app import redis as redis_state`) and
+  reference `redis_state.redis_client` in `connect`/`publish`/`_listen`. The
+  subscribe-registration was also consolidated fully inside `self._lock` as
+  defensive hardening (clearer, robust if an `await` is ever added to the block),
+  not because a live race existed.
+- Tests: `tests/unit/test_ws_manager.py` (6 cases, fake Redis pub/sub + fake
+  sockets, no infra needed) now covers first-connect subscription, single
+  subscription under concurrent connects, exactly-once delivery, JSON publish
+  through Redis, and disconnect-cancels-subscription. These would fail on the
+  stale-import version (the patched `app.redis.redis_client` never reaches the
+  manager). Full unit suite: **80 passed**.
 
-### [SECURITY] Несогласованный ACL: `GET /files/{id}` отдаёт официальные документы с ПДн без авторизации
-- **File:** `app/routers/files.py:135-159` (нет `Depends(get_current_user)`), ср. `app/routers/tasks.py:147` (защищено)
-- **Description:** `_upload_and_register` (`worker/handlers/document_handler.py:236`) сохраняет сгенерированные дипломы/каталоги/сертификаты как обычный `UploadedFile`. Эти документы содержат персональные данные: ФИО владельца и заводчика, номер чипа, клеймо, дату рождения собаки, № родословной. Скачивание через `/tasks/{id}/download` корректно ограничено автором задачи или admin (bug_201). Но **тот же файл доступен по `GET /files/{file_id}` вообще без аутентификации** — эндпоинт публичный «чтобы браузер рендерил аватары». Две точки доступа к одному объекту с разным ACL = классический обход контроля доступа.
-- **Note:** Комментарий в шапке файла (`app/routers/files.py:7-10`) обосновывает публичность тем, что «фото собак публичны», но он написан до того, как документы стали храниться как `UploadedFile`. Сейчас инвариант «всё в UploadedFile публично» нарушает приватность документов.
-- **Mitigation факт:** `file_id` — `uuid4`, не перечисляется и не выдаётся не-владельцу, так что практический вектор узкий. Но это defense-in-depth дыра.
-- **Suggestion:** Разделить namespace: для документов (`folder="documents"`/`variants`) либо требовать auth + проверку владельца на `/files/{id}`, либо хранить признак приватности на `UploadedFile` (`is_public`/`visibility`) и отдавать приватные только владельцу/admin. Минимально — пометить документы приватными и проверять в `get_file`.
-
-### [PERFORMANCE] N+1 запросы в билдерах официальных документов
-- **File:** `app/services/document_official.py:567-612` (`build_catalog_context`), аналогично `build_diplomas_batch_context:206-225`, `build_ring_sheets_context:325-345`, `build_certificates_context:765-805`
-- **Description:** В цикле по записям выставки на КАЖДУЮ запись выполняется по 6–10 последовательных `await db.get(...)`: `Dog`, `Breed`, `BreedGroup`, `ShowClass`, `_resolve_breeder` (Kennel + User + profile), `_resolve_owner` (Kennel + User + profile), отец, мать. Для каталога на 1000 собак это ~8–10 тысяч round-trip'ов к PG, выполняемых строго по очереди (нет `gather`, нет `selectinload`). Identity-map SQLAlchemy частично амортизирует повторные породы/питомники, но собаки/записи уникальны. На реальной всероссийке это десятки секунд в воркере на одну генерацию.
-- **Note:** Комментарии описывают доменную логику, но стоимость обхода не упомянута.
-- **Suggestion:** Загружать связи пакетно: один `select(ShowEntry).where(show_id==...).options(selectinload(ShowEntry.dog).selectinload(Dog.breed)...)`, либо собрать множества id и сделать `WHERE id IN (...)` одним запросом на таблицу, затем резолвить из словарей. Это переводит N+1 в O(1) запросов на тип сущности.
-
-### [PERFORMANCE/MEMORY] `upload_file` собирает весь файл в память; комментарий противоречит коду
-- **File:** `app/services/file_storage.py:126-157`
-- **Description:** Цикл читает чанки в `chunks: list[bytes]`, затем `body = b"".join(chunks)` и `put_object(Body=body)`. Файл полностью лежит в RAM. Комментарий на строке 126 утверждает обратное: «Читаем чанками, чтобы **не держать весь файл в памяти**» — но `join` именно держит. Счётчик `total` спасает от OOM сверх лимита (10 МБ), так что катастрофы нет, но при 100 параллельных загрузках это ~1 ГБ RSS, и комментарий вводит в заблуждение. Симметрично `get_file_stream:201-212` читает объект целиком (`await obj["Body"].read()`), а `download_task_result` (`app/routers/tasks.py:170-174`) отдаёт это одним `yield` — `StreamingResponse` не стримит. Комментарии в обоих местах честно помечают это как «переедем на iter_chunks (этап 14)», но этап 14 уже накатан по сетке миграций.
-- **Suggestion:** `aioboto3` client поддерживает `upload_fileobj` (стримит file-like) и `obj["Body"].iter_chunks()`. Перевести `upload_file` на `upload_fileobj`, `get_file_stream` — на async-генератор, `download_task_result` — на прямую передачу генератора в `StreamingResponse`. Заодно поправить комментарий на 126.
-
-### [SECURITY] Декодирование пользовательского изображения без явного лимита на «бомбу»
-- **File:** `app/utils/image_processing.py:49-51`, вызов `worker/handlers/file_handler.py:82`
-- **Description:** `make_variant` делает `Image.open(io.BytesIO(image_bytes))` + `exif_transpose` над байтами, пришедшими из пользовательской загрузки. Декомпрессионная бомба (сильно сжатый PNG/WebP 20000×20000 в пределах 10 МБ лимита) при декодировании развернётся в сотни МБ/несколько ГБ в RAM воркера. Pillow по умолчанию бросает `DecompressionBombError` при превышении `~2× MAX_IMAGE_PIXELS` (~178 Мп), так что воркер не упадёт намертво (ошибка ловится в `process_image_task` → `mark_failed`), но (а) защита неявная и зависит от дефолта Pillow, (б) даже допустимые крупные изображения тратят память до проверки.
-- **Note:** Магические байты на загрузке валидируются, но они не ограничивают пиксельные размеры.
-- **Suggestion:** Явно задать `Image.MAX_IMAGE_PIXELS` под доменный потолок (например, 50 Мп) в `image_processing.py` и/или проверять `img.size` до полного декода. Сделать guard явным, не полагаясь на дефолт библиотеки.
-
-### [TESTING] Покрытие узкое; новый код почти не покрыт
-- **Files:** `tests/` (8 unit + 3 security/service файла)
-- **Description:** Есть хорошие unit-тесты: `test_official_context.py`, `test_official_templates.py`, `test_docx_render.py`, `test_image_processing.py`, `test_show_rules.py`, `test_names.py`, `test_security.py`, `test_ad_helpers.py`, плюс security (`test_auth_security`, `test_sanitization`, `test_schemas_security`). НЕ покрыто:
-  - rate-limit Lua (`progressive_ban.py`) — критичен, чистая бизнес-логика бана;
-  - idempotency middleware (in-flight lock, identity-namespacing, лимит тела);
-  - `requeue_stuck_tasks` / `_QUEUE_FOR_TASK_TYPE` — где как раз сидит Major #1; тест «stuck official-doc task перепубликована» поймал бы баг;
-  - outbox dispatcher (per-event commit, backoff);
-  - репозитории и любой integration-test через `httpx.AsyncClient` + реальный/контейнерный PG;
-  - ACL `get_file` vs `download_task_result` (Major #2).
-- **Suggestion:** Добавить как минимум: тест карты `_QUEUE_FOR_TASK_TYPE` на полноту по `DocumentKind`; middleware-тесты idempotency/rate-limit; один happy-path integration-тест на upload→variants. ruff + mypy/pyright в CI (см. Minor).
+### [BUILD/DEPENDENCIES] Committed `packages/` wheel cache is incomplete and does not match the documented offline-install flow
+- File: `requirements.txt:4`, `scripts/download_packages.sh:21`, `packages/`
+- Description: `requirements.txt` declares the runtime deps and the header says
+  *"Для офлайн-установки: scripts/download_packages.sh"*. But:
+  - The download script writes to **`offline_packages/`**, while the directory
+    actually committed to git is **`packages/`** — two different names.
+  - `packages/` is **missing every heavy runtime dependency that the app imports
+    at module load**: `passlib`, `python-jose`, `bcrypt`, `boto3`, `aioboto3`,
+    `Pillow`, `aiofiles`, `python-magic`, `reportlab`, `docxtpl`, `aiosmtplib`,
+    `APScheduler`, `structlog`, `bleach` (verified: none present). The wheels that
+    *are* committed are a partial set (fastapi, pydantic_core, starlette, redis,
+    jinja2, httpx, uvicorn, …), several platform-pinned (`cp313-win_amd64`).
+  - Therefore `pip install --no-index --find-links=packages/ -r requirements.txt`
+    cannot succeed, and even if it did the app would `ImportError` on first load
+    (`app/utils/security.py` imports passlib/jose; `app/middleware/sanitization.py`
+    imports bleach; `app/services/file_storage.py` imports aioboto3).
+- Note: This is not a correctness bug in the running app (a normal online
+  `pip install` works), but it makes the repo misleading and bloats history with
+  ~70 binary wheels, including OS/Python-specific ones that won't install on Linux
+  containers (the Dockerfile builds on its own).
+- Suggestion: Decide on one mechanism. Either (a) remove `packages/` from git,
+  add it to `.gitignore`, and rely on `download_packages.sh` → `offline_packages/`
+  on demand; or (b) if a committed offline cache is genuinely required, regenerate
+  it from the full `requirements.txt` for the target platform and rename it to
+  match the script. Don't ship a partial, platform-pinned cache.
 
 ---
 
 ## Minor Issues 🟡
 
-### [PERFORMANCE/CORRECTNESS] Sanitization middleware прогоняет bleach по ВСЕМ строкам и пересобирает JSON на каждый запрос
-- **File:** `app/middleware/sanitization.py:32-33, 47-59`
-- **Description:** `bleach.clean(value, tags=[], strip=True)` применяется рекурсивно ко всем строковым значениям любого `application/json`-запроса. Помимо XSS-тегов это **молча мутирует легитимные данные**: описание собаки `"Чёрный & белый"` или кличка `"A<B"` превратятся в `"Чёрный &amp; белый"` / `"A"`. Плюс на каждый JSON-запрос идёт `json.loads` + полный рекурсивный обход + `json.dumps` — фиксированный налог на горячем пути.
-- **Note:** Sensitive-поля исключены (правильно), но контентные поля — нет.
-- **Suggestion:** Рассмотреть санитизацию точечно на уровне Pydantic-валидаторов конкретных полей (description/bio), а не глобально на сырых байтах. Минимально — задокументировать, что экранирование `&/<` ожидаемо, чтобы не словить «почему в БД &amp;».
+### [DEPENDENCIES] Unpinned versions / no lockfile
+- File: `requirements.txt:8`, `requirements-dev.txt`
+- Description: All deps use `>=` floors with no upper bound and no lockfile
+  (`requirements.lock` / `pip-tools` / hashes). Builds are non-reproducible and
+  exposed to a breaking or malicious upstream release. The codebase already shows
+  the cost of this (`bcrypt<4.1` had to be capped because passlib broke — good
+  catch, but it argues for pinning the rest too).
+- Note: `requirements.txt:19` documents one real cap with rationale:
+  *"passlib 1.7.4 несовместим с bcrypt>=4.1 (ломает verify: 'password > 72 bytes')"* —
+  respect that line; the suggestion is to extend the discipline, not change it.
+- Suggestion: Generate a hashed lockfile (`pip-compile --generate-hashes`) and
+  install from it in CI/Docker; keep `requirements.txt` as the human-edited input.
 
-### [ARCHITECTURE] Дублирование строковых литералов типов задач и очередей
-- **File:** `app/services/scheduler.py:297`, `app/schemas/task.py:63-71`, `app/routers/files.py:39-40`, `worker/main.py`
-- **Description:** Имена типов/очередей раскиданы строковыми литералами по нескольким модулям и должны вручную держаться синхронными (см. Major #1 — рассинхрон уже привёл к багу).
-- **Suggestion:** Единый источник: маппинг `DocumentKind → queue` рядом с enum; image-тип/очередь — константы из одного места.
+### [HYGIENE] Binary wheels checked into version control
+- File: `packages/*.whl`
+- Description: ~70 `.whl` files (incl. compiled `cp313-cp313-win_amd64`) live in
+  git. This bloats clones, churns history on every dep bump, and ties artifacts to
+  one interpreter/OS. See the Major packaging finding for the consolidation plan.
+- Suggestion: Move to `.gitignore`; fetch on demand.
 
-### [TECH-DEBT] Legacy in-memory `task_storage` сосуществует с DB-tasks
-- **File:** `app/services/task_storage.py`, `app/routers/tasks.py:66-117`
-- **Description:** Учебный pika-пример (`/tasks/send`, `/tasks/{id}/status`, in-memory fallback в `GET /tasks/{id}`) живёт рядом с боевой DB-моделью. Двойной путь усложняет чтение и оставляет потенциальную путаницу ID-пространств.
-- **Suggestion:** После того как все клиенты переехали на DB-tasks — удалить legacy-ветку (отмечено и в прошлом отчёте, рекомендация #16).
+### [DOCS] Idempotency middleware runs *before* Sanitization, contradicting its own ordering comment
+- File: `app/main.py:109`, `app/middleware/idempotency.py:119`
+- Description: The comment in `main.py` states the intended order is
+  *"3. Idempotency — после sanitization (тело уже чистое), но до handler'а"*.
+  Given Starlette executes middleware in reverse-addition order, the actual
+  request-path order is `ProxyHeaders → SecurityHeaders → Idempotency →
+  Sanitization → RequestId → handler` — i.e. Idempotency sees the **raw**
+  (un-sanitized) body, not a clean one. This is harmless for correctness (the
+  body hash is computed on the raw body consistently across retries, and the
+  handler still receives the sanitized body), but the documented rationale is
+  wrong and will mislead the next maintainer who reasons about ordering.
+- Suggestion: Fix the comment to describe the real order, or, if "hash the
+  sanitized body" is actually desired, move `add_middleware(IdempotencyMiddleware)`
+  to be added *before* `SanitizationMiddleware`.
 
-### [PYTHON] Импорты внутри функций (косметика)
-- **Files:** `app/services/email.py:137` (`import re` в `_strip_html`), точечные `import` в теле функций в `scheduler.py`/`notification.py` (по прошлому отчёту).
-- **Description:** Циклов в этих местах нет — импорт можно поднять в шапку; микро-стоимость на каждый вызов + ruff `E402`-подобный запах.
-- **Suggestion:** Поднять в module-level.
+### [DOCS] Worker message docstrings contradict the swallow-and-ack code
+- File: `worker/main.py:67`, `worker/main.py:96`
+- Description: `on_document_message` / `on_image_message` docstrings say
+  *"Если хендлер бросает исключение наружу, ack не делается и RabbitMQ
+  переотправит сообщение позднее"*, but the body wraps the call in
+  `try/except Exception: logger.exception(...)`, so the exception never escapes
+  `message.process(requeue=False)` → the message is **always** acked. The handler
+  itself records `task.status='failed'`, so the behaviour is intentional and fine;
+  only the docstring is stale and self-contradictory.
+- Suggestion: Update the docstring to say the message is acked regardless and the
+  failure is persisted in `task.status`, matching the actual `requeue=False`
+  design.
 
-### [TOOLING] ruff/mypy в зависимостях, но без признаков CI-гейта
-- **File:** `requirements-dev.txt:17-18`, отсутствие CI-конфига в `git ls-files`
-- **Description:** `ruff`/`mypy` объявлены, но нет workflow, который бы их прогонял. Часть Minor-находок (неиспользуемые импорты, импорты в теле) ловится автоматически.
-- **Suggestion:** Добавить минимальный CI: `ruff check`, `mypy app`, `pytest`. Это дёшево и защищает от регрессий при правке inline-комментариев.
+### [CORRECTNESS] Rate-limit sorted-set member can collide under same-instant bursts
+- File: `app/middleware/progressive_ban.py:56`
+- Description: The Lua script stores each request as
+  `zadd(rate_key, now, tostring(now))` where `now = time.time()`. If two requests
+  from one IP land in the same float instant, they map to the same member and
+  `ZADD` updates the score instead of adding a second entry → the window
+  under-counts by one. Extremely unlikely at human request rates, but it slightly
+  weakens the limiter exactly under burst conditions, which is when it matters.
+- Suggestion: Make the member unique, e.g. append a counter:
+  `redis.call('zadd', rate_key, now, now .. ':' .. redis.call('incr', seq_key))`,
+  or include the request id. Keep the score as `now` for the sliding window.
+
+### [SECURITY/CONFIG] Weak default credentials in docker-compose
+- File: `docker-compose.yml:36`, `:55`, `:88`
+- Description: `POSTGRES_PASSWORD:-showtail`, `RABBITMQ_DEFAULT_PASS:-guest`,
+  `MINIO_ROOT_PASSWORD:-showtailminio` default to weak values if env vars are
+  unset. `SECRET_KEY` is correctly *required* (`${SECRET_KEY}` with no default),
+  and `.env.example:SECRET_KEY=change-me-in-production` is an obvious placeholder.
+- Note: The compose file already documents that the host-exposed PG port is for
+  dev convenience (`docker-compose.yml:38`), so this is mostly a prod-deploy
+  reminder, not a code defect.
+- Suggestion: Document in the deploy runbook that all `*_PASSWORD`/`*_KEY` must be
+  set in prod, or drop the `:-default` fallbacks for the secret-bearing vars so a
+  missing value fails loudly instead of silently using `guest`.
+
+### [TESTING] Critical infrastructure paths lack tests
+- File: `tests/integration/` (no coverage for the modules below)
+- Description: Integration tests exist for auth flow, classifieds, delete
+  endpoints, file ACL, notifications-read and showcase — good coverage of
+  business endpoints. But several **security/availability-critical** mechanisms
+  have no visible tests:
+  - refresh-token **rotation + reuse-attack revocation** (`services/auth.py:185`),
+  - the **idempotency** middleware (cache hit, in-flight 409, body-size skip),
+  - the **progressive rate-limiter** Lua path and `fail_closed` behaviour,
+  - ~~the **ws_manager** pub/sub fan-out~~ — ✅ now covered by
+    `tests/unit/test_ws_manager.py` (added in this pass; a subscription test
+    caught the stale-binding bug).
+- Suggestion: Add focused tests for refresh rotation/reuse and the rate-limiter
+  next (highest remaining security value).
 
 ---
 
 ## Positive observations ✅
 
-- **Системная вычитка безопасности доведена до конца:** находки прошлого аудита (`bug_XXX audit 2026-05-28`, `review 2026-05-28`) реально закрыты в коде, а не только в TODO — проверено по файлам.
-- **Constant-time login** (`dummy_verify_password`, ленивый кэш) + единое сообщение «Неверный email или пароль» + user-enumeration-safe `register_user` (тихий `None` на занятый email через `IntegrityError`).
-- **Refresh-token rotation с reuse-detection** (`app/services/auth.py:151-204`): повторное предъявление отозванного токена аннулирует всю цепочку юзера.
-- **Rate-limit атомарным Lua-скриптом** с per-call `fail_closed` для auth-эндпоинтов (`app/middleware/progressive_ban.py`) — корректный trade-off доступность/безопасность.
-- **Transactional outbox** с per-event commit, экспоненциальным backoff и `SELECT FOR UPDATE SKIP LOCKED` (`worker/handlers/outbox_handler.py`) — архитектурно правильный at-least-once.
-- **Distributed lock** для cron-задач (`_scheduler_lock`) — при репликах>1 не дублирует UPDATE'ы.
-- **Magic-bytes валидация** загрузок вместо доверия `Content-Type` (`file_storage._detect_file_type`).
-- **CPU-bound вынесен в поток:** и Pillow-варианты (`asyncio.to_thread(make_variant, …)`), и docxtpl-рендер (`_render_official`) не блокируют event loop воркера.
-- **PDF-эскейп пользовательского ввода** (`_esc`) с явным комментарием, почему markup ставится в шаблоне, а не в данных.
-- **RFC 6266 `filename*`** на скачивании — закрывает header-injection через `original_filename` (bug_202), применён единообразно в `files.py` и `tasks.py`.
-- **JWT decode** с явными `require_exp`/`require_sub` и проверкой `type == "access"` в `get_current_user`.
-- **Идемпотентность генерации вариантов** (`file_handler._generate_variants` сносит прежние варианты в БД+MinIO перед пересозданием).
-- **Пул соединений и `pool_pre_ping`/`pool_recycle`** вынесены в конфиг с подробным обоснованием sizing'а (`app/config.py:94-112`).
-- **Inline-комментарии с обоснованием решений** — по-прежнему лучшая практика проекта: делают ревью дешёвым и фиксируют «почему так».
+- **User-enumeration hardening is consistent end-to-end**: register/resend/login
+  all return identical responses regardless of account existence, with a
+  constant-time `dummy_verify_password()` on the no-user login path
+  (`services/auth.py:152`, `utils/security.py:37`).
+- **Refresh-token rotation with reuse detection** revokes the whole chain on a
+  replayed token (`services/auth.py:204`) — textbook defense-in-depth.
+- **N+1 elimination is deliberate and documented**: the official-document builders
+  bulk-load every relation via `_load_map` / `selectinload` instead of per-row
+  `db.get` (`services/document_official.py:43`), turning "thousands of round-trips
+  for a 1000-dog catalog" into a handful of `WHERE id IN (...)` queries.
+- **Transactional outbox** with `SELECT … FOR UPDATE SKIP LOCKED`
+  (`repositories/outbox.py:48`) lets multiple dispatchers run safely in parallel.
+- **Atomic Redis rate-limiting** moved into a single Lua script to close a
+  genuine check-then-act race (`middleware/progressive_ban.py:20`).
+- **Jinja autoescape bug fix** for the `.j2` extension is exactly right and the
+  comment explains the silent-XSS it closed (`services/email.py:43`).
+- **Poison-message caps** (`MAX_TASK_ATTEMPTS`) + DLX queues prevent stuck tasks
+  from looping forever (`worker/handlers/document_handler.py:38`).
+- **Blocking work offloaded** with `asyncio.to_thread` for both docxtpl and Pillow
+  — no event-loop stalls in the worker.
+- **No bare `except:`**, no mutable default args, no wildcard imports observed;
+  every broad `except Exception` is annotated and intentional.
 
 ---
 
 ## Recommendations
 
-**P0 (до prod / до следующей выкатки документов):**
-1. Дополнить `_QUEUE_FOR_TASK_TYPE` всеми актуальными типами (официальные docs + `process_image`) и/или не выставлять `pending` при отсутствии очереди — `app/services/scheduler.py`. **(Major #1)**
-2. Закрыть `GET /files/{id}` для приватных документов: признак `is_public` на `UploadedFile` либо auth+owner-проверка — `app/routers/files.py`. **(Major #2)**
-
-**P1 (производительность/устойчивость):**
-3. Убрать N+1 в `document_official` через `selectinload`/`IN`-выборки. **(Major #3)**
-4. Реальный стриминг: `upload_fileobj` + `iter_chunks` + `StreamingResponse`-генератор; поправить вводящий в заблуждение комментарий в `upload_file`. **(Major #4)**
-5. Явный `Image.MAX_IMAGE_PIXELS` / проверка размеров перед декодом. **(Major #5)**
-
-**P2 (качество):**
-6. Тесты: полнота `_QUEUE_FOR_TASK_TYPE` по `DocumentKind`; middleware (idempotency, rate-limit); integration upload→variants; ACL `get_file`. **(Major #6)**
-7. CI-гейт: `ruff` + `mypy` + `pytest`.
-8. Пересмотреть глобальную bleach-санитизацию → точечные Pydantic-валидаторы.
-9. Единый источник маппинга типов/очередей.
-
-**P3 (опционально):**
-10. Удалить legacy `task_storage` после миграции клиентов на DB-tasks.
-11. Поднять локальные `import` в шапки модулей.
+1. ✅ **Done — `ws_manager` stale-binding fixed** (module import + tests). This
+   was the only finding affecting a running instance: support-chat pub/sub now
+   actually engages Redis instead of silently degrading to local-only delivery.
+2. **Resolve the packaging story** — either delete `packages/` from git or
+   regenerate a complete, platform-correct cache that matches
+   `download_packages.sh`. Right now the offline path is broken and the repo
+   carries misleading binary artifacts.
+3. **Introduce a hashed lockfile** for reproducible, supply-chain-safe builds;
+   keep the well-reasoned `bcrypt<4.1` pin.
+4. **Reconcile the stale comments** in `main.py` (middleware order) and
+   `worker/main.py` (ack semantics) so future maintainers trust the comments —
+   which, across the rest of this codebase, are genuinely excellent.
+5. **Backfill tests** for refresh rotation, the rate-limiter, idempotency, and a
+   concurrent-connect case for `ws_manager`.

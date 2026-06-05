@@ -67,8 +67,14 @@ IMAGE_TASK_QUEUE = "image_task"
 async def on_document_message(message: aio_pika.abc.AbstractIncomingMessage):
     """
     Обёртка вокруг process_document_task: парсит тело, создаёт сессию БД,
-    вызывает хендлер. Если хендлер бросает исключение наружу, ack не
-    делается и RabbitMQ переотправит сообщение позднее.
+    вызывает хендлер.
+
+    ИСПРАВЛЕНО (docstring): исключение хендлера ловится здесь и
+    логируется — наружу из message.process(requeue=False) оно НЕ уходит,
+    поэтому сообщение ack'ается в любом случае, повторной доставки нет.
+    Это сознательно: process_document_task сам фиксирует исход в
+    task.status ('failed'), а requeue=False не дал бы стабильной ошибке
+    (битый payload) крутиться в очереди — она ушла бы в DLX.
     """
     async with message.process(requeue=False):
         # requeue=False: при ошибке сообщение НЕ возвращается в очередь

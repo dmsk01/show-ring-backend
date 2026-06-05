@@ -106,7 +106,12 @@ register_error_handlers(app)
 # Идём от "ближе к handler'у" → "ближе к сети":
 #   1. RequestId      — добавить ID до всего остального (логи)
 #   2. Sanitization   — чистить тело до бизнес-логики
-#   3. Idempotency    — после sanitization (тело уже чистое), но до handler'а
+#   3. Idempotency    — ближе к сети, чем Sanitization, поэтому
+#                       ВЫПОЛНЯЕТСЯ ПЕРЕД ней: body_hash считается по
+#                       СЫРОМУ телу. Это корректно — hash стабилен между
+#                       ретраями клиента, а handler всё равно получает
+#                       очищенное тело (Sanitization выполняется
+#                       внутреннее и перезаписывает _body после нас).
 #   4. SecurityHeaders — на ответ всегда, последним в pipeline
 #   5. ProxyHeaders   — ВЫПОЛНЯЕТСЯ ПЕРВЫМ (сетевой уровень): подменяем
 #                       client IP до того, как rate-limit/ad-fraud его
