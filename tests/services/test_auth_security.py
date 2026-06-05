@@ -84,7 +84,7 @@ async def test_login_no_user_calls_dummy_verify(monkeypatch):
     dummy_mock = MagicMock()
     monkeypatch.setattr(auth_service, "dummy_verify_password", dummy_mock)
 
-    with pytest.raises(ValueError, match="Неверный email или пароль"):
+    with pytest.raises(ValueError, match="invalid_credentials"):
         await auth_service.login_user(
             _fake_session(), "ghost@example.com", "whatever"
         )
@@ -98,7 +98,7 @@ async def test_login_blocked_user_rejected(monkeypatch):
         user_repo, "get_user_by_email", AsyncMock(return_value=user)
     )
 
-    with pytest.raises(ValueError, match="заблокирован"):
+    with pytest.raises(ValueError, match="user_blocked"):
         await auth_service.login_user(
             _fake_session(), "alice@example.com", "CorrectPass1"
         )
@@ -157,7 +157,7 @@ async def test_refresh_reuse_attack_revokes_all(monkeypatch):
         user_repo, "revoke_all_refresh_tokens_for_user", revoke_all_mock
     )
 
-    with pytest.raises(ValueError, match="Невалидный токен"):
+    with pytest.raises(ValueError, match="invalid_or_expired_token"):
         await auth_service.refresh_access_token(_fake_session(), "raw-token")
     # первый аргумент — сессия (ANY), второй — user_id отозванного токена
     revoke_all_mock.assert_awaited_once_with(ANY, db_tok.user_id)
@@ -173,7 +173,7 @@ async def test_refresh_expired_token_rejected(monkeypatch):
     revoke_mock = AsyncMock()
     monkeypatch.setattr(user_repo, "revoke_refresh_token", revoke_mock)
 
-    with pytest.raises(ValueError, match="Невалидный токен"):
+    with pytest.raises(ValueError, match="invalid_or_expired_token"):
         await auth_service.refresh_access_token(_fake_session(), "raw-token")
     revoke_mock.assert_not_called()
 
@@ -196,7 +196,7 @@ async def test_verify_email_race_rejected(monkeypatch):
         user_repo, "mark_email_token_used", AsyncMock(return_value=0)
     )
 
-    with pytest.raises(ValueError, match="Невалидный токен"):
+    with pytest.raises(ValueError, match="invalid_or_expired_token"):
         await auth_service.verify_email(_fake_session(), "raw-token")
 
 
@@ -206,5 +206,5 @@ async def test_logout_unknown_token_rejected(monkeypatch):
         user_repo, "revoke_refresh_token", AsyncMock(return_value=0)
     )
 
-    with pytest.raises(ValueError, match="не найден"):
+    with pytest.raises(ValueError, match="invalid_or_expired_token"):
         await auth_service.logout_user(_fake_session(), "raw-token")
