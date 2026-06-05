@@ -47,8 +47,36 @@ services:
 
   # Воркеры на dev тоже подхватывают код через bind-mount. uvicorn
   # --reload им не нужен, но при изменении кода нужно вручную
-  # перезапустить контейнер: `docker compose restart worker`.
+  # перезапустить контейнер: `docker compose restart <worker>`.
+  #
+  # ВАЖНО (анти-«лавина образов»): bind-mount нужен КАЖДОМУ воркеру,
+  # иначе правка кода требует `docker compose build <worker>` → новый
+  # образ забирает тег :latest, прежний осиротевает в <none> (~350 MB).
+  # 7 сервисов из одного Dockerfile = до 7 dangling-образов за ребилд.
+  # С монтированием код меняется рестартом, образы не плодятся.
+  # Профильные (events) воркеры монтируем тоже — иначе они отстают от
+  # api по коду (как было с этапом 16).
   worker:
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+
+  worker-files:
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+
+  worker-events:
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+
+  worker-email:
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+
+  worker-outbox:
     volumes:
       - ./app:/app/app
       - ./worker:/app/worker
