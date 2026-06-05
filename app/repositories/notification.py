@@ -181,9 +181,20 @@ async def list_user_notifications(
 
 
 async def count_unread_notifications(
-    db: AsyncSession, user_id: uuid.UUID
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    channel: NotificationChannel | None = None,
 ) -> int:
-    """Число непрочитанных уведомлений пользователя (read_at IS NULL)."""
+    """
+    Число непрочитанных уведомлений пользователя (read_at IS NULL).
+
+    channel — тот же необязательный фильтр, что в list_user_notifications.
+    Колокольчик передаёт in_app, чтобы бейдж считал ТОЛЬКО пункты ленты, а
+    не журнал доставки email (email-уведомления вечно read_at IS NULL —
+    письма «читают» в почте, не в колокольчике, — и без фильтра давали бы
+    несбрасываемый фантомный счётчик). channel=None → все каналы.
+    """
     stmt = (
         select(func.count())
         .select_from(Notification)
@@ -192,16 +203,25 @@ async def count_unread_notifications(
             Notification.read_at.is_(None),
         )
     )
+    if channel is not None:
+        stmt = stmt.where(Notification.channel == channel)
     return (await db.execute(stmt)).scalar_one()
 
 
 async def mark_all_notifications_read(
-    db: AsyncSession, user_id: uuid.UUID
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    channel: NotificationChannel | None = None,
 ) -> int:
     """
     Помечает все непрочитанные уведомления пользователя прочитанными
     одним атомарным UPDATE. Возвращает число затронутых строк (сколько
     реально пометили) — фронт может показать «отмечено N».
+
+    channel — как в count_unread_notifications: «отметить всё прочитанным»
+    из колокольчика бьёт по in_app, не трогая журнал email-доставки.
+    channel=None → все каналы.
     """
     stmt = (
         update(Notification)
@@ -211,6 +231,8 @@ async def mark_all_notifications_read(
         )
         .values(read_at=datetime.now(timezone.utc))
     )
+    if channel is not None:
+        stmt = stmt.where(Notification.channel == channel)
     result = await db.execute(stmt)
     await db.commit()
     return getattr(result, "rowcount", 0)
@@ -238,7 +260,10 @@ async def create_mock_notifications(
         n = Notification(
             user_id=user_id,
             event_type=event_type,
-            channel=NotificationChannel.email,
+            # in_app — сидер существует для отладки КОЛОКОЛЬЧИКА (лента/
+            # бейдж/read-all). Раньше мок создавался в канале email и не
+            # попадал в in_app-ленту, ради которой и нужен.
+            channel=NotificationChannel.in_app,
             subject=f"{subject} (#{i + 1})",
             status=NotificationStatus.sent,
             sent_at=datetime.now(timezone.utc),

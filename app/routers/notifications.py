@@ -155,10 +155,14 @@ async def list_my_notifications(
     summary="Число непрочитанных уведомлений",
 )
 async def get_unread_count(
+    # channel — по умолчанию in_app: бейдж колокольчика считает только
+    # ленту, а не журнал email-доставки (иначе фантомный счётчик, см.
+    # repo.count_unread_notifications). Можно переопределить ?channel=email.
+    channel: NotificationChannel = Query(NotificationChannel.in_app),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    unread = await repo.count_unread_notifications(db, user.id)
+    unread = await repo.count_unread_notifications(db, user.id, channel=channel)
     return UnreadCountResponse(unread=unread)
 
 
@@ -168,10 +172,14 @@ async def get_unread_count(
     summary="Отметить все уведомления прочитанными",
 )
 async def mark_all_read(
+    # См. get_unread_count: по умолчанию закрываем in_app-ленту, не трогая
+    # журнал email-доставки. Симметрично бейджу, чтобы «отметить всё» гасило
+    # ровно то, что в нём посчитано.
+    channel: NotificationChannel = Query(NotificationChannel.in_app),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    marked = await repo.mark_all_notifications_read(db, user.id)
+    marked = await repo.mark_all_notifications_read(db, user.id, channel=channel)
     return MarkAllReadResponse(marked=marked)
 
 

@@ -38,10 +38,12 @@ async def _make_user(client) -> tuple[uuid.UUID, str]:
 
 
 async def _make_notification(db_session, user_id: uuid.UUID) -> uuid.UUID:
+    # in_app — это «колокольчиковый» канал. unread-count/read-all считают
+    # именно его (email-уведомления — лог доставки писем, не пункты ленты).
     n = Notification(
         user_id=user_id,
         event_type="dog.title_earned",
-        channel=NotificationChannel.email,
+        channel=NotificationChannel.in_app,
         subject="Ваша собака получила титул",
         status=NotificationStatus.sent,
     )
@@ -148,3 +150,24 @@ async def test_seed_endpoint_requires_debug(client, monkeypatch):
 
     r = await client.get("/notifications/unread-count", headers=auth)
     assert r.json()["unread"] == 4
+
+
+async def test_registration_email_not_counted_in_bell(client):
+    """
+    Регрессия: регистрация создаёт Notification-лог письма-подтверждения
+    (channel=email, см. enqueue_transactional_email, этап 19). Этот лог
+    доставки НЕ должен попадать в колокольчик (in_app) — иначе у свежего
+    пользователя висит «фантомный» непрочитанный бейдж, который нечем
+    закрыть (в in_app-ленте такого пункта нет).
+    """
+    _uid, token = await _make_user(client)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    # Колокольчик (in_app) пуст: email-лог сюда не считается.
+    r = await client.get("/notifications/unread-count", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["unread"] == 0
+
+    # read-all по in_app тоже нечего отмечать (email-лог не трогаем).
+    r = await client.patch("/notifications/read-all", headers=auth)
+    assert r.json()["marked"] == 0
