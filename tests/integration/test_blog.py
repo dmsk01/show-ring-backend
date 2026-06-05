@@ -196,3 +196,41 @@ async def test_content_sanitized_on_create(client, db_session):
     assert "<p>ok</p>" in content
     # Относительная картинка сохраняется.
     assert '<img src="/files/1"' in content
+
+
+# ---------------------------------------------------------------------
+# видимость черновиков (аудит H1)
+# ---------------------------------------------------------------------
+
+
+async def test_draft_hidden_from_anonymous_list(client, db_session):
+    author = await _author(db_session)
+    await _post(db_session, author, slug="pub-1", publish=PostPublish.published)
+    await _post(db_session, author, slug="draft-1", publish=PostPublish.draft)
+
+    r = await client.get("/posts")
+    assert r.status_code == 200, r.text
+    slugs = [c["slug"] for c in r.json()["items"]]
+    assert "pub-1" in slugs
+    assert "draft-1" not in slugs  # черновик не виден анониму
+
+
+async def test_draft_detail_404_for_anonymous(client, db_session):
+    author = await _author(db_session)
+    post = await _post(db_session, author, slug="draft-2", publish=PostPublish.draft)
+
+    r = await client.get(f"/posts/{post.slug}")
+    assert r.status_code == 404  # черновик по slug анониму недоступен
+
+
+async def test_draft_visible_to_admin(client, db_session):
+    _uid, token = await _make_admin(client, db_session)
+    author = await _author(db_session)
+    post = await _post(db_session, author, slug="draft-3", publish=PostPublish.draft)
+
+    # Админ видит черновик и в detail, и в списке с ?publish=draft.
+    r = await client.get(f"/posts/{post.slug}", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    r = await client.get("/posts?publish=draft", headers=_auth(token))
+    slugs = [c["slug"] for c in r.json()["items"]]
+    assert "draft-3" in slugs

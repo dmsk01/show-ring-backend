@@ -25,6 +25,45 @@ WS_CLOSE_RATE_LIMITED = 4429
 # как JSON-эндпоинт для прикладных клиентов.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
+# Необязательная аутентификация (аудит H1): для публичных ручек, которым
+# нужно ЗНАТЬ пользователя, если токен есть (например, показать черновики
+# блога writer'у), но не требовать его — аноним просто получает публичный
+# срез. auto_error=False → отсутствие заголовка не даёт 401, отдаёт None.
+oauth2_scheme_optional = OAuth2PasswordBearer(
+    tokenUrl="/auth/token", auto_error=False
+)
+
+
+async def get_current_user_optional(
+    db: AsyncSession = Depends(get_db),
+    token: str | None = Depends(oauth2_scheme_optional),
+) -> User | None:
+    """Текущий пользователь или None. Любая ошибка токена → None (не 401):
+    публичная ручка продолжает работать как для анонима."""
+    if not token:
+        return None
+    try:
+        payload = decode_access_token(token)
+    except JWTError:
+        return None
+    if payload.get("type") != "access":
+        return None
+    try:
+        uid = UUID(payload.get("sub", ""))
+    except (ValueError, TypeError):
+        return None
+    user = await get_user_by_id(db, uid)
+    if user is None or not user.is_active:
+        return None
+    return user
+
+
+def is_writer(user: User | None) -> bool:
+    """admin или organizer — роль, которой можно писать/видеть черновики блога."""
+    if user is None:
+        return False
+    return any(r.role.value in ("admin", "organizer") for r in user.roles)
+
 
 async def get_current_user(
     db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme)

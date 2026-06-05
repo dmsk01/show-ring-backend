@@ -19,7 +19,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_any_role
+from app.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    is_writer,
+    require_any_role,
+)
 from app.models.post import PostPublish
 from app.models.user import User
 from app.repositories import post as repo
@@ -52,7 +57,12 @@ async def list_posts(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user_optional),
 ):
+    # Аудит H1: публичная витрина отдаёт только published. Черновики видит
+    # лишь writer (admin/organizer) и только если сам их запросил.
+    if not is_writer(user):
+        publish = PostPublish.published
     items = await repo.list_page(
         db, publish=publish, query=query, page=page, per_page=per_page
     )
@@ -83,9 +93,16 @@ async def related_posts(
 
 
 @router.get("/{slug}", response_model=PostResponse, summary="Пост по slug")
-async def get_post(slug: str, db: AsyncSession = Depends(get_db)):
+async def get_post(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user_optional),
+):
     post = await repo.get_by_slug(db, slug)
     if post is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
+    # Аудит H1: черновик доступен только writer'у; анониму — как будто нет.
+    if post.publish != PostPublish.published and not is_writer(user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
     return to_response(post)
 
