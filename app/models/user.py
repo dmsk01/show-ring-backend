@@ -129,6 +129,12 @@ class RefreshToken(Base):
 class EmailVerificationToken(Base):
     __tablename__ = "email_verification_tokens"
 
+    # Аудит L2: одна таблица обслуживает две операции — подтверждение
+    # регистрации и подтверждение смены email. purpose строго разделяет их,
+    # чтобы токен одной операции нельзя было предъявить в эндпоинте другой.
+    PURPOSE_VERIFY = "verify"
+    PURPOSE_EMAIL_CHANGE = "email_change"
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
@@ -137,6 +143,11 @@ class EmailVerificationToken(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
     )
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # purpose — verify | email_change. server_default 'verify': легаси-строки
+    # (созданные до миграции) трактуем как регистрационные.
+    purpose: Mapped[str] = mapped_column(
+        String(32), default=PURPOSE_VERIFY, server_default=PURPOSE_VERIFY
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

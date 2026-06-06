@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.user import EmailVerificationToken
 from app.schemas.user import TokenResponse
 from app.utils.security import (
     create_access_token,
@@ -115,9 +116,12 @@ async def verify_email(db: AsyncSession, raw_token: str):
 
     if (
         not db_token
+        or db_token.purpose != EmailVerificationToken.PURPOSE_VERIFY
         or db_token.expires_at < datetime.now(timezone.utc)
         or db_token.used_at
     ):
+        # Аудит L2: токен смены email (purpose != verify) на /verify-email
+        # не принимаем — строгое разделение операций.
         raise ValueError("invalid_or_expired_token")
 
     # ИСПРАВЛЕНО: атомарное использование токена (race condition):
@@ -296,7 +300,11 @@ async def request_email_change(
     raw_token, token_hash = generate_verification_token()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     await user_repo.create_email_verification_token(
-        db, user.id, token_hash, expires_at
+        db,
+        user.id,
+        token_hash,
+        expires_at,
+        purpose=EmailVerificationToken.PURPOSE_EMAIL_CHANGE,
     )
 
     confirm_url = (
@@ -342,9 +350,12 @@ async def confirm_email_change(
     )
     if (
         not db_token
+        or db_token.purpose != EmailVerificationToken.PURPOSE_EMAIL_CHANGE
         or db_token.expires_at < datetime.now(timezone.utc)
         or db_token.used_at
     ):
+        # Аудит L2: регистрационный токен (purpose != email_change) на
+        # /confirm-email-change не принимаем.
         raise HTTPException(status_code=400, detail="invalid_or_expired_token")
 
     # Атомарно гасим токен (rowcount=0 → уже использован параллельно).

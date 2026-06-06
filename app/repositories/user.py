@@ -96,10 +96,17 @@ async def revoke_all_refresh_tokens_for_user(
 
 
 async def create_email_verification_token(
-    db: AsyncSession, user_id: UUID, token_hash: str, expires_at: datetime
+    db: AsyncSession,
+    user_id: UUID,
+    token_hash: str,
+    expires_at: datetime,
+    purpose: str = EmailVerificationToken.PURPOSE_VERIFY,
 ) -> EmailVerificationToken:
     token = EmailVerificationToken(
-        user_id=user_id, token_hash=token_hash, expires_at=expires_at
+        user_id=user_id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        purpose=purpose,
     )
 
     db.add(token)

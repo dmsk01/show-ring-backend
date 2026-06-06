@@ -9,8 +9,10 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from app.services import auth as auth_service
+from app.models.user import EmailVerificationToken
 from app.repositories import user as user_repo
 from sqlalchemy.exc import IntegrityError
 
@@ -187,6 +189,7 @@ async def test_verify_email_race_rejected(monkeypatch):
     db_tok.user_id = uuid4()
     db_tok.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
     db_tok.used_at = None
+    db_tok.purpose = EmailVerificationToken.PURPOSE_VERIFY
     monkeypatch.setattr(
         user_repo,
         "get_email_verification_token_by_hash",
@@ -198,6 +201,52 @@ async def test_verify_email_race_rejected(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid_or_expired_token"):
         await auth_service.verify_email(_fake_session(), "raw-token")
+
+
+# ---------- L2: разделение токенов verify / email_change ----------
+
+
+async def test_verify_email_rejects_email_change_token(monkeypatch):
+    """Токен смены email нельзя предъявить на /verify-email (аудит L2)."""
+    db_tok = MagicMock()
+    db_tok.user_id = uuid4()
+    db_tok.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    db_tok.used_at = None
+    db_tok.purpose = EmailVerificationToken.PURPOSE_EMAIL_CHANGE
+    monkeypatch.setattr(
+        user_repo,
+        "get_email_verification_token_by_hash",
+        AsyncMock(return_value=db_tok),
+    )
+    mark = AsyncMock()
+    monkeypatch.setattr(user_repo, "mark_email_token_used", mark)
+
+    with pytest.raises(ValueError, match="invalid_or_expired_token"):
+        await auth_service.verify_email(_fake_session(), "raw-token")
+    mark.assert_not_called()  # отвергли по purpose до пометки использования
+
+
+async def test_confirm_email_change_rejects_verify_token(monkeypatch):
+    """Регистрационный токен нельзя предъявить на /confirm-email-change (L2)."""
+    db_tok = MagicMock()
+    db_tok.user_id = uuid4()
+    db_tok.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    db_tok.used_at = None
+    db_tok.purpose = EmailVerificationToken.PURPOSE_VERIFY
+    monkeypatch.setattr(
+        user_repo,
+        "get_email_verification_token_by_hash",
+        AsyncMock(return_value=db_tok),
+    )
+    mark = AsyncMock()
+    monkeypatch.setattr(user_repo, "mark_email_token_used", mark)
+
+    with pytest.raises(HTTPException) as ei:
+        await auth_service.confirm_email_change(
+            _fake_session(), "raw-token", ip=None, user_agent=None
+        )
+    assert ei.value.status_code == 400
+    mark.assert_not_called()
 
 
 async def test_logout_unknown_token_rejected(monkeypatch):
