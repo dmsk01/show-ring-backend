@@ -4,7 +4,19 @@
 и пользователь после регистрации не может войти.
 """
 
-from app.middleware.sanitization import SENSITIVE_FIELDS, _sanitize
+from app.middleware.sanitization import (
+    SENSITIVE_FIELDS,
+    _is_raw_html_route,
+    _sanitize,
+)
+
+
+class _FakeRequest:
+    """Минимальный заменитель Request: только .method и .url.path."""
+
+    def __init__(self, method: str, path: str):
+        self.method = method
+        self.url = type("_U", (), {"path": path})()
 
 
 def test_password_is_not_sanitized():
@@ -40,3 +52,38 @@ def test_sensitive_fields_listed():
     """Smoke-test: список чувствительных полей покрывает базовый набор."""
     must_have = {"password", "refresh_token", "access_token", "token", "api_key"}
     assert must_have.issubset(SENSITIVE_FIELDS)
+
+
+# ---------------------------------------------------------------------
+# raw-HTML passthrough scoped to blog write routes (аудит L3)
+# ---------------------------------------------------------------------
+
+
+def test_content_sanitized_by_default():
+    """Вне blog-ручек поле content чистится как обычный текст (XSS-защита)."""
+    cleaned = _sanitize({"content": "<script>x</script><p>ok</p>"})
+    assert "<script>" not in cleaned["content"]
+
+
+def test_content_passthrough_only_with_raw_fields():
+    """С raw_fields={'content'} (blog-ручка) content проходит как есть —
+    чистит уже сервис своим allowlist'ом."""
+    cleaned = _sanitize(
+        {"content": "<p>ok</p>"}, raw_fields=frozenset({"content"})
+    )
+    assert cleaned["content"] == "<p>ok</p>"
+
+
+def test_sensitive_preserved_without_raw_fields():
+    """Чувствительные поля не зависят от raw_fields — всегда as-is."""
+    cleaned = _sanitize({"password": "a<b>c"})
+    assert cleaned["password"] == "a<b>c"
+
+
+def test_raw_html_route_only_blog_writes():
+    assert _is_raw_html_route(_FakeRequest("POST", "/posts"))
+    assert _is_raw_html_route(_FakeRequest("PUT", "/posts/abc-123"))
+    # GET и другие домены — нет.
+    assert not _is_raw_html_route(_FakeRequest("GET", "/posts"))
+    assert not _is_raw_html_route(_FakeRequest("POST", "/classifieds"))
+    assert not _is_raw_html_route(_FakeRequest("POST", "/posts-other"))
