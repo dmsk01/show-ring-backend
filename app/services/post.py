@@ -57,11 +57,19 @@ async def create_post(db: AsyncSession, fields: dict, author: User) -> Post:
 
 
 async def update_post(
-    db: AsyncSession, post_id: uuid.UUID, fields: dict
+    db: AsyncSession,
+    post_id: uuid.UUID,
+    fields: dict,
+    *,
+    requester_id: uuid.UUID,
+    is_admin: bool,
 ) -> Post:
     obj = await repo.get_by_id(db, post_id)
     if obj is None:
         raise ValueError("not_found")
+    # Аудит L1: organizer правит только свои посты; admin — любые.
+    if obj.author_id != requester_id and not is_admin:
+        raise ValueError("forbidden")
 
     data = dict(fields)
     if "content" in data and data["content"] is not None:
@@ -81,9 +89,18 @@ async def update_post(
     return reloaded
 
 
-async def delete_post(db: AsyncSession, post_id: uuid.UUID) -> None:
+async def delete_post(
+    db: AsyncSession,
+    post_id: uuid.UUID,
+    *,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
     obj = await repo.get_by_id(db, post_id)
     if obj is None:
         raise ValueError("not_found")
+    # Аудит L1: organizer удаляет только свои посты; admin — любые.
+    if obj.author_id != requester_id and not is_admin:
+        raise ValueError("forbidden")
     await db.delete(obj)
     await db.commit()

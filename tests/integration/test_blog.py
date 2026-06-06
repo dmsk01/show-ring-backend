@@ -50,6 +50,17 @@ async def _make_admin(client, db_session) -> tuple[uuid.UUID, str]:
     return uid, token
 
 
+async def _make_writer(
+    client, db_session, role: RoleEnum = RoleEnum.organizer
+) -> tuple[uuid.UUID, str]:
+    """Пользователь с writer-ролью (по умолчанию organizer) — может писать
+    посты, но (не admin) только свои."""
+    uid, token = await _make_user(client)
+    db_session.add(UserRole(user_id=uid, role=role))
+    await db_session.commit()
+    return uid, token
+
+
 async def _author(db_session) -> User:
     u = User(
         email=f"author_{uuid.uuid4().hex[:8]}@example.com", hashed_password="x"
@@ -248,3 +259,49 @@ async def test_posts_list_under_rate_limit_ok(client, db_session):
     for _ in range(5):
         r = await client.get("/posts?query=rl")
         assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------
+# владение постом при правке/удалении (аудит L1)
+# ---------------------------------------------------------------------
+
+
+async def test_post_edit_requires_ownership(client, db_session):
+    _a_id, a_tok = await _make_writer(client, db_session)
+    _b_id, b_tok = await _make_writer(client, db_session)
+    r = await client.post(
+        "/posts", json={"title": "Чужой пост", "content": "<p>x</p>"},
+        headers=_auth(a_tok),
+    )
+    assert r.status_code == 201, r.text
+    post_id = r.json()["id"]
+
+    # B (organizer, не автор) не может править/удалять чужой пост.
+    r = await client.put(
+        f"/posts/{post_id}", json={"title": "Взлом"}, headers=_auth(b_tok)
+    )
+    assert r.status_code == 403, r.text
+    r = await client.delete(f"/posts/{post_id}", headers=_auth(b_tok))
+    assert r.status_code == 403, r.text
+
+    # A (автор) — может.
+    r = await client.put(
+        f"/posts/{post_id}", json={"title": "Правка автора"},
+        headers=_auth(a_tok),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["title"] == "Правка автора"
+
+
+async def test_admin_can_edit_any_post(client, db_session):
+    _a_id, a_tok = await _make_writer(client, db_session)
+    _admin_id, admin_tok = await _make_admin(client, db_session)
+    r = await client.post(
+        "/posts", json={"title": "Под админом", "content": "<p>x</p>"},
+        headers=_auth(a_tok),
+    )
+    post_id = r.json()["id"]
+
+    # Админ может удалить любой пост.
+    r = await client.delete(f"/posts/{post_id}", headers=_auth(admin_tok))
+    assert r.status_code == 204, r.text

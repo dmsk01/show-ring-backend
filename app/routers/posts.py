@@ -25,6 +25,7 @@ from app.redis import get_redis
 from app.dependencies import (
     get_current_user,
     get_current_user_optional,
+    is_admin,
     is_writer,
     require_any_role,
 )
@@ -47,6 +48,15 @@ router = APIRouter(prefix="/posts", tags=["posts"])
 # Write доступен admin/organizer. Один Depends переиспользуем во всех
 # пишущих ручках (как dependencies=[...] в classifieds/admin-роутерах).
 _require_writer = require_any_role("admin", "organizer")
+
+
+def _error_status(code: str) -> int:
+    """ValueError-код сервиса → HTTP-статус."""
+    if code == "not_found":
+        return status.HTTP_404_NOT_FOUND
+    if code == "forbidden":
+        return status.HTTP_403_FORBIDDEN
+    return status.HTTP_400_BAD_REQUEST
 
 
 @router.get("", response_model=PostPage, summary="Список постов (пагинация)")
@@ -143,14 +153,18 @@ async def update_post(
     post_id: uuid.UUID,
     body: PostUpdate,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     try:
         post = await svc.update_post(
-            db, post_id, body.model_dump(exclude_unset=True)
+            db,
+            post_id,
+            body.model_dump(exclude_unset=True),
+            requester_id=user.id,
+            is_admin=is_admin(user),
         )
     except ValueError as e:
-        code = status.HTTP_404_NOT_FOUND if str(e) == "not_found" else 400
-        raise HTTPException(code, str(e))
+        raise HTTPException(_error_status(str(e)), str(e))
     return to_response(post)
 
 
@@ -163,8 +177,11 @@ async def update_post(
 async def delete_post(
     post_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     try:
-        await svc.delete_post(db, post_id)
-    except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
+        await svc.delete_post(
+            db, post_id, requester_id=user.id, is_admin=is_admin(user)
+        )
+    except ValueError as e:
+        raise HTTPException(_error_status(str(e)), str(e))
