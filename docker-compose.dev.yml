@@ -14,6 +14,17 @@
 # docker-compose.yml.
 
 services:
+  # migrate тоже на bind-mount (как api/воркеры): без него одноразовый
+  # контейнер берёт миграции из СТАРОГО образа и не видит ревизий,
+  # накатанных через api/CLI с live-кодом — DB уходит вперёд, и
+  # `alembic upgrade head` падает с "Can't locate revision". Монтируем
+  # тот же набор, что api.
+  migrate:
+    volumes:
+      - ./app:/app/app
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini:ro
+
   mailpit:
     image: axllent/mailpit
     restart: unless-stopped  # поднимается сама после рестарта Docker (см. docker-compose.yml postgres)
