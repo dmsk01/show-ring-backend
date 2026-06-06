@@ -183,7 +183,7 @@ async def process_event(
     breed_id = _safe_uuid(payload.get("breed_id"))
     region = payload.get("region")
 
-    subscribers = await notif_repo.find_subscribers(
+    email_subs = await notif_repo.find_subscribers(
         db,
         event_type=event.event_type,
         breed_id=breed_id,
@@ -191,7 +191,18 @@ async def process_event(
         channel=NotificationChannel.email,
         exclude_user_id=event.actor_id,
     )
-    if not subscribers:
+    # Аудит M2: in_app-получателей берём по in_app-ПОДПИСКАМ, а не по email.
+    # Раньше in_app создавался для каждого email-подписчика → in_app-only
+    # подписчики не получали ничего, а email-подписчики форсились в in_app.
+    inapp_subs = await notif_repo.find_subscribers(
+        db,
+        event_type=event.event_type,
+        breed_id=breed_id,
+        region=region,
+        channel=NotificationChannel.in_app,
+        exclude_user_id=event.actor_id,
+    )
+    if not email_subs and not inapp_subs:
         logger.info(
             "No subscribers for event %s (breed=%s, region=%s)",
             event.event_type,
@@ -212,9 +223,10 @@ async def process_event(
     # цикла и передавать user-context дополнительным аргументом.
     subject, html_body, text_body = render_email(template_name, payload)
 
+    # --- email-канал: по email-подпискам ---
     dispatched = 0
     skipped_duplicate = 0
-    for sub, user in subscribers:
+    for _sub, user in email_subs:
         msg_id = _recipient_message_id(event.event_id, user.id)
 
         # Per-subscriber commit. Если краш между двумя подписчиками,
@@ -263,24 +275,22 @@ async def process_event(
                 event.event_id, user.id,
             )
 
-        # --- in_app-уведомление (этап 16) ---
-        # Самостоятельная строка channel=in_app + realtime-push. Не
-        # зависит от исхода email-блока выше: свой message_id, своя
-        # транзакция. SMTP не нужен → status=sent сразу. Persistence
-        # (история/бейдж) отделена от push (best-effort поверх).
+    # --- in_app-канал: по in_app-подпискам (этап 16, аудит M2) ---
+    # Самостоятельная строка channel=in_app + realtime-push. Свой
+    # message_id, своя транзакция. SMTP не нужен → status=sent сразу.
+    # Persistence (история/бейдж) отделена от push (best-effort поверх).
+    pushed = 0
+    for _sub, user in inapp_subs:
         in_app_payload = await _create_in_app_notification(
             db, event=event, user_id=user.id, subject=subject
         )
         if in_app_payload is not None:
             await _push_in_app(user.id, in_app_payload)
-
-        # sub переменная не используется — на будущее (аналитика
-        # «какая подписка вызвала рассылку»).
-        _ = sub
+            pushed += 1
 
     logger.info(
-        "Event %s dispatched: %d new, %d duplicate-skipped",
-        event.event_type, dispatched, skipped_duplicate,
+        "Event %s dispatched: %d email (%d dup), %d in_app",
+        event.event_type, dispatched, skipped_duplicate, pushed,
     )
 
 
