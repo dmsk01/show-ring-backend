@@ -55,6 +55,7 @@ from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+from app.models.dog import SexEnum
 
 
 class ClassifiedCategory(str, enum.Enum):
@@ -148,6 +149,16 @@ class Classified(Base, TimestampMixin):
         ForeignKey("litters.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+
+    # Пол животного в объявлении. nullable: применим только к продаже
+    # конкретной особи (adult_sale/mating) и к щенку определённого пола.
+    # Для услуг (handler/grooming) и помётов «вперемешку» (и кобели, и
+    # суки в одном объявлении) остаётся NULL — точечный фильтр ?sex= их
+    # не показывает. Переиспользуем SexEnum собак (PG-тип 'sexenum'),
+    # а не заводим второй тип под тот же концепт «пол животного».
+    sex: Mapped[SexEnum | None] = mapped_column(
+        SAEnum(SexEnum, name="sexenum"), nullable=True, index=True
     )
 
     title: Mapped[str] = mapped_column(String(255))

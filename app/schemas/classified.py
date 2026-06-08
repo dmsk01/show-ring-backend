@@ -21,6 +21,7 @@ from app.models.classified import (
     ClassifiedPriceKind,
     ClassifiedStatus,
 )
+from app.models.dog import SexEnum
 
 
 # ---------------------------------------------------------------------
@@ -76,6 +77,9 @@ class ClassifiedBase(BaseModel):
     category: ClassifiedCategory
     breed_id: uuid.UUID | None = None
     litter_id: uuid.UUID | None = None
+    # Пол животного: применим к продаже особи, NULL для услуг/смешанных
+    # помётов. Наследуется в Create и Response (оба от ClassifiedBase).
+    sex: SexEnum | None = None
     title: str = Field(..., min_length=3, max_length=255)
     description: str = Field(..., min_length=10)
     # bug_215: price имеет смысл только при price_kind=fixed.
@@ -106,6 +110,9 @@ class ClassifiedUpdate(BaseModel):
     category: ClassifiedCategory | None = None
     breed_id: uuid.UUID | None = None
     litter_id: uuid.UUID | None = None
+    # Пол можно проставить/изменить отдельно (например, заполнить у старого
+    # объявления). ClassifiedUpdate не наследует Base — поле нужно явно.
+    sex: SexEnum | None = None
     title: str | None = Field(None, min_length=3, max_length=255)
     description: str | None = Field(None, min_length=10)
     price: Decimal | None = Field(None, ge=0)

@@ -30,6 +30,7 @@ from app.models.classified import (
     ClassifiedImage,
     ClassifiedStatus,
 )
+from app.models.dog import SexEnum
 
 
 # Белый список сортировки (этап 18).
@@ -43,6 +44,7 @@ _CLASSIFIED_SORT = {
 def _classified_filter_stmt(
     category: ClassifiedCategory | None,
     breed_id: uuid.UUID | None,
+    sex: SexEnum | None,
     city: str | None,
     status: ClassifiedStatus | None,
     price_from: Decimal | None,
@@ -61,6 +63,11 @@ def _classified_filter_stmt(
         stmt = stmt.where(Classified.category == category)
     if breed_id is not None:
         stmt = stmt.where(Classified.breed_id == breed_id)
+    if sex is not None:
+        # Точечный фильтр: ?sex=male отдаёт только male. Объявления с
+        # sex IS NULL (услуги, смешанные помёты) под него не попадают —
+        # это согласованный с фронтом контракт.
+        stmt = stmt.where(Classified.sex == sex)
     if city:
         # ILIKE — для удобства: пользователь ищет "Москва" / "москв".
         # В продакшене города стоит нормализовать через справочник,
@@ -94,6 +101,7 @@ async def list_classifieds(
     *,
     category: ClassifiedCategory | None = None,
     breed_id: uuid.UUID | None = None,
+    sex: SexEnum | None = None,
     city: str | None = None,
     status: ClassifiedStatus | None = ClassifiedStatus.active,
     price_from: Decimal | None = None,
@@ -109,7 +117,8 @@ async def list_classifieds(
     col = _CLASSIFIED_SORT.get(sort_by, Classified.created_at)
     stmt = (
         _classified_filter_stmt(
-            category, breed_id, city, status, price_from, price_to, author_id
+            category, breed_id, sex, city, status, price_from, price_to,
+            author_id,
         )
         .order_by(col.asc() if order == "asc" else col.desc())
         .options(selectinload(Classified.images))
@@ -124,6 +133,7 @@ async def count_classifieds(
     *,
     category: ClassifiedCategory | None = None,
     breed_id: uuid.UUID | None = None,
+    sex: SexEnum | None = None,
     city: str | None = None,
     status: ClassifiedStatus | None = ClassifiedStatus.active,
     price_from: Decimal | None = None,
@@ -131,7 +141,8 @@ async def count_classifieds(
     author_id: uuid.UUID | None = None,
 ) -> int:
     base = _classified_filter_stmt(
-        category, breed_id, city, status, price_from, price_to, author_id
+        category, breed_id, sex, city, status, price_from, price_to,
+        author_id,
     ).subquery()
     return int(
         (await db.execute(select(func.count()).select_from(base))).scalar_one()

@@ -23,6 +23,7 @@ from app.models.classified import (
     ClassifiedPriceKind,
     ClassifiedStatus,
 )
+from app.models.dog import SexEnum
 from app.models.file import UploadedFile
 from app.models.reference import Breed
 from app.models.user import User
@@ -93,3 +94,60 @@ async def test_get_classified_increments_views(client, db_session):
 async def test_get_classified_not_found(client):
     r = await client.get(f"/classifieds/{uuid.uuid4()}")
     assert r.status_code == 404
+
+
+async def _make_classified(db_session, owner_id, *, city, sex):
+    """Активное объявление с заданным полом (или NULL)."""
+    c = Classified(
+        author_id=owner_id,
+        category=ClassifiedCategory.adult_sale,
+        title=f"Объявление {sex}",
+        description="Описание объявления для фильтра по полу",
+        price=None,
+        price_kind=ClassifiedPriceKind.negotiable,
+        city=city,
+        sex=sex,
+        status=ClassifiedStatus.active,
+    )
+    db_session.add(c)
+    await db_session.commit()
+    return c.id
+
+
+async def test_list_classifieds_filter_by_sex(client, db_session):
+    """
+    Фильтр ?sex=male|female (запрос фронта 2026-06-08). Уникальный city
+    изолирует выборку от сидов/dev-данных, поэтому total и состав items
+    проверяемы точно. NULL-объявления под точечный фильтр не попадают.
+    """
+    owner_id = await _owner(db_session)
+    # Уникальный город — «песочница» только для этого теста.
+    city = f"SexFilterCity{uuid.uuid4().hex[:8]}"
+    male_id = await _make_classified(db_session, owner_id, city=city, sex=SexEnum.male)
+    female_id = await _make_classified(db_session, owner_id, city=city, sex=SexEnum.female)
+    null_id = await _make_classified(db_session, owner_id, city=city, sex=None)
+
+    # ?sex=male → только male, NULL и female исключены.
+    r = await client.get("/classifieds", params={"city": city, "sex": "male"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ids = {item["id"] for item in body["items"]}
+    assert ids == {str(male_id)}
+    assert body["total"] == 1
+    assert body["items"][0]["sex"] == "male"
+
+    # ?sex=female → только female.
+    r = await client.get("/classifieds", params={"city": city, "sex": "female"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {item["id"] for item in body["items"]} == {str(female_id)}
+    assert body["total"] == 1
+
+    # Без sex → все три, включая NULL.
+    r = await client.get("/classifieds", params={"city": city})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {item["id"] for item in body["items"]} == {
+        str(male_id), str(female_id), str(null_id)
+    }
+    assert body["total"] == 3

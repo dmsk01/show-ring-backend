@@ -16,6 +16,7 @@ from app.database import get_db
 from app.dependencies import get_current_user, is_admin
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.classified import ClassifiedCategory, ClassifiedStatus
+from app.models.dog import SexEnum
 from app.models.user import User
 from app.redis import get_redis
 from app.repositories import classified as repo
@@ -120,6 +121,7 @@ async def search_classifieds(
 async def list_classifieds(
     category: ClassifiedCategory | None = Query(None),
     breed_id: uuid.UUID | None = Query(None),
+    sex: SexEnum | None = Query(None),
     city: str | None = Query(None, max_length=128),
     price_from: Decimal | None = Query(None, ge=0),
     price_to: Decimal | None = Query(None, ge=0),
@@ -133,6 +135,7 @@ async def list_classifieds(
         db,
         category=category,
         breed_id=breed_id,
+        sex=sex,
         city=city,
         # Публичный список — только активные. Closed/archived не показываем.
         status=ClassifiedStatus.active,
@@ -147,6 +150,7 @@ async def list_classifieds(
         db,
         category=category,
         breed_id=breed_id,
+        sex=sex,
         city=city,
         status=ClassifiedStatus.active,
         price_from=price_from,
