@@ -78,7 +78,20 @@
       "PowerShell($env:PYTHONPATH = 'E:\\\\Coding\\\\python-animal-platform'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m alembic -c \"E:/Coding/python-animal-platform/alembic.ini\" revision --autogenerate -m \"stage_04_kennels_dogs_files\")",
       "PowerShell(& \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" -m pip install httpx 2>&1 | Select-Object -Last 3)",
       "PowerShell(Start-Sleep -Seconds 3; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/_smoke_stage_04.py\")",
-      "PowerShell($env:PYTHONIOENCODING='utf-8'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/_smoke_stage_04.py\")"
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; & \"E:/Coding/python-animal-platform/venv/Scripts/python.exe\" \"E:/Coding/python-animal-platform/scripts/_smoke_stage_04.py\")",
+      "Bash(venv/Scripts/python.exe -c \"import app.main; print\\('import OK'\\)\")",
+      "Bash(venv/Scripts/python.exe -c \"import app.main; [print\\(sorted\\(m\\)[0], r.path\\) for r in app.main.app.routes if hasattr\\(r,'methods'\\) and \\(m:=r.methods & {'DELETE'}\\) and any\\(x in r.path for x in ['dogs','litters','results','campaigns','banners','classifieds','rings','/shows/{show_id}']\\)]\")",
+      "Bash(git fetch *)",
+      "Bash(git rev-list *)",
+      "Bash(docker compose *)",
+      "Bash(DATABASE_URL=\"postgresql+asyncpg://u:p@localhost/db\" SECRET_KEY=\"test\" venv/Scripts/python.exe *)",
+      "Bash(venv/Scripts/python.exe -m alembic heads)",
+      "Bash(venv/Scripts/python.exe -m alembic upgrade head)",
+      "Bash(venv/Scripts/python.exe -m py_compile app/services/auth.py)",
+      "Bash(git checkout *)",
+      "Bash(git merge *)",
+      "Bash(git push *)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }
