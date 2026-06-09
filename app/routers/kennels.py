@@ -17,6 +17,7 @@ from app.models.user import User
 from app.repositories import kennel as repo
 from app.schemas.kennel import (
     KennelCreate,
+    KennelPage,
     KennelResponse,
     KennelUpdate,
 )
@@ -72,7 +73,7 @@ async def create_kennel(
 
 @router.get(
     "",
-    response_model=list[KennelResponse],
+    response_model=KennelPage,
     summary="Список питомников",
 )
 async def list_kennels(
@@ -88,10 +89,17 @@ async def list_kennels(
         db, city=city, search=search, sort_by=sort_by, order=order,
         page=page, per_page=per_page,
     )
+    # total — по тем же фильтрам (search, city), без offset/limit.
+    total = await repo.count_kennels(db, city=city, search=search)
     counts = await repo.counts_by_kennels(db, [k.id for k in items])
-    return [
-        _kennel_response(k, *counts.get(k.id, (0, 0))) for k in items
-    ]
+    return KennelPage(
+        items=[
+            _kennel_response(k, *counts.get(k.id, (0, 0))) for k in items
+        ],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
 
 
 @router.get(

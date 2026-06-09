@@ -254,17 +254,11 @@ class GradeResponse(GradeBase):
 # ---------------------------------------------------------------------
 
 
-class PageMeta(BaseModel):
-    """
-    Метаданные пагинации. Возвращаются вместе со списком, чтобы клиент
-    не считал общее количество отдельным запросом.
-    """
-
+class BreedPage(BaseModel):
+    # Единый формат пагинации API (как DogPage/LitterPage/KennelPage):
+    # плоские {items, total, page, per_page}. Раньше тут был вложенный
+    # meta — убрали ради единообразия по всему API.
+    items: list[BreedResponse]
     total: int
     page: int
     per_page: int
-
-
-class BreedPage(BaseModel):
-    items: list[BreedResponse]
-    meta: PageMeta

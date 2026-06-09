@@ -27,7 +27,6 @@ from app.schemas.reference import (
     BreedPage,
     BreedResponse,
     GradeResponse,
-    PageMeta,
     ShowClassResponse,
     ShowRankResponse,
     TitleResponse,
@@ -65,8 +64,9 @@ async def list_breed_groups(
     summary="Список пород с фильтром и пагинацией",
     description=(
         "Фильтр по виду и группе, поиск по имени. Пагинация limit/offset: "
-        "page=1 — первая страница, per_page до 200. Возвращает items + meta "
-        "с общим количеством — клиент не делает отдельный запрос за total."
+        "page=1 — первая страница, per_page до 200. Возвращает items + total "
+        "(плоско, как остальные списки API) — клиент не делает отдельный "
+        "запрос за total."
     ),
 )
 async def list_breeds(
@@ -105,7 +105,9 @@ async def list_breeds(
     )
     return BreedPage(
         items=[BreedResponse.model_validate(b) for b in items],
-        meta=PageMeta(total=total, page=page, per_page=per_page),
+        total=total,
+        page=page,
+        per_page=per_page,
     )
 
 

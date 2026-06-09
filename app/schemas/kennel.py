@@ -64,3 +64,12 @@ class KennelResponse(KennelBase):
     is_verified: bool = False
     dogs_count: int = 0
     litters_count: int = 0
+
+
+class KennelPage(BaseModel):
+    # Единый формат пагинации API (как DogPage/LitterPage):
+    # {items, total, page, per_page}. total — по применённым фильтрам.
+    items: list[KennelResponse]
+    total: int
+    page: int
+    per_page: int
