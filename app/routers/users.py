@@ -1,7 +1,7 @@
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
@@ -9,11 +9,13 @@ from app.dependencies import get_current_user
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
 from app.redis import get_redis
+from app.repositories import dog as dog_repo
 from app.repositories.user import (
     get_profile,
     get_user_by_id,
     upsert_profile,
 )
+from app.schemas.dog import DogPage, DogResponse
 from app.schemas.user import (
     PasswordChange,
     PublicUserResponse,
@@ -155,6 +157,45 @@ async def update_my_profile(
     profile = await upsert_profile(db, current_user.id, **fields)
     await db.commit()
     return UserProfileResponse.model_validate(profile)
+
+
+@router.get(
+    "/me/dogs",
+    response_model=DogPage,
+    summary="Мои собаки",
+    description=(
+        "Собаки, владельцем которых является текущий пользователь "
+        "(dog.owner_id == current_user.id). Включает собак без питомника. "
+        "Отдельный путь, а не /dogs?mine=true: /dogs публичный (без auth), "
+        "а здесь нужен пользователь. Сортировка по имени, пагинация как у /dogs."
+    ),
+)
+async def list_my_dogs(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    items = await dog_repo.list_dogs(
+        db,
+        owner_id=current_user.id,
+        sort_by="name",
+        order="asc",
+        page=page,
+        per_page=per_page,
+    )
+    total = await dog_repo.count_dogs(db, owner_id=current_user.id)
+    # Фото пачкой (анти-N+1), как в GET /dogs.
+    photos = await dog_repo.photos_by_dogs(db, [d.id for d in items])
+    return DogPage(
+        items=[
+            DogResponse.from_orm_with_photos(d, photos.get(d.id, []))
+            for d in items
+        ],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
 
 
 @router.get(

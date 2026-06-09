@@ -57,6 +57,18 @@ class Dog(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
+    # Владелец карточки — пользователь, добавивший собаку. Прямой FK
+    # dog → user: раньше владелец выводился только через kennel.owner_id,
+    # и собаки без питомника оставались «ничьими» (нельзя надёжно отдать
+    # «мои собаки» и проверить запись на выставку). SET NULL — собака
+    # переживает удаление пользователя как историческая запись.
+    # nullable — для легаси-данных, которые не удалось сопоставить.
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     breed_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         # RESTRICT на породу: пока есть собаки, породу удалять нельзя.

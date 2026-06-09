@@ -367,15 +367,18 @@ async def _check_can_register_dog(
     ):
         raise ValueError("registration_deadline_passed")
 
-    # Запись делает владелец питомника собаки. Если у собаки нет
-    # питомника — записать может только admin (та же логика, что
-    # в dog-сервисе).
+    # Записать собаку может её владелец (dog.owner_id) или admin. Для
+    # легаси-собак без owner_id (бэкафилл не сопоставил) — фолбэк на
+    # владельца питомника, как раньше. Это закрывает запись чужой собаки:
+    # без права на собаку — forbidden.
     if not is_admin:
-        if dog.kennel_id is None:
-            raise ValueError("forbidden")
-        kennel = await kennel_repo.get_kennel(db, dog.kennel_id)
-        if kennel is None or kennel.owner_id != requester_id:
-            raise ValueError("forbidden")
+        is_owner = dog.owner_id is not None and dog.owner_id == requester_id
+        if not is_owner:
+            if dog.kennel_id is None:
+                raise ValueError("forbidden")
+            kennel = await kennel_repo.get_kennel(db, dog.kennel_id)
+            if kennel is None or kennel.owner_id != requester_id:
+                raise ValueError("forbidden")
 
     allowed = await repo.is_breed_allowed(db, show.id, dog.breed_id)
     if not allowed:

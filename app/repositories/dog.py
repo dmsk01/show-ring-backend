@@ -35,6 +35,7 @@ def _dog_filter_stmt(
     litter_id: uuid.UUID | None,
     sex: SexEnum | None,
     search: str | None,
+    owner_id: uuid.UUID | None = None,
 ):
     stmt = select(Dog)
     if breed_id is not None:
@@ -45,6 +46,8 @@ def _dog_filter_stmt(
         stmt = stmt.where(Dog.litter_id == litter_id)
     if sex is not None:
         stmt = stmt.where(Dog.sex == sex)
+    if owner_id is not None:
+        stmt = stmt.where(Dog.owner_id == owner_id)
     if search:
         stmt = stmt.where(Dog.name.ilike(f"%{search}%"))
     return stmt
@@ -74,6 +77,7 @@ async def list_dogs(
     litter_id: uuid.UUID | None = None,
     sex: SexEnum | None = None,
     search: str | None = None,
+    owner_id: uuid.UUID | None = None,
     sort_by: str = "name",
     order: str = "asc",
     page: int = 1,
@@ -81,7 +85,7 @@ async def list_dogs(
 ) -> Sequence[Dog]:
     col = _DOG_SORT.get(sort_by, Dog.name)
     stmt = (
-        _dog_filter_stmt(breed_id, kennel_id, litter_id, sex, search)
+        _dog_filter_stmt(breed_id, kennel_id, litter_id, sex, search, owner_id)
         .order_by(col.asc() if order == "asc" else col.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
@@ -96,9 +100,10 @@ async def count_dogs(
     litter_id: uuid.UUID | None = None,
     sex: SexEnum | None = None,
     search: str | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> int:
     base = _dog_filter_stmt(
-        breed_id, kennel_id, litter_id, sex, search
+        breed_id, kennel_id, litter_id, sex, search, owner_id
     ).subquery()
     return int((await db.execute(select(func.count()).select_from(base))).scalar_one())
 

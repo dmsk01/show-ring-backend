@@ -63,6 +63,10 @@ class DogResponse(DogBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    # Владелец карточки (тот, кто добавил собаку). None — у легаси-собак,
+    # для которых владельца не удалось сопоставить. Фронт прячет кнопки
+    # «изменить»/«удалить» у чужих собак.
+    owner_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
     # Фото (этап 18). avatar_file_id — главное фото (is_primary, иначе первое),
