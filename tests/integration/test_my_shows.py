@@ -56,13 +56,19 @@ async def test_list_user_entries_enriched_returns_names(db_session):
                 date_start=date.today(), status=ShowStatus.registration_open)
     db_session.add(show)
     await db_session.commit()
-    db_session.add(ShowEntry(show_id=show.id, dog_id=dog.id,
-                             show_class_id=cls.id, registered_by=user.id))
+    entry = ShowEntry(show_id=show.id, dog_id=dog.id,
+                      show_class_id=cls.id, registered_by=user.id)
+    db_session.add(entry)
     await db_session.commit()
 
     rows = await repo.list_user_entries_for_show_enriched(db_session, show.id, user.id)
     assert len(rows) == 1
-    entry, dog_name, class_code, class_name = rows[0]
+    entry_row, dog_name, class_code, class_name = rows[0]
     assert dog_name == "Рекс Тест"
     assert class_name == "Открытый"
     assert class_code == cls.code
+
+    single = await repo.get_entry_enriched(db_session, entry.id)
+    assert single is not None
+    _, single_dog_name, _, _ = single
+    assert single_dog_name == "Рекс Тест"

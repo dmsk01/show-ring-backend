@@ -13,7 +13,7 @@ import uuid
 from datetime import date
 from typing import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import Row, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -352,7 +352,7 @@ async def get_show_with_relations(
 
 async def list_user_entries_for_show_enriched(
     db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID
-):
+) -> Sequence[Row[tuple[ShowEntry, str, str, str]]]:
     """Записи пользователя на выставку с именами собаки и класса.
 
     Возвращает список кортежей (ShowEntry, dog_name, class_code, class_name).
@@ -375,8 +375,12 @@ async def list_user_entries_for_show_enriched(
 
 async def get_entry_enriched(
     db: AsyncSession, entry_id: uuid.UUID
-):
-    """Одна запись + имена (для ответа PATCH). None, если не найдена."""
+) -> Row[tuple[ShowEntry, str, str, str]] | None:
+    """Одна запись + имена (для ответа PATCH). None, если не найдена.
+
+    Авторизация (проверка владельца/прав) — ответственность вызывающего
+    кода; эта функция не ограничивает доступ по пользователю.
+    """
     stmt = (
         select(ShowEntry, Dog.name, ShowClass.code, ShowClass.name)
         .join(Dog, Dog.id == ShowEntry.dog_id)
