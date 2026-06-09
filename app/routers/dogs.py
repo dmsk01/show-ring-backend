@@ -210,6 +210,36 @@ async def add_dog_images(
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
 
 
+@router.delete(
+    "/{dog_id}/images/{file_id}",
+    response_model=DogResponse,
+    summary="Открепить фото от собаки",
+    description=(
+        "Удаляет связь файла с собакой (dog_photos). Только владелец питомника "
+        "собаки или admin; собака без питомника — только admin. Сам файл из "
+        "хранилища не удаляется. Если открепляли главное фото и остались "
+        "другие — главным становится фото с наименьшим position."
+    ),
+)
+async def delete_dog_image(
+    dog_id: uuid.UUID,
+    file_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        dog = await svc.delete_image(
+            db,
+            dog_id=dog_id,
+            file_id=file_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+    return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
+
+
 @router.get(
     "/{dog_id}/pedigree",
     response_model=PedigreeNode,

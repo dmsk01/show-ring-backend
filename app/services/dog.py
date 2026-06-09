@@ -76,10 +76,10 @@ async def create_dog(
     await _validate_parents(
         db, fields.get("father_id"), fields.get("mother_id")
     )
-    # Р’Р»Р°РґРµР»РµС† РєР°СЂС‚РѕС‡РєРё вЂ” РІСЃРµРіРґР° С‚РѕС‚, РєС‚Рѕ СЃРѕР·РґР°С‘С‚ СЃРѕР±Р°РєСѓ, РЅРµР·Р°РІРёСЃРёРјРѕ РѕС‚
-    # РЅР°Р»РёС‡РёСЏ РїРёС‚РѕРјРЅРёРєР°. Р­С‚Рѕ РґР°С‘С‚ РїСЂСЏРјСѓСЋ СЃРІСЏР·СЊ dog в†’ user РґР»СЏ В«РјРѕРёС… СЃРѕР±Р°РєВ»
-    # Рё РїСЂРѕРІРµСЂРєРё Р·Р°РїРёСЃРё РЅР° РІС‹СЃС‚Р°РІРєСѓ. owner_id РЅРµ РїСЂРёС…РѕРґРёС‚ РёР· С‚РµР»Р° Р·Р°РїСЂРѕСЃР°
-    # (РµРіРѕ РЅРµС‚ РІ DogCreate), РїРѕСЌС‚РѕРјСѓ РїРѕРґРјРµРЅРёС‚СЊ С‡СѓР¶РѕРіРѕ РІР»Р°РґРµР»СЊС†Р° РЅРµР»СЊР·СЏ.
+    # Владелец карточки — всегда тот, кто создаёт собаку, независимо от
+    # наличия питомника. Это даёт прямую связь dog → user для «моих собак»
+    # и проверки записи на выставку. owner_id не приходит из тела запроса
+    # (его нет в DogCreate), поэтому подменить чужого владельца нельзя.
     fields["owner_id"] = requester_id
     try:
         obj = await repo.create_dog(db, **fields)
@@ -191,6 +191,46 @@ async def add_images(
         await db.rollback()
         # UNIQUE(dog_id, file_id) — файл уже привязан.
         raise ValueError("duplicate_unique_field")
+    return dog
+
+
+async def delete_image(
+    db: AsyncSession,
+    dog_id: uuid.UUID,
+    file_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> Dog:
+    """
+    Открепляет фото от собаки — удаляет только связь dog_photos, сам файл в
+    хранилище не трогаем (этап 18). Право — владелец питомника собаки или
+    admin; собака без питомника — только admin (нет прямого FK dog→user).
+    Зеркало add_images.
+    """
+    dog = await repo.get_dog(db, dog_id)
+    if dog is None:
+        raise ValueError("not_found")
+    if dog.kennel_id is not None:
+        await _check_kennel_owner(db, dog.kennel_id, requester_id, is_admin)
+    elif not is_admin:
+        raise ValueError("forbidden")
+
+    photo = await repo.get_dog_photo(db, dog_id, file_id)
+    if photo is None:
+        raise ValueError("photo_not_found")
+
+    was_primary = photo.is_primary
+    await repo.delete_dog_photo(db, photo)
+
+    # Если открепили главное фото и остались другие — назначаем главным фото
+    # с наименьшим position, чтобы аватар собаки не «сломался». Гасим случай
+    # уже существующего главного среди оставшихся (не плодим второе).
+    if was_primary:
+        remaining = await repo.list_dog_photos(db, dog_id)
+        if remaining and not any(p.is_primary for p in remaining):
+            remaining[0].is_primary = True
+
+    await db.commit()
     return dog
 
 

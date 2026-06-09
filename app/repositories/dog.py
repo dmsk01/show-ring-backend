@@ -187,6 +187,22 @@ async def add_dog_photo(
     return obj
 
 
+async def get_dog_photo(
+    db: AsyncSession, dog_id: uuid.UUID, file_id: uuid.UUID
+) -> DogPhoto | None:
+    """Связь dog_photos по паре (dog_id, file_id). None — если нет."""
+    stmt = select(DogPhoto).where(
+        DogPhoto.dog_id == dog_id, DogPhoto.file_id == file_id
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def delete_dog_photo(db: AsyncSession, photo: DogPhoto) -> None:
+    """Удаляет связь dog_photos. Сам файл в хранилище не трогаем."""
+    await db.delete(photo)
+    await db.flush()
+
+
 async def list_dog_photos(
     db: AsyncSession, dog_id: uuid.UUID
 ) -> list[DogPhoto]:
