@@ -211,6 +211,31 @@ class ShowEntryPage(BaseModel):
     per_page: int
 
 
+class MyShowEntryResponse(ShowEntryResponse):
+    """Запись + имена собаки и класса (для страницы «мои записи»)."""
+    dog_name: str
+    class_code: str
+    class_name: str
+
+
+class ShowEntryUpdate(BaseModel):
+    show_class_id: uuid.UUID | None = None
+    handler_id: uuid.UUID | None = None
+    notes: str | None = None
+
+
+class MyShowItem(ShowResponse):
+    """Выставка, где у пользователя есть запись + счётчик его записей."""
+    my_entries_count: int
+
+
+class MyShowPage(BaseModel):
+    items: list[MyShowItem]
+    total: int
+    page: int
+    per_page: int
+
+
 # ---------------------------------------------------------------------
 # Available classes (для выбора владельцем)
 # ---------------------------------------------------------------------
