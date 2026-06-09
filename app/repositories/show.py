@@ -17,6 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.dog import Dog
+from app.models.reference import ShowClass
 from app.models.show import (
     Show,
     ShowBreed,
@@ -341,3 +343,44 @@ async def get_show_with_relations(
         )
     )
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+# ---------------------------------------------------------------------
+# Обогащённые запросы для раздела «Мои выставки»
+# ---------------------------------------------------------------------
+
+
+async def list_user_entries_for_show_enriched(
+    db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID
+):
+    """Записи пользователя на выставку с именами собаки и класса.
+
+    Возвращает список кортежей (ShowEntry, dog_name, class_code, class_name).
+    """
+    stmt = (
+        select(ShowEntry, Dog.name, ShowClass.code, ShowClass.name)
+        .join(Dog, Dog.id == ShowEntry.dog_id)
+        .join(ShowClass, ShowClass.id == ShowEntry.show_class_id)
+        .where(
+            ShowEntry.show_id == show_id,
+            ShowEntry.registered_by == user_id,
+        )
+        .order_by(
+            ShowEntry.catalog_number.asc().nullslast(),
+            ShowEntry.created_at.asc(),
+        )
+    )
+    return (await db.execute(stmt)).all()
+
+
+async def get_entry_enriched(
+    db: AsyncSession, entry_id: uuid.UUID
+):
+    """Одна запись + имена (для ответа PATCH). None, если не найдена."""
+    stmt = (
+        select(ShowEntry, Dog.name, ShowClass.code, ShowClass.name)
+        .join(Dog, Dog.id == ShowEntry.dog_id)
+        .join(ShowClass, ShowClass.id == ShowEntry.show_class_id)
+        .where(ShowEntry.id == entry_id)
+    )
+    return (await db.execute(stmt)).first()
