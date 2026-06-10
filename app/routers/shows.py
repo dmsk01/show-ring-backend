@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, is_admin
+from app.dependencies import get_current_user, is_admin, require_any_role
 from app.models.show import ShowStatus
 from app.models.user import User
 from app.repositories import show as repo
@@ -102,7 +102,10 @@ def _raise_for_error(err: ValueError) -> NoReturn:
 async def create_show(
     body: ShowCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    # ИСПРАВЛЕНО (review 2026-06-10): докстринг сервиса всегда обещал
+    # «создавать может только organizer или admin», но проверки не было —
+    # выставку мог открыть любой свежий аккаунт.
+    user: User = Depends(require_any_role("organizer", "admin")),
 ):
     return await svc.create_show(
         db, organizer_id=user.id, fields=body.model_dump()
