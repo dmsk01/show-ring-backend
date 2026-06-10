@@ -83,6 +83,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
         "class_not_available_for_age",
         "class_animal_type_mismatch",
         "dog_birth_date_missing",
+        "invalid_dates",
     ):
         raise HTTPException(422, code)
     raise HTTPException(400, code)

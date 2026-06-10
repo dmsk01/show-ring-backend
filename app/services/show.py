@@ -79,6 +79,20 @@ async def update_show(
     # После закрытия регистрации это уже зафиксированные данные каталога.
     if obj.status not in (ShowStatus.draft, ShowStatus.registration_open):
         raise ValueError("show_locked")
+    # Кросс-валидация дат на MERGED-значениях (новые поверх текущих).
+    # ИСПРАВЛЕНО (review 2026-06-10): ShowUpdate — отдельная модель без
+    # валидатора ShowBase, и частичный PUT мог сдвинуть date_start за
+    # date_end или поставить дедлайн позже начала (register_entry тогда
+    # пропускал бы записи после фактического старта).
+    new_start = fields.get("date_start", obj.date_start)
+    new_end = fields.get("date_end", obj.date_end)
+    new_deadline = fields.get(
+        "registration_deadline", obj.registration_deadline
+    )
+    if new_end is not None and new_end < new_start:
+        raise ValueError("invalid_dates")
+    if new_deadline is not None and new_deadline > new_start:
+        raise ValueError("invalid_dates")
     for k, v in fields.items():
         setattr(obj, k, v)
     await db.commit()
