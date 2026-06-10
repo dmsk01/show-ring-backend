@@ -29,6 +29,27 @@ async def create_user(db: AsyncSession, email: str, hashed_password: str) -> Use
     return user
 
 
+async def get_user_by_phone(db: AsyncSession, phone: str) -> User | None:
+    stmt = (
+        select(User)
+        .where(User.phone == phone)
+        .options(selectinload(User.roles))
+    )
+
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def create_user_by_phone(db: AsyncSession, phone: str) -> User:
+    # roles=[] инициализирует коллекцию сразу: после flush объект
+    # persistent, и первое обращение к user.roles иначе запустило бы
+    # lazy load — в async-сессии это MissingGreenlet-ошибка.
+    user = User(phone=phone, roles=[])
+    db.add(user)
+    await db.flush()
+    return user
+
+
 async def update_user(db: AsyncSession, user: User, **fields) -> User:
     for field, value in fields.items():
         setattr(user, field, value)
