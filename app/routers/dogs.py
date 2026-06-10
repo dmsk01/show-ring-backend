@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, is_admin
 from app.models.dog import Dog, DogPhoto, SexEnum
 from app.models.user import User
 from app.repositories import dog as repo
@@ -30,8 +30,10 @@ from app.services import dog as svc
 router = APIRouter(prefix="/dogs", tags=["dogs"])
 
 
-def _is_admin(user: User) -> bool:
-    return any(r.role.value == "admin" for r in user.roles)
+# Алиас на общий helper (как в shows.py/classifieds.py): «кто такой
+# admin» определяется в одном месте — dependencies.is_admin (review
+# 2026-05-28 консолидировал, локальная копия здесь была пропущена).
+_is_admin = is_admin
 
 
 def _dog_response(dog: Dog, photos: list[DogPhoto]) -> DogResponse:

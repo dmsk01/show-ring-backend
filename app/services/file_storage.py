@@ -13,6 +13,7 @@
 Поддерживаемые форматы (этап 4 — фото и документы):
 - JPEG: FF D8 FF
 - PNG:  89 50 4E 47 0D 0A 1A 0A
+- GIF:  GIF87a / GIF89a
 - WebP: RIFF....WEBP
 - PDF:  25 50 44 46 (%PDF)
 """
