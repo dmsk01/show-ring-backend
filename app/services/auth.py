@@ -167,6 +167,13 @@ async def login_user(db: AsyncSession, email: str, password: str) -> TokenRespon
         security_logger.warning("login_blocked user_id=%s", user.id)
         raise ValueError("user_blocked")
 
+    # НАМЕРЕННО (зафиксировано review 2026-06-10): is_email_verified
+    # здесь НЕ проверяется — вход с неподтверждённой почтой разрешён.
+    # Продуктовый выбор: низкий барьер входа; верификация нужна для
+    # доверия к адресу (письма, восстановление), а не как гейт логина.
+    # Если решим ужесточить — блокировать чувствительные операции,
+    # а не сам вход.
+
     roles = [r.role.value for r in user.roles]
 
     access = create_access_token(str(user.id), roles)
@@ -316,6 +323,18 @@ async def request_email_change(
         to_email=new_email,
         template_name="email_change_confirm",
         context={"new_email": new_email, "confirm_url": confirm_url},
+    )
+    # Уведомляем и СТАРЫЙ адрес (review 2026-06-10): атакующий с
+    # украденным паролем иначе тихо перевешивал аккаунт на свою почту —
+    # письмо на новый адрес владельцу-жертве ничего не скажет (а отзыв
+    # refresh-токенов при confirm ему не мешает: пароль у него есть).
+    # Стандартная практика: «если это были не вы — смените пароль».
+    await enqueue_transactional_email(
+        db,
+        user_id=user.id,
+        to_email=user.email,
+        template_name="email_change_notice",
+        context={"new_email": new_email},
     )
     await audit_repo.record_security_event(
         db,

@@ -658,6 +658,20 @@ async def _print_summary(db: AsyncSession) -> None:
 
 
 async def main() -> None:
+    # Предохранитель (review 2026-06-10): сид создаёт активных
+    # пользователей с is_email_verified=True и общеизвестным паролем —
+    # запуск с прод-DATABASE_URL (ошибка оператора) дал бы набор
+    # бэкдор-аккаунтов. Работаем только при settings.debug=True; на
+    # проде нужен явный флаг --force.
+    from app.config import settings
+
+    if not settings.debug and "--force" not in sys.argv:
+        logger.error(
+            "Отказ: settings.debug=False (похоже на прод). Демо-сид "
+            "создаёт аккаунты с общеизвестным паролем. Если вы уверены — "
+            "повторите с флагом --force."
+        )
+        raise SystemExit(1)
     try:
         async with async_session_factory() as db:
             await seed(db)

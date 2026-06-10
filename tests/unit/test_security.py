@@ -74,7 +74,19 @@ class TestValidatePassword:
         validate_password("12345678")
 
     def test_boundary_max(self):
-        validate_password("a" * 128)
+        # Ровно 72 байта — валидный (предел bcrypt, review 2026-06-10).
+        validate_password("a" * 72)
+
+    def test_over_72_bytes_rejected(self):
+        # bcrypt хеширует только первые 72 байта — всё дальше молча не
+        # влияло на проверку. Для UTF-8 кириллицы порог наступает уже на
+        # ~36 символах: 40 символов = 80 байт.
+        with pytest.raises(ValueError, match="72"):
+            validate_password("п" * 40)
+
+    def test_73_ascii_bytes_rejected(self):
+        with pytest.raises(ValueError, match="72"):
+            validate_password("a" * 73)
 
 
 # ---------------------------------------------------------------------
