@@ -388,3 +388,67 @@ async def get_entry_enriched(
         .where(ShowEntry.id == entry_id)
     )
     return (await db.execute(stmt)).first()
+
+
+# ---------------------------------------------------------------------
+# Агрегат «Мои выставки»
+# ---------------------------------------------------------------------
+
+_ACTIVE_STATUSES = (
+    ShowStatus.registration_open,
+    ShowStatus.registration_closed,
+    ShowStatus.in_progress,
+)
+_PAST_STATUSES = (ShowStatus.completed, ShowStatus.cancelled)
+
+
+def _my_shows_status_filter(status_group: str):
+    if status_group == "active":
+        return Show.status.in_(_ACTIVE_STATUSES)
+    if status_group == "past":
+        return Show.status.in_(_PAST_STATUSES)
+    # all — обе группы (без draft)
+    return Show.status.in_(_ACTIVE_STATUSES + _PAST_STATUSES)
+
+
+async def list_my_shows(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    status_group: str,
+    *,
+    page: int = 1,
+    per_page: int = 12,
+) -> Sequence[Row[tuple[Show, int]]]:
+    """Выставки, где у пользователя есть запись, + число его записей.
+
+    Возвращает список кортежей (Show, my_entries_count), пагинация по выставкам.
+    """
+    stmt = (
+        select(Show, func.count(ShowEntry.id).label("cnt"))
+        .join(ShowEntry, ShowEntry.show_id == Show.id)
+        .where(
+            ShowEntry.registered_by == user_id,
+            _my_shows_status_filter(status_group),
+        )
+        .group_by(Show.id)
+        .order_by(Show.date_start.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    return (await db.execute(stmt)).all()
+
+
+async def count_my_shows(
+    db: AsyncSession, user_id: uuid.UUID, status_group: str
+) -> int:
+    """Число выставок (DISTINCT), где у пользователя есть запись, в группе."""
+    stmt = (
+        select(func.count(func.distinct(Show.id)))
+        .select_from(Show)
+        .join(ShowEntry, ShowEntry.show_id == Show.id)
+        .where(
+            ShowEntry.registered_by == user_id,
+            _my_shows_status_filter(status_group),
+        )
+    )
+    return int((await db.execute(stmt)).scalar_one())

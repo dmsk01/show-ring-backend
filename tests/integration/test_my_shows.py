@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -72,3 +72,46 @@ async def test_list_user_entries_enriched_returns_names(db_session):
     assert single is not None
     _, single_dog_name, _, _ = single
     assert single_dog_name == "Рекс Тест"
+
+
+async def test_list_my_shows_groups_and_counts(db_session):
+    breed = await _breed(db_session)
+    rank = await _rank(db_session)
+    user = await _user(db_session)
+    cls = await _show_class(db_session, breed.animal_type_id)
+
+    def mk_dog(n):
+        d = Dog(breed_id=breed.id, name=n, sex=SexEnum.male)
+        db_session.add(d)
+        return d
+
+    d1, d2, d3 = mk_dog("D1"), mk_dog("D2"), mk_dog("D3")
+    await db_session.commit()
+
+    active = Show(organizer_id=user.id, name="Активная", rank_id=rank.id,
+                  date_start=date.today(), status=ShowStatus.registration_open)
+    past = Show(organizer_id=user.id, name="Прошедшая", rank_id=rank.id,
+                date_start=date.today() - timedelta(days=30),
+                status=ShowStatus.completed)
+    db_session.add_all([active, past])
+    await db_session.commit()
+
+    db_session.add_all([
+        ShowEntry(show_id=active.id, dog_id=d1.id, show_class_id=cls.id, registered_by=user.id),
+        ShowEntry(show_id=active.id, dog_id=d2.id, show_class_id=cls.id, registered_by=user.id),
+        ShowEntry(show_id=past.id, dog_id=d3.id, show_class_id=cls.id, registered_by=user.id),
+    ])
+    await db_session.commit()
+
+    rows = await repo.list_my_shows(db_session, user.id, "active", page=1, per_page=12)
+    total = await repo.count_my_shows(db_session, user.id, "active")
+    assert total == 1
+    assert len(rows) == 1
+    show_obj, count = rows[0]
+    assert show_obj.id == active.id
+    assert count == 2
+
+    past_total = await repo.count_my_shows(db_session, user.id, "past")
+    assert past_total == 1
+    all_total = await repo.count_my_shows(db_session, user.id, "all")
+    assert all_total == 2
