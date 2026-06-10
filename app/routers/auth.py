@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.redis import get_redis
 from redis.asyncio import Redis
 from app.middleware.progressive_ban import check_rate_limit
+from app.config import settings
 from app.database import get_db
 from app.services.auth import (
     confirm_email_change,
@@ -14,8 +15,19 @@ from app.services.auth import (
     login_user,
     logout_user,
 )
+from app.services.otp_auth import (
+    OTPExpiredError,
+    OTPInvalidError,
+    OTPRateLimitedError,
+    OTPUserBlockedError,
+    send_otp_code,
+    verify_otp_code,
+)
+from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
 from app.schemas.user import (
     EmailChangeConfirm,
+    PhoneSendCodeRequest,
+    PhoneVerifyCodeRequest,
     RefreshRequest,
     ResendVerification,
     TokenResponse,
@@ -29,6 +41,38 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ИСПРАВЛЕНО: единое сообщение для register, чтобы не было user enumeration.
 _REGISTER_RESPONSE = {"message": "Проверьте email для подтверждения"}
+
+# Анти-enumeration: ответ одинаков для нового и существующего номера.
+_SEND_CODE_RESPONSE = {"message": "Код отправлен"}
+
+
+def _deliver_refresh(response: Response, tokens: TokenResponse) -> TokenResponse:
+    """
+    Гибкая доставка refresh-токена: по умолчанию — в теле (мобильный
+    клиент), при AUTH_REFRESH_COOKIE=true — httpOnly-cookie для веба
+    (XSS-устойчиво), в теле refresh_token=null.
+    """
+    if settings.auth_refresh_cookie and tokens.refresh_token:
+        response.set_cookie(
+            "refresh_token",
+            tokens.refresh_token,
+            httponly=True,
+            secure=not settings.debug,
+            samesite="strict",
+            max_age=settings.refresh_token_expire_days * 86400,
+            # Cookie уходит только на /auth/* (refresh, logout) —
+            # минимизирует поверхность утечки.
+            path="/auth",
+        )
+        tokens.refresh_token = None
+    return tokens
+
+
+def _extract_refresh(request: Request, body: RefreshRequest) -> str:
+    raw = body.refresh_token or request.cookies.get("refresh_token")
+    if not raw:
+        raise HTTPException(status_code=401, detail="missing_refresh_token")
+    return raw
 
 
 @router.post(
@@ -200,6 +244,7 @@ async def login_form(
 async def refresh(
     request: Request,
     body: RefreshRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> TokenResponse:
@@ -213,7 +258,9 @@ async def refresh(
     try:
         # ИСПРАВЛЕНО: возвращаем TokenResponse целиком — клиент обязан
         # заменить refresh-токен. См. rotation в services.auth.refresh_access_token.
-        return await refresh_access_token(db, body.refresh_token)
+        return _deliver_refresh(
+            response, await refresh_access_token(db, _extract_refresh(request, body))
+        )
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -226,6 +273,7 @@ async def refresh(
 async def logout(
     request: Request,
     body: RefreshRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
@@ -237,7 +285,72 @@ async def logout(
         fail_closed=True,  # bug_247: см. /register
     )
     try:
-        await logout_user(db, body.refresh_token)
+        await logout_user(db, _extract_refresh(request, body))
+        if settings.auth_refresh_cookie:
+            response.delete_cookie("refresh_token", path="/auth")
         return {"message": "Успешный выход"}
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+
+@router.post(
+    "/send-code",
+    summary="Отправка OTP-кода на телефон",
+    description=(
+        "Принимает номер в E.164, отправляет SMS с одноразовым кодом "
+        "(TTL 5 минут). Повторная отправка на тот же номер — не чаще "
+        "раза в 60 секунд (429). Ответ одинаков для нового и "
+        "существующего номера (анти-enumeration)."
+    ),
+)
+async def send_code(
+    request: Request,
+    body: PhoneSendCodeRequest,
+    redis: Redis = Depends(get_redis),
+    sms: SMSProvider = Depends(get_sms_provider),
+):
+    # IP-лимит поверх per-phone cooldown'а: cooldown не мешает перебирать
+    # РАЗНЫЕ номера с одного IP (SMS pumping). bug_247: fail_closed.
+    await check_rate_limit(
+        request, limit=5, window=60, redis=redis, fail_closed=True
+    )
+    try:
+        await send_otp_code(redis, sms, body.phone)
+    except OTPRateLimitedError:
+        raise HTTPException(status_code=429, detail="too_many_requests")
+    except SMSDeliveryError:
+        # Детали провайдера наружу не отдаём; cooldown уже стоит.
+        raise HTTPException(status_code=502, detail="sms_delivery_failed")
+    return _SEND_CODE_RESPONSE
+
+
+@router.post(
+    "/verify-code",
+    summary="Вход/регистрация по OTP-коду",
+    description=(
+        "Проверяет код из SMS (максимум 3 попытки, затем код сжигается). "
+        "При первом входе создаёт пользователя по номеру. Возвращает "
+        "access + refresh (refresh — в httpOnly-cookie при "
+        "AUTH_REFRESH_COOKIE=true). 400 — неверный код, 401 — код "
+        "истёк/исчерпан."
+    ),
+)
+async def verify_code(
+    request: Request,
+    body: PhoneVerifyCodeRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+) -> TokenResponse:
+    await check_rate_limit(
+        request, limit=10, window=60, redis=redis, fail_closed=True
+    )
+    try:
+        tokens = await verify_otp_code(db, redis, body.phone, body.code)
+    except OTPExpiredError:
+        raise HTTPException(status_code=401, detail="code_expired")
+    except OTPUserBlockedError:
+        raise HTTPException(status_code=401, detail="user_blocked")
+    except OTPInvalidError:
+        raise HTTPException(status_code=400, detail="invalid_code")
+    return _deliver_refresh(response, tokens)
