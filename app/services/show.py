@@ -475,3 +475,63 @@ async def cancel_entry(
             raise ValueError("registration_locked")
     await db.delete(entry)
     await db.commit()
+
+
+async def update_entry(
+    db: AsyncSession,
+    show_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+    *,
+    show_class_id: uuid.UUID | None,
+    handler_id: uuid.UUID | None,
+    notes: str | None,
+    today: date,
+) -> ShowEntry:
+    """Редактирование своей записи: класс/хендлер/заметки.
+
+    catalog_number не трогаем. Менять собаку нельзя (это другая запись).
+    Разрешено только пока регистрация открыта (иначе registration_locked).
+    """
+    entry = await repo.get_show_entry(db, entry_id)
+    if entry is None or entry.show_id != show_id:
+        raise ValueError("entry_not_found")
+    if entry.registered_by != requester_id and not is_admin:
+        raise ValueError("forbidden")
+
+    show = await repo.get_show(db, show_id)
+    if show is None:
+        raise ValueError("not_found")
+    if show.status != ShowStatus.registration_open and not is_admin:
+        raise ValueError("registration_locked")
+
+    # Смена класса — валидируем по возрасту собаки (как в register_entry).
+    if show_class_id is not None and show_class_id != entry.show_class_id:
+        cls = await db.get(ShowClass, show_class_id)
+        if cls is None:
+            raise ValueError("show_class_not_found")
+        dog = await dog_repo.get_dog(db, entry.dog_id)
+        if dog is None or dog.date_of_birth is None:
+            raise ValueError("dog_birth_date_missing")
+        breed = await db.get(Breed, dog.breed_id)
+        if breed is None:
+            raise ValueError("breed_not_found")
+        if cls.animal_type_id != breed.animal_type_id:
+            raise ValueError("class_animal_type_mismatch")
+        age_months = show_rules.age_in_months_on(dog.date_of_birth, show.date_start)
+        available = await show_rules.list_available_classes_for_age(
+            db, breed.animal_type_id, age_months
+        )
+        if not any(c.id == show_class_id for c in available):
+            raise ValueError("class_not_available_for_age")
+        entry.show_class_id = show_class_id
+
+    if handler_id is not None:
+        entry.handler_id = handler_id
+    if notes is not None:
+        entry.notes = notes
+
+    await db.commit()
+    await db.refresh(entry)
+    return entry

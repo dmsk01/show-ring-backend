@@ -12,6 +12,7 @@ from app.models.reference import Breed, ShowClass, ShowRank
 from app.models.show import Show, ShowEntry, ShowStatus
 from app.models.user import User
 from app.repositories import show as repo
+from app.services import show as svc
 
 
 async def _breed(db_session):
@@ -117,3 +118,81 @@ async def test_list_my_shows_groups_and_counts(db_session):
     assert all_total == 2
     all_rows = await repo.list_my_shows(db_session, user.id, "all", page=1, per_page=12)
     assert len(all_rows) == 2
+
+
+async def test_update_entry_changes_notes_and_keeps_catalog(db_session):
+    breed = await _breed(db_session)
+    rank = await _rank(db_session)
+    user = await _user(db_session)
+    cls = await _show_class(db_session, breed.animal_type_id)
+    dog = Dog(breed_id=breed.id, name="Барс", sex=SexEnum.male,
+              date_of_birth=date.today() - timedelta(days=600))
+    db_session.add(dog)
+    show = Show(organizer_id=user.id, name="Активная2", rank_id=rank.id,
+                date_start=date.today(), status=ShowStatus.registration_open)
+    db_session.add(show)
+    await db_session.commit()
+    entry = ShowEntry(show_id=show.id, dog_id=dog.id, show_class_id=cls.id,
+                      registered_by=user.id, catalog_number=5, notes="old")
+    db_session.add(entry)
+    await db_session.commit()
+
+    updated = await svc.update_entry(
+        db_session, show_id=show.id, entry_id=entry.id,
+        requester_id=user.id, is_admin=False,
+        show_class_id=None, handler_id=None, notes="new note",
+        today=date.today(),
+    )
+    assert updated.notes == "new note"
+    assert updated.catalog_number == 5  # сохранён
+
+
+async def test_update_entry_forbidden_for_other_user(db_session):
+    breed = await _breed(db_session)
+    rank = await _rank(db_session)
+    owner = await _user(db_session)
+    other = await _user(db_session)
+    cls = await _show_class(db_session, breed.animal_type_id)
+    dog = Dog(breed_id=breed.id, name="Чужой", sex=SexEnum.male)
+    db_session.add(dog)
+    show = Show(organizer_id=owner.id, name="Активная3", rank_id=rank.id,
+                date_start=date.today(), status=ShowStatus.registration_open)
+    db_session.add(show)
+    await db_session.commit()
+    entry = ShowEntry(show_id=show.id, dog_id=dog.id, show_class_id=cls.id,
+                      registered_by=owner.id)
+    db_session.add(entry)
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="forbidden"):
+        await svc.update_entry(
+            db_session, show_id=show.id, entry_id=entry.id,
+            requester_id=other.id, is_admin=False,
+            show_class_id=None, handler_id=None, notes="x",
+            today=date.today(),
+        )
+
+
+async def test_update_entry_locked_when_registration_closed(db_session):
+    breed = await _breed(db_session)
+    rank = await _rank(db_session)
+    user = await _user(db_session)
+    cls = await _show_class(db_session, breed.animal_type_id)
+    dog = Dog(breed_id=breed.id, name="Поздно", sex=SexEnum.male)
+    db_session.add(dog)
+    show = Show(organizer_id=user.id, name="Закрыта", rank_id=rank.id,
+                date_start=date.today(), status=ShowStatus.registration_closed)
+    db_session.add(show)
+    await db_session.commit()
+    entry = ShowEntry(show_id=show.id, dog_id=dog.id, show_class_id=cls.id,
+                      registered_by=user.id)
+    db_session.add(entry)
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="registration_locked"):
+        await svc.update_entry(
+            db_session, show_id=show.id, entry_id=entry.id,
+            requester_id=user.id, is_admin=False,
+            show_class_id=None, handler_id=None, notes="x",
+            today=date.today(),
+        )
