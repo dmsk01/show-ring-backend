@@ -4,6 +4,8 @@
 Бизнес-правила:
 - Добавлять собаку может владелец питомника (где собака будет числиться)
   или admin. Если kennel_id=None — любой авторизованный заводчик.
+- Управлять карточкой (update/delete/фото) может прямой владелец
+  (Dog.owner_id), владелец питомника собаки или admin.
 - Пол родителей должен соответствовать роли (отец=male, мать=female) —
   иначе родословная теряет смысл.
 - Собака не может быть собственным предком (защита от цикла в self-ref).
@@ -61,6 +63,30 @@ async def _check_kennel_owner(
     return kennel
 
 
+async def _check_can_manage_dog(
+    db: AsyncSession,
+    dog: Dog,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+) -> None:
+    """
+    Единое право на управление карточкой собаки (update/delete/фото):
+    прямой владелец (Dog.owner_id), владелец питомника собаки или admin.
+
+    ИСПРАВЛЕНО (review 2026-06-10): после ввода Dog.owner_id четыре
+    операции оставались на старой модели «владелец питомника или admin» —
+    владелец собаки без питомника не мог редактировать собственную
+    карточку. Симметрично _check_can_register_dog в services/show.py.
+    """
+    if is_admin or dog.owner_id == requester_id:
+        return
+    if dog.kennel_id is not None:
+        kennel = await kennel_repo.get_kennel(db, dog.kennel_id)
+        if kennel is not None and kennel.owner_id == requester_id:
+            return
+    raise ValueError("forbidden")
+
+
 async def create_dog(
     db: AsyncSession,
     requester_id: uuid.UUID,
@@ -103,13 +129,9 @@ async def update_dog(
     obj = await repo.get_dog(db, dog_id)
     if obj is None:
         raise ValueError("not_found")
-    # Право на правку: владелец питомника, к которому привязана собака,
-    # либо admin. Если собака без питомника — только admin (т.к. у нас
-    # нет прямого FK dog → user).
-    if obj.kennel_id is not None:
-        await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
-    elif not is_admin:
-        raise ValueError("forbidden")
+    # Право на правку: владелец собаки (owner_id), владелец питомника
+    # или admin — см. _check_can_manage_dog.
+    await _check_can_manage_dog(db, obj, requester_id, is_admin)
 
     if "kennel_id" in fields and fields["kennel_id"] is not None:
         # Перенос в другой питомник — нужно право на новый питомник тоже.
@@ -144,12 +166,9 @@ async def delete_dog(
     obj = await repo.get_dog(db, dog_id)
     if obj is None:
         raise ValueError("not_found")
-    # Право (как в update_dog): владелец питомника собаки или admin.
-    # Собака без питомника — только admin (прямого FK dog→user нет).
-    if obj.kennel_id is not None:
-        await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
-    elif not is_admin:
-        raise ValueError("forbidden")
+    # Право (как в update_dog): владелец собаки, владелец питомника
+    # или admin.
+    await _check_can_manage_dog(db, obj, requester_id, is_admin)
     # Каскады БД: dog_photos, show_entries (а с ними show_results) и
     # dog_titles удаляются (ON DELETE CASCADE). Ссылки детей/помётов на
     # эту собаку как родителя (father_id/mother_id) → SET NULL.
@@ -166,16 +185,13 @@ async def add_images(
 ) -> Dog:
     """
     Привязывает уже загруженные файлы к собаке (этап 18). Право — владелец
-    питомника собаки или admin; собака без питомника — только admin (нет
-    прямого FK dog→user). Зеркало classified.add_images.
+    собаки, владелец питомника или admin (_check_can_manage_dog).
+    Зеркало classified.add_images.
     """
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
         raise ValueError("not_found")
-    if dog.kennel_id is not None:
-        await _check_kennel_owner(db, dog.kennel_id, requester_id, is_admin)
-    elif not is_admin:
-        raise ValueError("forbidden")
+    await _check_can_manage_dog(db, dog, requester_id, is_admin)
 
     try:
         for img in images:
@@ -203,17 +219,13 @@ async def delete_image(
 ) -> Dog:
     """
     Открепляет фото от собаки — удаляет только связь dog_photos, сам файл в
-    хранилище не трогаем (этап 18). Право — владелец питомника собаки или
-    admin; собака без питомника — только admin (нет прямого FK dog→user).
-    Зеркало add_images.
+    хранилище не трогаем (этап 18). Право — владелец собаки, владелец
+    питомника или admin (_check_can_manage_dog). Зеркало add_images.
     """
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
         raise ValueError("not_found")
-    if dog.kennel_id is not None:
-        await _check_kennel_owner(db, dog.kennel_id, requester_id, is_admin)
-    elif not is_admin:
-        raise ValueError("forbidden")
+    await _check_can_manage_dog(db, dog, requester_id, is_admin)
 
     photo = await repo.get_dog_photo(db, dog_id, file_id)
     if photo is None:
