@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.user import EmailVerificationToken
+from app.models.user import EmailVerificationToken, User
 from app.schemas.user import TokenResponse
 from app.utils.security import (
     create_access_token,
@@ -146,7 +146,7 @@ async def verify_email(db: AsyncSession, raw_token: str):
     await db.commit()
 
 
-async def issue_token_pair(db: AsyncSession, user) -> TokenResponse:
+async def issue_token_pair(db: AsyncSession, user: User) -> TokenResponse:
     """
     Выдать пару access+refresh для уже аутентифицированного пользователя.
     Коммитит транзакцию. Вызывающий ОБЯЗАН проверить is_active до вызова.

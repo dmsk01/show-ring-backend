@@ -69,7 +69,10 @@ def _deliver_refresh(response: Response, tokens: TokenResponse) -> TokenResponse
 
 
 def _extract_refresh(request: Request, body: RefreshRequest) -> str:
-    raw = body.refresh_token or request.cookies.get("refresh_token")
+    # cookie-режим: берём из куки только при явно включённом AUTH_REFRESH_COOKIE.
+    raw = body.refresh_token or (
+        request.cookies.get("refresh_token") if settings.auth_refresh_cookie else None
+    )
     if not raw:
         raise HTTPException(status_code=401, detail="missing_refresh_token")
     return raw
@@ -188,6 +191,7 @@ async def confirm_email_change_endpoint(
 async def login(
     request: Request,
     body: UserCreate,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> TokenResponse:
@@ -199,7 +203,7 @@ async def login(
         fail_closed=True,  # bug_247: см. /register
     )
     try:
-        return await login_user(db, body.email, body.password)
+        return _deliver_refresh(response, await login_user(db, body.email, body.password))
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -215,6 +219,7 @@ async def login(
 )
 async def login_form(
     request: Request,
+    response: Response,
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
@@ -227,7 +232,7 @@ async def login_form(
     )
     try:
         # OAuth2 спецификация требует поле username — мапим его на email.
-        return await login_user(db, form.username, form.password)
+        return _deliver_refresh(response, await login_user(db, form.username, form.password))
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -243,8 +248,8 @@ async def login_form(
 )
 async def refresh(
     request: Request,
-    body: RefreshRequest,
     response: Response,
+    body: RefreshRequest = RefreshRequest(),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> TokenResponse:
@@ -272,8 +277,8 @@ async def refresh(
 )
 async def logout(
     request: Request,
-    body: RefreshRequest,
     response: Response,
+    body: RefreshRequest = RefreshRequest(),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
@@ -284,10 +289,12 @@ async def logout(
         redis=redis,
         fail_closed=True,  # bug_247: см. /register
     )
+    # Cookie чистим всегда, даже если токен уже отозван — иначе браузер
+    # остаётся с невалидной кукой и получает 401 на каждом refresh.
+    if settings.auth_refresh_cookie:
+        response.delete_cookie("refresh_token", path="/auth")
     try:
         await logout_user(db, _extract_refresh(request, body))
-        if settings.auth_refresh_cookie:
-            response.delete_cookie("refresh_token", path="/auth")
         return {"message": "Успешный выход"}
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))

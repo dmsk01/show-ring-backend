@@ -149,7 +149,7 @@ class KennelModerationItem(BaseModel):
 
 class UserAdminItem(BaseModel):
     id: uuid.UUID
-    email: str
+    email: str | None  # None у пользователей, вошедших по телефону (phone-OTP)
     is_active: bool
     is_email_verified: bool
     roles: list[RoleEnum]

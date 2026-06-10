@@ -24,7 +24,7 @@ def _redis(**overrides):
     r.get = AsyncMock(return_value=None)
     r.incr = AsyncMock(return_value=1)
     r.expire = AsyncMock()
-    r.delete = AsyncMock()
+    r.delete = AsyncMock(return_value=1)
     for name, value in overrides.items():
         setattr(r, name, value)
     return r
@@ -182,4 +182,14 @@ async def test_verify_blocked_user_rejected(monkeypatch):
     )
 
     with pytest.raises(otp_auth.OTPUserBlockedError):
+        await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+
+
+async def test_verify_race_condition_raises_expired(monkeypatch):
+    # DEL вернул 0 — параллельный верный запрос уже «съел» ключ.
+    # Второй запрос должен получить OTPExpiredError, а не выдать токены.
+    redis = _redis_with_code()
+    redis.delete = AsyncMock(return_value=0)  # код уже удалён параллельным запросом
+
+    with pytest.raises(otp_auth.OTPExpiredError):
         await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)

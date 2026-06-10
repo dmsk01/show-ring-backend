@@ -138,8 +138,14 @@ async def verify_otp_code(
             )
         raise OTPInvalidError
 
-    # Успех: код строго одноразовый.
-    await redis.delete(_code_key(phone), _attempts_key(phone))
+    # Успех: код строго одноразовый. DEL атомарен и возвращает число
+    # удалённых ключей — из двух параллельных верных запросов код
+    # «съест» ровно один, второй получит 401.
+    consumed = await redis.delete(_code_key(phone))
+    await redis.delete(_attempts_key(phone))
+    if consumed == 0:
+        security_logger.warning("otp_verify_race phone=%s", phone)
+        raise OTPExpiredError
 
     # Find-or-create: подтверждённый номер = аутентифицированный
     # пользователь; отдельного шага «регистрация» нет.
