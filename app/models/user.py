@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     String,
@@ -33,18 +34,35 @@ class RoleEnum(str, enum.Enum):
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
+    # Phone-OTP: у пользователя обязан быть хотя бы один идентификатор —
+    # email (классическая регистрация) или phone (вход по SMS-коду).
+    __table_args__ = (
+        CheckConstraint(
+            "email IS NOT NULL OR phone IS NOT NULL",
+            name="ck_users_email_or_phone",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    # Phone-OTP: email стал nullable — телефонные пользователи живут без него.
+    email: Mapped[str | None] = mapped_column(
+        String(255), unique=True, index=True, nullable=True
+    )
+    # E.164: "+" и до 15 цифр → 16 символов достаточно.
+    phone: Mapped[str | None] = mapped_column(
+        String(16), unique=True, index=True, nullable=True
+    )
     # Этап 19: новый email, ожидающий подтверждения по ссылке. В email
     # выше попадает только после клика (POST /auth/confirm-email-change).
     # Пока заполнен — старый email остаётся рабочим. NULL = смена не идёт.
     pending_email: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
-    hashed_password: Mapped[str] = mapped_column(String(255))
+    hashed_password: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(default=True)
     is_email_verified: Mapped[bool] = mapped_column(default=False)
     # Этап 4: переход с String-плейсхолдера на реальный FK → files.id.
