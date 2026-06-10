@@ -74,3 +74,116 @@ async def test_send_daily_limit_raises_rate_limited():
     with pytest.raises(otp_auth.OTPRateLimitedError):
         await otp_auth.send_otp_code(redis, sms, PHONE)
     sms.send.assert_not_called()
+
+
+from uuid import uuid4
+
+from app.services import auth as auth_service
+
+
+CODE = "123456"
+
+
+def _fake_user(*, is_active: bool = True):
+    user = MagicMock()
+    user.id = uuid4()
+    user.is_active = is_active
+    user.roles = []
+    return user
+
+
+def _db():
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.flush = AsyncMock()
+    return db
+
+
+def _redis_with_code(attempts: int = 1):
+    return _redis(
+        get=AsyncMock(return_value=hash_token(CODE)),
+        incr=AsyncMock(return_value=attempts),
+    )
+
+
+# ---------- verify_otp_code ----------
+
+
+async def test_verify_no_code_raises_expired():
+    redis = _redis(get=AsyncMock(return_value=None))
+
+    with pytest.raises(otp_auth.OTPExpiredError):
+        await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+
+
+async def test_verify_wrong_code_raises_invalid_and_keeps_code():
+    redis = _redis_with_code(attempts=1)
+
+    with pytest.raises(otp_auth.OTPInvalidError):
+        await otp_auth.verify_otp_code(_db(), redis, PHONE, "000000")
+    redis.delete.assert_not_called()  # попытки остались — код жив
+
+
+async def test_verify_third_wrong_attempt_burns_code():
+    redis = _redis_with_code(attempts=settings.otp_max_attempts)
+
+    with pytest.raises(otp_auth.OTPInvalidError):
+        await otp_auth.verify_otp_code(_db(), redis, PHONE, "000000")
+    redis.delete.assert_awaited_once_with(
+        f"otp:code:{PHONE}", f"otp:attempts:{PHONE}"
+    )
+
+
+async def test_verify_over_limit_raises_expired():
+    redis = _redis_with_code(attempts=settings.otp_max_attempts + 1)
+
+    with pytest.raises(otp_auth.OTPExpiredError):
+        await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+    redis.delete.assert_awaited()  # код сожжён
+
+
+async def test_verify_success_existing_user(monkeypatch):
+    user = _fake_user()
+    redis = _redis_with_code()
+    monkeypatch.setattr(
+        user_repo, "get_user_by_phone", AsyncMock(return_value=user)
+    )
+    issue = AsyncMock(return_value="TOKENS")
+    monkeypatch.setattr(otp_auth, "issue_token_pair", issue)
+
+    result = await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+
+    assert result == "TOKENS"
+    issue.assert_awaited_once()
+    redis.delete.assert_awaited()  # код одноразовый
+
+
+async def test_verify_success_creates_missing_user(monkeypatch):
+    new_user = _fake_user()
+    redis = _redis_with_code()
+    monkeypatch.setattr(
+        user_repo, "get_user_by_phone", AsyncMock(return_value=None)
+    )
+    create = AsyncMock(return_value=new_user)
+    monkeypatch.setattr(user_repo, "create_user_by_phone", create)
+    monkeypatch.setattr(
+        otp_auth, "issue_token_pair", AsyncMock(return_value="TOKENS")
+    )
+
+    result = await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+
+    assert result == "TOKENS"
+    create.assert_awaited_once()
+
+
+async def test_verify_blocked_user_rejected(monkeypatch):
+    redis = _redis_with_code()
+    monkeypatch.setattr(
+        user_repo,
+        "get_user_by_phone",
+        AsyncMock(return_value=_fake_user(is_active=False)),
+    )
+
+    with pytest.raises(otp_auth.OTPUserBlockedError):
+        await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
