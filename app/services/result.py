@@ -86,6 +86,48 @@ async def _ensure_can_edit(
 # ---------------------------------------------------------------------
 
 
+# Коды титулов, которые выдаёт compute_class_titles (уровень ринга
+# класса). Только их можно отзывать при исправлении результата —
+# BOB/BIG/BIS живут на уровне set_best_* и пересчитываются там.
+_CLASS_TITLE_CODES = (
+    show_rules.TITLE_CW,
+    show_rules.TITLE_CAC,
+    show_rules.TITLE_R_CAC,
+    show_rules.TITLE_JUW,
+)
+
+
+async def _revoke_stale_class_titles(
+    db: AsyncSession,
+    *,
+    result: ShowResult,
+    entry: ShowEntry,
+    show: Show,
+    awards: Iterable[show_rules.TitleAward],
+) -> None:
+    """
+    Отзывает классные титулы прошлого расчёта, которых нет в новом.
+
+    ИСПРАВЛЕНО (review 2026-06-10): _apply_class_titles только добавляет —
+    после исправления «отлично/1 место» → «очень хорошо» строки CW/CAC в
+    dog_titles и titles_cache оставались навсегда (титул переживал свой
+    результат; ошибочный CAC влияет на чемпионство). Зеркало защиты в
+    delete_result, но точечно: только классные коды, не трогая BOB/BIG/BIS.
+    """
+    new_codes = {a.code for a in awards}
+    stale_codes = [c for c in _CLASS_TITLE_CODES if c not in new_codes]
+    if not stale_codes:
+        return
+    await repo.delete_dog_titles_by_codes(
+        db, dog_id=entry.dog_id, show_id=show.id, codes=stale_codes
+    )
+    if result.titles_cache:
+        result.titles_cache = [
+            item for item in result.titles_cache
+            if item["code"] not in stale_codes
+        ]
+
+
 async def _apply_class_titles(
     db: AsyncSession,
     *,
@@ -226,6 +268,11 @@ async def upsert_class_result(
         a.code == show_rules.TITLE_CW for a in awards
     )
 
+    # Сначала отзываем титулы прошлого расчёта, ставшие неверными,
+    # затем выдаём актуальные (см. _revoke_stale_class_titles).
+    await _revoke_stale_class_titles(
+        db, result=result, entry=entry, show=show, awards=awards
+    )
     await _apply_class_titles(
         db, result=result, entry=entry, show=show, awards=awards
     )

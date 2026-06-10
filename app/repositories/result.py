@@ -16,7 +16,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dog import Dog
-from app.models.reference import Breed, Grade
+from app.models.reference import Breed, Grade, Title
 from app.models.result import DogTitle, ShowResult
 from app.models.show import ShowEntry
 
@@ -244,6 +244,33 @@ async def delete_dog_titles_for_show(
     """
     stmt = delete(DogTitle).where(
         DogTitle.dog_id == dog_id, DogTitle.show_id == show_id
+    )
+    await db.execute(stmt)
+
+
+async def delete_dog_titles_by_codes(
+    db: AsyncSession,
+    *,
+    dog_id: uuid.UUID,
+    show_id: uuid.UUID,
+    codes: Sequence[str],
+) -> None:
+    """
+    Отзывает у собаки на выставке только титулы с указанными кодами.
+
+    Используется при ИСПРАВЛЕНИИ результата ринга (review 2026-06-10):
+    отзываем классные титулы (cw/cac/r-cac/juw) прошлого расчёта, не
+    задевая BOB/BIG/BIS — те живут на уровне set_best_* и отзываются
+    своим reset'ом.
+    """
+    if not codes:
+        return
+    stmt = delete(DogTitle).where(
+        DogTitle.dog_id == dog_id,
+        DogTitle.show_id == show_id,
+        DogTitle.title_id.in_(
+            select(Title.id).where(Title.code.in_(list(codes)))
+        ),
     )
     await db.execute(stmt)
 
