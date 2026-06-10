@@ -196,3 +196,12 @@ async def test_update_entry_locked_when_registration_closed(db_session):
             show_class_id=None, handler_id=None, notes="x",
             today=date.today(),
         )
+
+
+async def test_my_shows_route_registered_in_openapi(client):
+    r = await client.get("/openapi.json")
+    assert r.status_code == 200
+    paths = r.json()["paths"]
+    assert "/shows/entries/my" in paths
+    assert "get" in paths["/shows/entries/my"]
+    assert "patch" in paths["/shows/{show_id}/entries/{entry_id}"]

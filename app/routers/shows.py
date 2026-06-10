@@ -24,10 +24,14 @@ from app.repositories import show as repo
 from app.schemas.show import (
     AvailableClass,
     AvailableClassesResponse,
+    MyShowEntryResponse,
+    MyShowItem,
+    MyShowPage,
     ShowCreate,
     ShowEntryCreate,
     ShowEntryPage,
     ShowEntryResponse,
+    ShowEntryUpdate,
     ShowJudgeCreate,
     ShowJudgeResponse,
     ShowPage,
@@ -463,11 +467,39 @@ async def create_entry(
         _raise_for_error(e)
 
 
+# Путь без {show_id} (два сегмента после /shows), поэтому с
+# GET /shows/{show_id} не конфликтует.
+@router.get(
+    "/entries/my",
+    response_model=MyShowPage,
+    summary="Мои выставки (где у меня есть запись)",
+)
+async def list_my_shows(
+    status_group: str = Query("all", pattern="^(all|active|past)$"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(12, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = await repo.list_my_shows(
+        db, user.id, status_group, page=page, per_page=per_page
+    )
+    total = await repo.count_my_shows(db, user.id, status_group)
+    items = [
+        MyShowItem(
+            **ShowResponse.model_validate(show).model_dump(),
+            my_entries_count=cnt,
+        )
+        for show, cnt in rows
+    ]
+    return MyShowPage(items=items, total=total, page=page, per_page=per_page)
+
+
 # /entries/my должен идти ДО /entries/{eid}, иначе FastAPI попробует
 # распарсить "my" как UUID.
 @router.get(
     "/{show_id}/entries/my",
-    response_model=list[ShowEntryResponse],
+    response_model=list[MyShowEntryResponse],
     summary="Мои записи на эту выставку",
 )
 async def list_my_entries(
@@ -475,7 +507,16 @@ async def list_my_entries(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await repo.list_user_entries_for_show(db, show_id, user.id)
+    rows = await repo.list_user_entries_for_show_enriched(db, show_id, user.id)
+    return [
+        MyShowEntryResponse(
+            **ShowEntryResponse.model_validate(entry).model_dump(),
+            dog_name=dog_name,
+            class_code=class_code,
+            class_name=class_name,
+        )
+        for entry, dog_name, class_code, class_name in rows
+    ]
 
 
 @router.get(
@@ -522,3 +563,41 @@ async def cancel_entry(
         )
     except ValueError as e:
         _raise_for_error(e)
+
+
+@router.patch(
+    "/{show_id}/entries/{entry_id}",
+    response_model=MyShowEntryResponse,
+    summary="Изменить свою запись",
+)
+async def update_entry(
+    show_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    body: ShowEntryUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.update_entry(
+            db,
+            show_id=show_id,
+            entry_id=entry_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+            show_class_id=body.show_class_id,
+            handler_id=body.handler_id,
+            notes=body.notes,
+            today=date.today(),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+    row = await repo.get_entry_enriched(db, entry_id)
+    if row is None:  # запись только что обновили; None возможен лишь в гонке
+        raise HTTPException(404, "entry_not_found")
+    entry, dog_name, class_code, class_name = row
+    return MyShowEntryResponse(
+        **ShowEntryResponse.model_validate(entry).model_dump(),
+        dog_name=dog_name,
+        class_code=class_code,
+        class_name=class_name,
+    )
