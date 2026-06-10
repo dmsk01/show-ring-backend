@@ -70,6 +70,26 @@ class Settings(BaseSettings):
     # ведёт на страницу фронта, та дёргает POST-эндпоинт с токеном.
     frontend_base_url: str = "http://localhost:5173"
 
+    # --- Phone OTP auth ---
+    # Провайдер SMS: "mock" — пишет в лог вместо отправки (dev/тесты),
+    # "smsru" — реальный HTTP-провайдер sms.ru (нужен SMS_API_KEY).
+    sms_provider: str = "mock"
+    sms_api_key: str | None = None
+    # Длина кода и TTL. 6 цифр / 5 минут — индустриальный стандарт.
+    otp_code_length: int = 6
+    otp_code_ttl_seconds: int = 300
+    # Пауза между отправками на один номер (анти-спам по конкретному номеру).
+    otp_send_cooldown_seconds: int = 60
+    # Попыток ввода кода до его сжигания.
+    otp_max_attempts: int = 3
+    # Потолок SMS на номер в сутки — защита от SMS-pumping (каждое SMS
+    # стоит денег; атакующий перебором номеров может сжечь бюджет).
+    otp_daily_limit: int = 10
+    # Доставка refresh-токена: False — в теле ответа (текущее поведение
+    # /auth/login, удобно мобильному приложению); True — httpOnly-cookie
+    # для веб-фронта, в теле refresh_token=null.
+    auth_refresh_cookie: bool = False
+
     # --- Этап 14: Production-readiness ---
     # log_json=true — JSON-логи для ELK/Loki. false — человекочитаемый
     # текст для разработки (см. app/logging_config.py).
