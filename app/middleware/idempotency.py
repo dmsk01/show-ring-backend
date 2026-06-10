@@ -34,7 +34,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from app.config import settings
-from app.redis import redis_client
+
+# Импортируем МОДУЛЬ, а не значение: init_redis() пере-присваивает
+# app.redis.redis_client уже после импорта этого файла. Value-импорт
+# (`from app.redis import redis_client`) связал бы имя с None навсегда —
+# и весь Idempotency-механизм молча отключился бы (ровно это и было,
+# см. review 2026-06-10; тот же баг ранее — в ws_manager).
+from app import redis as redis_state
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,9 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         if request.method not in _UNSAFE_METHODS:
             return await call_next(request)
 
+        # Читаем клиента через модуль (см. комментарий у импорта) и
+        # фиксируем в локальную переменную — единый снимок на весь запрос.
+        redis_client = redis_state.redis_client
         key = request.headers.get(_HEADER)
         if not key or redis_client is None:
             return await call_next(request)

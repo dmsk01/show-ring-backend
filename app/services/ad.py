@@ -25,7 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.ad import AdBanner, AdCampaign, AdEventType, CampaignStatus
-from app.redis import redis_client
+
+# Импортируем МОДУЛЬ, а не значение: init_redis() пере-присваивает
+# app.redis.redis_client после импорта. Value-импорт навсегда связал бы
+# имя с None — дедупликация молча не работала бы (review 2026-06-10).
+from app import redis as redis_state
 from app.repositories import ad as repo
 from app.services.rabbit import rabbit_service
 
@@ -228,6 +232,7 @@ async def _is_duplicate(
     Если Redis недоступен — fail-open: считаем не-дублем. Лучше учесть
     лишнее событие, чем терять статистику при сбое инфры.
     """
+    redis_client = redis_state.redis_client
     if redis_client is None:
         return False
     if not ip or not user_agent_hash:
