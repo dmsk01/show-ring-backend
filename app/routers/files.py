@@ -16,7 +16,15 @@ import logging
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,7 +77,15 @@ async def _queue_image_processing(
 )
 async def upload_file(
     file: UploadFile = File(...),
-    folder: str = "general",
+    # ИСПРАВЛЕНО (review 2026-06-10): folder — сырая строка, попадающая в
+    # S3-ключ. Без валидации пользователь мог класть файлы в чужие
+    # префиксы, плодить мусорные префиксы или ронять 500 строкой длиннее
+    # String(512) на files.s3_key. Белый список вместо regex: префиксы
+    # documents/ (приватные сгенерированные документы) и variants/
+    # (превью от воркера) зарезервированы и в список не входят.
+    folder: str = Query(
+        "general", pattern="^(general|dogs|kennels|classifieds|posts)$"
+    ),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -103,6 +119,13 @@ async def upload_file(
 async def list_file_variants(
     file_id: uuid.UUID, db: AsyncSession = Depends(get_db)
 ):
+    # ИСПРАВЛЕНО (review 2026-06-10): варианты наследуют видимость
+    # оригинала — иначе приватный image (скан родословной) был бы
+    # доступен анонимно через варианты в обход ACL. Семантика та же,
+    # что у GET /files/{id}: 404, не 403.
+    db_file = await db.get(UploadedFile, file_id)
+    if db_file is None or not db_file.is_public:
+        raise HTTPException(status_code=404, detail="Файл не найден")
     variants = (
         await db.execute(
             select(FileVariant)
@@ -123,6 +146,10 @@ async def get_file_variant(
 ):
     variant = await db.get(FileVariant, variant_id)
     if variant is None:
+        raise HTTPException(status_code=404, detail="Вариант не найден")
+    # Видимость варианта = видимость оригинала (см. list_file_variants).
+    db_file = await db.get(UploadedFile, variant.file_id)
+    if db_file is None or not db_file.is_public:
         raise HTTPException(status_code=404, detail="Вариант не найден")
     body, content_type = await file_storage.get_file_stream(variant.s3_key)
     return Response(
