@@ -115,3 +115,5 @@ async def test_list_my_shows_groups_and_counts(db_session):
     assert past_total == 1
     all_total = await repo.count_my_shows(db_session, user.id, "all")
     assert all_total == 2
+    all_rows = await repo.list_my_shows(db_session, user.id, "all", page=1, per_page=12)
+    assert len(all_rows) == 2

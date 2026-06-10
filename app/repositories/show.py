@@ -13,7 +13,7 @@ import uuid
 from datetime import date
 from typing import Sequence
 
-from sqlalchemy import Row, func, select
+from sqlalchemy import ColumnElement, Row, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -402,7 +402,8 @@ _ACTIVE_STATUSES = (
 _PAST_STATUSES = (ShowStatus.completed, ShowStatus.cancelled)
 
 
-def _my_shows_status_filter(status_group: str):
+def _my_shows_status_filter(status_group: str) -> ColumnElement[bool]:
+    """Валидация status_group — на вызывающем (роутер); неизвестные значения трактуются как "all" (обе группы, без draft)."""
     if status_group == "active":
         return Show.status.in_(_ACTIVE_STATUSES)
     if status_group == "past":
@@ -441,7 +442,10 @@ async def list_my_shows(
 async def count_my_shows(
     db: AsyncSession, user_id: uuid.UUID, status_group: str
 ) -> int:
-    """Число выставок (DISTINCT), где у пользователя есть запись, в группе."""
+    """Число выставок (DISTINCT), где у пользователя есть запись, в группе.
+
+    Считаем DISTINCT выставки, не записи — JOIN без DISTINCT задвоил бы счёт.
+    """
     stmt = (
         select(func.count(func.distinct(Show.id)))
         .select_from(Show)
