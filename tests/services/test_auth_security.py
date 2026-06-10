@@ -257,3 +257,36 @@ async def test_logout_unknown_token_rejected(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid_or_expired_token"):
         await auth_service.logout_user(_fake_session(), "raw-token")
+
+
+# ---------- phone-only users: нет пароля — нет парольного входа ----------
+
+
+async def test_login_phone_only_user_rejected(monkeypatch):
+    """Юзер без hashed_password (вход по телефону) не логинится паролем."""
+    user = _fake_user()
+    user.hashed_password = None
+    monkeypatch.setattr(
+        user_repo, "get_user_by_email", AsyncMock(return_value=user)
+    )
+
+    with pytest.raises(ValueError, match="invalid_credentials"):
+        await auth_service.login_user(
+            _fake_session(), "alice@example.com", "CorrectPass1"
+        )
+
+
+async def test_change_password_phone_only_user_403(monkeypatch):
+    user = _fake_user()
+    user.hashed_password = None
+
+    with pytest.raises(HTTPException) as exc:
+        await auth_service.change_password(
+            _fake_session(),
+            user,
+            "anything",
+            "NewPass123",
+            ip=None,
+            user_agent=None,
+        )
+    assert exc.value.status_code == 403

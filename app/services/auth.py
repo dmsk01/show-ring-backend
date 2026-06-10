@@ -146,6 +146,27 @@ async def verify_email(db: AsyncSession, raw_token: str):
     await db.commit()
 
 
+async def issue_token_pair(db: AsyncSession, user) -> TokenResponse:
+    """
+    Выдать пару access+refresh для уже аутентифицированного пользователя.
+    Коммитит транзакцию. Вызывающий ОБЯЗАН проверить is_active до вызова.
+    """
+    roles = [r.role.value for r in user.roles]
+    access = create_access_token(str(user.id), roles)
+
+    raw_refresh = create_refresh_token_value()
+    refresh_hash = hash_token(raw_refresh)
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        days=settings.refresh_token_expire_days
+    )
+    await user_repo.create_refresh_token(db, user.id, refresh_hash, expires_at)
+    await db.commit()
+
+    return TokenResponse(
+        access_token=access, refresh_token=raw_refresh, token_type="bearer"
+    )
+
+
 async def login_user(db: AsyncSession, email: str, password: str) -> TokenResponse:
     user = await user_repo.get_user_by_email(db, email)
 
@@ -156,6 +177,13 @@ async def login_user(db: AsyncSession, email: str, password: str) -> TokenRespon
     if not user:
         dummy_verify_password()
         security_logger.info("login_failed reason=no_user email=%s", email)
+        raise ValueError("invalid_credentials")
+
+    # Phone-OTP: у телефонного пользователя пароля нет — парольный вход
+    # для него закрыт. dummy-верификация выравнивает время ответа.
+    if not user.hashed_password:
+        dummy_verify_password()
+        security_logger.info("login_failed reason=no_password user_id=%s", user.id)
         raise ValueError("invalid_credentials")
 
     if not verify_password(password, user.hashed_password):
@@ -174,23 +202,7 @@ async def login_user(db: AsyncSession, email: str, password: str) -> TokenRespon
     # Если решим ужесточить — блокировать чувствительные операции,
     # а не сам вход.
 
-    roles = [r.role.value for r in user.roles]
-
-    access = create_access_token(str(user.id), roles)
-
-    raw_refresh = create_refresh_token_value()
-    refresh_hash = hash_token(raw_refresh)
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        days=settings.refresh_token_expire_days
-    )
-
-    await user_repo.create_refresh_token(db, user.id, refresh_hash, expires_at)
-
-    await db.commit()
-
-    return TokenResponse(
-        access_token=access, refresh_token=raw_refresh, token_type="bearer"
-    )
+    return await issue_token_pair(db, user)
 
 
 async def refresh_access_token(
@@ -233,20 +245,7 @@ async def refresh_access_token(
         await db.rollback()
         raise ValueError("user_blocked")
 
-    roles = [r.role.value for r in user.roles]
-    access = create_access_token(str(user.id), roles)
-
-    raw_refresh = create_refresh_token_value()
-    new_hash = hash_token(raw_refresh)
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        days=settings.refresh_token_expire_days
-    )
-    await user_repo.create_refresh_token(db, user.id, new_hash, expires_at)
-
-    await db.commit()
-    return TokenResponse(
-        access_token=access, refresh_token=raw_refresh, token_type="bearer"
-    )
+    return await issue_token_pair(db, user)
 
 
 async def logout_user(db: AsyncSession, raw_refresh_token: str):
@@ -287,8 +286,10 @@ async def request_email_change(
     """
     # 1. Re-auth: без текущего пароля смену не запустить (украденный
     #    access-токен без пароля бессилен).
-    if not current_password or not verify_password(
-        current_password, user.hashed_password
+    if (
+        not user.hashed_password
+        or not current_password
+        or not verify_password(current_password, user.hashed_password)
     ):
         security_logger.warning(
             "email_change_bad_password user_id=%s", user.id
@@ -429,7 +430,7 @@ async def change_password(
     Сменить пароль: re-auth, хеширование нового, отзыв всех refresh,
     письмо-уведомление на текущий адрес, аудит. Коммитит сам.
     """
-    if not verify_password(current_password, user.hashed_password):
+    if not user.hashed_password or not verify_password(current_password, user.hashed_password):
         security_logger.warning(
             "password_change_bad_password user_id=%s", user.id
         )
