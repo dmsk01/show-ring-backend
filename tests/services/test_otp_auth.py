@@ -5,6 +5,7 @@ Redis и репозиторий замоканы (паттерн test_auth_secur
 """
 
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -74,11 +75,6 @@ async def test_send_daily_limit_raises_rate_limited():
     with pytest.raises(otp_auth.OTPRateLimitedError):
         await otp_auth.send_otp_code(redis, sms, PHONE)
     sms.send.assert_not_called()
-
-
-from uuid import uuid4
-
-from app.services import auth as auth_service
 
 
 CODE = "123456"
