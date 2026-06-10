@@ -1,40 +1,41 @@
 # Code Review Report
-**Date:** 2026-06-05
+**Date:** 2026-06-10
 **Project:** ShowTail — платформа управления выставками животных (FastAPI async, PostgreSQL/asyncpg, SQLAlchemy 2.0, RabbitMQ/aio-pika, Redis, MinIO)
+
+> Это второй полный аудит (первый — 2026-06-05). С тех пор добавились:
+> owner_id у собак + `GET /users/me/dogs`, открепление фото, фильтр
+> объявлений по полу, единая пагинация kennels/breeds, демо-сид и ветка
+> `feat/my-shows` (repo-слой + схемы, роутер ещё в работе). Я перечитал
+> и старые поверхности (auth, файлы, middleware), и весь новый код.
+> Инлайн-комментарии в коде читал и уважал; где комментарий уже
+> закрывает вопрос — цитирую его, а не флагую.
 
 ## Executive Summary
 
-ShowTail is a mature, heavily-reviewed backend. The code carries an unusually
-dense trail of prior audit fixes (`bug_2xx audit 2026-05-28`, `ultrareview`,
-`review 2026-06-01`) and the inline comments explaining each decision are
-accurate and worth respecting. I read those comments before flagging anything;
-where a comment already addresses a concern I either dropped the finding or
-quote the comment below.
+Ядро безопасности по-прежнему крепкое: анти-enumeration на регистрации и
+логине с constant-time dummy-verify, ротация refresh-токенов с reuse-detection,
+fail-closed rate-limit на auth, magic-bytes валидация файлов, ACL на приватные
+документы, доверие X-Forwarded-For только от прокси из allow-list, атомарный
+Lua rate-limiter (member-коллизия из прошлого отчёта исправлена). Инъекций
+(SQL/командных/path traversal в файловых ключах S3-маршрутов) не найдено,
+голых `except:`, мутабельных дефолтов и wildcard-импортов нет, юнит-сьют
+зелёный (97 passed).
 
-The high-value security surfaces are solid:
+**Headline-находка:** класс бага «stale-binding» (`from app.redis import
+redis_client` связывает имя с `None` навсегда), который в прошлом ревью был
+найден и исправлен в `ws_manager`, **остался ещё в двух местах**:
 
-- **Auth** — bcrypt with constant-time dummy verify against user-enumeration,
-  refresh-token rotation with reuse-detection, JWT decoded with explicit
-  `require_exp/require_sub`, re-auth required for email/password changes, all
-  auth endpoints `fail_closed=True` on rate-limit.
-- **Injection** — no f-string SQL anywhere; raw SQL (`analytics.py`,
-  `classified.py` FTS) uses bound `:params` exclusively; ORM filters use Core
-  expressions. DOCX template names are hardcoded literals (no path traversal).
-- **Files** — magic-bytes validation (not Content-Type), private documents
-  gated behind owner/admin ACL with `is_public=False`, `Content-Disposition`
-  hardened via RFC 6266 `filename*` (closes the bug_202 header-injection class).
-- **Async hygiene** — CPU-bound work (docxtpl, Pillow) is correctly offloaded
-  with `asyncio.to_thread`; one DB session per message in the worker.
+1. `app/middleware/idempotency.py` — **весь Idempotency-Key-механизм
+   (кэш + in-flight lock) никогда не работал**;
+2. `app/services/ad.py` — **антифрод-дедупликация рекламных событий
+   никогда не работала** (накрутка кликов/показов не фильтруется).
 
-**No critical (RCE / SQLi / auth-bypass) issues were found.** The headline
-finding is a stale-import that left the support-chat Redis pub/sub permanently
-disabled (now fixed and covered by tests); the rest are a packaging/repro
-inconsistency and a set of minor doc/hygiene items.
+Остальные значимые находки — бизнес-логика: отсутствует проверка роли при
+создании выставки, несогласованная модель владения собакой после ввода
+`owner_id`, неотзыв титулов при исправлении результата и дырка в валидации
+дат при обновлении выставки.
 
-**Code fixes applied in this pass:** `ws_manager` stale-binding (Major, +tests),
-rate-limiter sorted-set member collision, and two stale comments
-(`main.py` middleware order, `worker/main.py` ack semantics). The
-packaging/pinning items below are left as decisions for the team, not changed.
+Критических (RCE / SQLi / обход аутентификации) проблем не найдено.
 
 ---
 
@@ -46,204 +47,325 @@ None found.
 
 ## Major Issues 🟠
 
-### [STALE-BINDING] WebSocket manager never engaged Redis pub/sub — `from app.redis import redis_client` captured a permanent `None` — ✅ FIXED
-- File: `app/services/ws_manager.py:48` (import), `:101`/`:128`/`:171` (uses)
-- Description: `ws_manager.py` imported the **value**
-  (`from app.redis import redis_client`), binding the name to whatever
-  `app.redis.redis_client` was at import time — i.e. `None`, since
-  `init_redis()` only assigns the real client later, during app startup. A
-  `from … import name` binding does not track that reassignment, so
-  `redis_client` stayed `None` for the life of the process. Effects on the
-  support chat:
-  - `connect()` — `redis_client is not None` was always `False` → the instance
-    **never subscribed** to the Redis channel; `_listen` never ran.
-  - `publish()` — always fell through to `_broadcast_local` → messages reached
-    only sockets on the *same* API instance; **cross-instance pub/sub was
-    silently dead** (broken the moment you `--scale api=2`).
-- Note: This is exactly the stale-binding trap that `health.py` explicitly
-  avoids, with a documented comment: *"Импортируем модуль, а не значение:
-  init_redis() пере-присваивает app.redis.redis_client уже после импорта.
-  `from app.redis import redis_client` связал бы стейл-None…"* (`health.py:30`).
-  `ws_manager` simply didn't follow the same rule.
-- Correction to the first draft of this report: an earlier version flagged a
-  *race* in `connect()` (need_subscribe read in-lock, task registered out-of-lock)
-  as the Major issue. On closer analysis that race is **not reachable** under
-  single-threaded asyncio — there is no `await` between the in-lock read and the
-  out-of-lock write, so two `connect()` coroutines cannot interleave there — and
-  it was moot anyway because `redis_client` was always `None`. The real defect is
-  the import above.
-- Fix applied: import the module (`from app import redis as redis_state`) and
-  reference `redis_state.redis_client` in `connect`/`publish`/`_listen`. The
-  subscribe-registration was also consolidated fully inside `self._lock` as
-  defensive hardening (clearer, robust if an `await` is ever added to the block),
-  not because a live race existed.
-- Tests: `tests/unit/test_ws_manager.py` (6 cases, fake Redis pub/sub + fake
-  sockets, no infra needed) now covers first-connect subscription, single
-  subscription under concurrent connects, exactly-once delivery, JSON publish
-  through Redis, and disconnect-cancels-subscription. These would fail on the
-  stale-import version (the patched `app.redis.redis_client` never reaches the
-  manager). Full unit suite: **80 passed**.
+### [STALE-BINDING] Idempotency-Key middleware постоянно отключён — `from app.redis import redis_client` навсегда связан с `None`
+- File: `app/middleware/idempotency.py:37` (импорт), `:117` (проверка), `:132`/`:162`/`:236` (использования)
+- Description: `app/redis.py:11` инициализирует `redis_client: Redis | None = None`,
+  а реальный клиент присваивается только в `init_redis()` на старте приложения.
+  `from app.redis import redis_client` копирует **значение** на момент импорта
+  модуля (который происходит при `import app.main`, т.е. ДО lifespan), и
+  переприсваивание глобала в `app.redis` это имя не обновляет. В `dispatch`
+  проверка `if not key or redis_client is None: return await call_next(request)`
+  всегда срабатывает → вся тщательно спроектированная машинерия (кэш ответа,
+  SETNX in-flight lock против двойной обработки, identity-namespacing из
+  bug_018, лимит размера тела из review 2026-05-28) — мёртвый код. Клиентский
+  ретрай POST'а с `Idempotency-Key` молча выполняет операцию дважды.
+- Note: это ровно тот баг, что был найден и исправлен 2026-06-05 в
+  `ws_manager.py`. И ровно та ловушка, о которой предупреждает комментарий в
+  `health.py:29`: *«Импортируем модуль, а не значение: init_redis()
+  пере-присваивает app.redis.redis_client уже после импорта»*. После фикса
+  ws_manager кодовую базу не прогрепали на остальные value-импорты.
+- Suggestion: `from app import redis as redis_state` + обращения через
+  `redis_state.redis_client` (как в `dependencies.py:8`, `health.py:31`,
+  `ws_manager.py:53`). Добавить регрессионный тест по образцу
+  `tests/unit/test_ws_manager.py` (патчим `app.redis.redis_client` фейком и
+  проверяем, что второй запрос с тем же ключом получает кэш / 409).
 
-### [BUILD/DEPENDENCIES] Committed `packages/` wheel cache is incomplete and does not match the documented offline-install flow
-- File: `requirements.txt:4`, `scripts/download_packages.sh:21`, `packages/`
-- Description: `requirements.txt` declares the runtime deps and the header says
-  *"Для офлайн-установки: scripts/download_packages.sh"*. But:
-  - The download script writes to **`offline_packages/`**, while the directory
-    actually committed to git is **`packages/`** — two different names.
-  - `packages/` is **missing every heavy runtime dependency that the app imports
-    at module load**: `passlib`, `python-jose`, `bcrypt`, `boto3`, `aioboto3`,
-    `Pillow`, `aiofiles`, `python-magic`, `reportlab`, `docxtpl`, `aiosmtplib`,
-    `APScheduler`, `structlog`, `bleach` (verified: none present). The wheels that
-    *are* committed are a partial set (fastapi, pydantic_core, starlette, redis,
-    jinja2, httpx, uvicorn, …), several platform-pinned (`cp313-win_amd64`).
-  - Therefore `pip install --no-index --find-links=packages/ -r requirements.txt`
-    cannot succeed, and even if it did the app would `ImportError` on first load
-    (`app/utils/security.py` imports passlib/jose; `app/middleware/sanitization.py`
-    imports bleach; `app/services/file_storage.py` imports aioboto3).
-- Note: This is not a correctness bug in the running app (a normal online
-  `pip install` works), but it makes the repo misleading and bloats history with
-  ~70 binary wheels, including OS/Python-specific ones that won't install on Linux
-  containers (the Dockerfile builds on its own).
-- Suggestion: Decide on one mechanism. Either (a) remove `packages/` from git,
-  add it to `.gitignore`, and rely on `download_packages.sh` → `offline_packages/`
-  on demand; or (b) if a committed offline cache is genuinely required, regenerate
-  it from the full `requirements.txt` for the target platform and rename it to
-  match the script. Don't ship a partial, platform-pinned cache.
+### [STALE-BINDING] Антифрод-дедупликация рекламных событий постоянно отключена
+- File: `app/services/ad.py:28` (импорт), `:231` (проверка), `:240` (использование)
+- Description: тот же класс бага. `_is_duplicate_event` начинается с
+  `if redis_client is None: return False` («не дубль») — и это выполняется
+  всегда. Документированное окно дедупликации (*«Дедупликация событий:
+  60-секундное окно. Внутри окна повтор от того же (ip + user_agent + banner +
+  тип) считается фродом и не учитывается»*, `ad.py:35`) не работает с момента
+  написания: повторные клики/показы от одного клиента учитываются в статистике
+  без ограничений. Рекламодатель платит за накрученные цифры.
+- Suggestion: тот же фикс — импорт модуля; плюс юнит-тест, что при живом
+  (фейковом) Redis второй идентичный клик в окне помечается дублем.
+
+### [AUTHZ] Создать выставку может любой авторизованный пользователь — заявленная проверка роли не реализована
+- File: `app/routers/shows.py:92-105`, `app/services/show.py:53-64` (ср. докстринг `:5`)
+- Description: докстринг сервиса прямо формулирует правило: *«Создавать
+  выставку может только organizer или admin»* — но ни роутер
+  (`Depends(get_current_user)`), ни сервис роль не проверяют. Любой свежий
+  аккаунт может создавать выставки, открывать регистрацию, собирать записи
+  чужих собак (а в перспективе этапа оплаты — и entry_fee). Готовый инструмент
+  есть и используется в соседних модулях: `require_any_role` (`dependencies.py:156`)
+  и `is_writer` (admin|organizer) для блога.
+- Suggestion: `user: User = Depends(require_any_role("organizer", "admin"))`
+  на `POST /shows` (или проверка в сервисе с `ValueError("forbidden")`), плюс
+  интеграционный тест «обычный user → 403».
+
+### [BUSINESS] Несогласованная модель владения собакой: владелец без питомника не может редактировать собственную собаку
+- File: `app/services/dog.py:107-112` (update), `:147-152` (delete), `:174-178` (add_images), `:211-216` (delete_image)
+- Description: коммит `fa0862a` ввёл `Dog.owner_id`: `create_dog` записывает
+  `fields["owner_id"] = requester_id` (`dog.py:83`), `/users/me/dogs` и запись
+  на выставку (`services/show.py:374`) работают по нему. Но права на
+  **update/delete/фото** остались на старой модели «владелец питомника или
+  admin»: для собаки без питомника — *только admin*. Итог: пользователь
+  легально создаёт собаку без питомника (`create_dog`: «Без питомника —
+  пропускаем»), видит её в «моих собаках», записывает на выставку — но не
+  может исправить опечатку в кличке, добавить фото или удалить карточку (403).
+- Note: комментарии в этих четырёх местах («у нас нет прямого FK dog → user»,
+  «нет прямого FK dog→user») устарели — прямой FK теперь есть
+  (`Dog.owner_id`). Это тот случай, когда обычно точные комментарии проекта
+  вводят в заблуждение.
+- Suggestion: единый хелпер `_can_manage_dog(dog, requester_id, is_admin)`:
+  `owner_id == requester` ИЛИ владелец питомника ИЛИ admin — и применить во
+  всех четырёх операциях (симметрично логике `_check_can_register_dog` в
+  shows). Обновить комментарии.
+
+### [BUSINESS] Исправление результата не отзывает уже выданные титулы
+- File: `app/services/result.py:154-235` (upsert), `:89-134` (_apply_class_titles)
+- Description: `upsert_class_result` после правки оценки/места пересчитывает
+  титулы и **добавляет** новые (`_apply_class_titles` только INSERT'ит и
+  дописывает `titles_cache`), но не удаляет ставшие неверными. Сценарий: судья
+  ошибочно ввёл «отлично/1 место» → собака получила CW+CAC в `dog_titles` и
+  `titles_cache`; судья исправляет на «очень хорошо» → флаг `is_class_winner`
+  корректно снимается (`result.py:225-227`), а **строки CW/CAC в dog_titles и
+  записи в titles_cache остаются навсегда**. Титул переживает свой результат —
+  ровно то, от чего защищается `delete_result` (его докстринг: *«удаляя
+  результат, отзываем их целиком, иначе титул переживёт свой результат»*).
+  Ошибочный CAC влияет на чемпионство — это юридически значимые данные РКФ.
+- Suggestion: в `upsert_class_result` перед `_apply_class_titles` отзывать
+  класс-титулы прошлого расчёта: удалить из `dog_titles` (dog_id, show_id) те
+  коды, которых нет в новом `awards` (BOB/BIG/BIS не трогать — они живут на
+  уровне set_best_*), и синхронно чистить `titles_cache`. Либо документировать
+  обходной путь «удалить результат и ввести заново» и закрыть PUT для
+  изменения grade/placement.
+
+### [VALIDATION] PUT /shows/{id} обходит кросс-валидацию дат — можно получить date_end < date_start
+- File: `app/schemas/show.py:57-66` (ShowUpdate), `app/services/show.py:80-86`
+- Description: `ShowBase` валидирует `date_end >= date_start` и
+  `registration_deadline <= date_start` (`schemas/show.py:36-49`), но
+  `ShowUpdate` — отдельная модель **без** этого валидатора, а сервис просто
+  делает `setattr`. Частичный PATCH-семантикой PUT можно: сдвинуть
+  `date_start` за существующий `date_end`; поставить
+  `registration_deadline` позже начала выставки (тогда `register_entry`
+  пропустит запись после фактического начала); получить отрицательную
+  длительность. Возраст собаки для классов считается на `date_start` —
+  некорректные даты ломают и доступные классы.
+- Suggestion: в `update_show` после применения полей собрать итоговые
+  значения (новые поверх текущих) и прогнать те же проверки, что в
+  `ShowBase._validate_dates` (или валидировать merged-словарь до setattr).
 
 ---
 
 ## Minor Issues 🟡
 
-### [DEPENDENCIES] Unpinned versions / no lockfile
-- File: `requirements.txt:8`, `requirements-dev.txt`
-- Description: All deps use `>=` floors with no upper bound and no lockfile
-  (`requirements.lock` / `pip-tools` / hashes). Builds are non-reproducible and
-  exposed to a breaking or malicious upstream release. The codebase already shows
-  the cost of this (`bcrypt<4.1` had to be capped because passlib broke — good
-  catch, but it argues for pinning the rest too).
-- Note: `requirements.txt:19` documents one real cap with rationale:
-  *"passlib 1.7.4 несовместим с bcrypt>=4.1 (ломает verify: 'password > 72 bytes')"* —
-  respect that line; the suggestion is to extend the discipline, not change it.
-- Suggestion: Generate a hashed lockfile (`pip-compile --generate-hashes`) and
-  install from it in CI/Docker; keep `requirements.txt` as the human-edited input.
+### [SECURITY/VALIDATION] Параметр `folder` при загрузке файла не валидируется — произвольный префикс ключа S3
+- File: `app/routers/files.py:73`, `app/services/file_storage.py:152`
+- Description: `folder` — сырая query-строка, попадает в
+  `s3_key = f"{folder}/{uuid4()}.{ext}"`. Traversal в смысле ФС в S3 не
+  работает (ключи буквальные), но пользователь может: положить свой публичный
+  файл в `documents/` (префикс приватных сгенерированных документов —
+  смешение namespace'ов), создать мусорные префиксы, или передать строку
+  >512 символов → нарушение `String(512)` на `files.s3_key` → 500.
+- Suggestion: whitelist (`general|dogs|kennels|classifieds|posts`) или
+  regex `^[a-z0-9_-]{1,32}$`, иначе 422.
 
-### [HYGIENE] Binary wheels checked into version control
-- File: `packages/*.whl`
-- Description: ~70 `.whl` files (incl. compiled `cp313-cp313-win_amd64`) live in
-  git. This bloats clones, churns history on every dep bump, and ties artifacts to
-  one interpreter/OS. See the Major packaging finding for the consolidation plan.
-- Suggestion: Move to `.gitignore`; fetch on demand.
+### [SECURITY/ACL] Эндпоинты вариантов изображений не проверяют `is_public` исходного файла
+- File: `app/routers/files.py:98-113` (`/{file_id}/variants`), `:116-132` (`/variants/{variant_id}`)
+- Description: `GET /files/{id}` корректно прячет приватные файлы
+  (`is_public=False` → 404, см. комментарий review 2026-06-01 в
+  `models/file.py:65-72`), но оба variant-эндпоинта отдают данные без этой
+  проверки. Сегодня не эксплуатируется: приватны только сгенерированные
+  PDF/DOCX, а варианты создаются только для изображений. Но это латентный
+  обход ACL — первый же приватный image (например, скан родословной) станет
+  доступен анонимно через варианты.
+- Suggestion: в обоих эндпоинтах подгружать родительский `UploadedFile` и
+  повторять проверку `is_public` (та же семантика 404).
 
-### [DOCS] Idempotency middleware runs *before* Sanitization, contradicting its own ordering comment
-- File: `app/main.py:109`, `app/middleware/idempotency.py:119`
-- Description: The comment in `main.py` states the intended order is
-  *"3. Idempotency — после sanitization (тело уже чистое), но до handler'а"*.
-  Given Starlette executes middleware in reverse-addition order, the actual
-  request-path order is `ProxyHeaders → SecurityHeaders → Idempotency →
-  Sanitization → RequestId → handler` — i.e. Idempotency sees the **raw**
-  (un-sanitized) body, not a clean one. This is harmless for correctness (the
-  body hash is computed on the raw body consistently across retries, and the
-  handler still receives the sanitized body), but the documented rationale is
-  wrong and will mislead the next maintainer who reasons about ordering.
-- Suggestion: Fix the comment to describe the real order, or, if "hash the
-  sanitized body" is actually desired, move `add_middleware(IdempotencyMiddleware)`
-  to be added *before* `SanitizationMiddleware`.
+### [BUSINESS] `publish_results` не публикует событие `show.results_published`, в отличие от смены статуса
+- File: `app/services/result.py:549-576` (ср. `app/services/show.py:160-174`)
+- Description: выставку можно завершить двумя путями: `PUT /shows/{id}/status`
+  (шлёт `show.results_published` через transactional outbox) и
+  `/shows/{id}/publish` → `publish_results` (НЕ шлёт — в коде стоит
+  устаревший `# TODO (этап 9): publish event ...`, хотя этап 9 давно
+  реализован). Подписчики получат уведомление о результатах только если
+  организатор выбрал «правильный» эндпоинт.
+- Suggestion: либо публиковать то же событие в `publish_results`, либо
+  сделать его тонкой обёрткой над `show_svc.change_status(...,
+  target=completed)` — одна точка правды для перехода.
 
-### [DOCS] Worker message docstrings contradict the swallow-and-ack code
-- File: `worker/main.py:67`, `worker/main.py:96`
-- Description: `on_document_message` / `on_image_message` docstrings say
-  *"Если хендлер бросает исключение наружу, ack не делается и RabbitMQ
-  переотправит сообщение позднее"*, but the body wraps the call in
-  `try/except Exception: logger.exception(...)`, so the exception never escapes
-  `message.process(requeue=False)` → the message is **always** acked. The handler
-  itself records `task.status='failed'`, so the behaviour is intentional and fine;
-  only the docstring is stale and self-contradictory.
-- Suggestion: Update the docstring to say the message is acked regardless and the
-  failure is persisted in `task.status`, matching the actual `requeue=False`
-  design.
+### [BUSINESS] Фолбэк «владелец питомника» при записи на выставку срабатывает и для собак с заданным owner_id
+- File: `app/services/show.py:370-381`
+- Description: комментарий заявляет фолбэк только для легаси: *«Для
+  легаси-собак без owner_id (бэкафилл не сопоставил) — фолбэк на владельца
+  питомника, как раньше»*. Код же применяет фолбэк всегда, когда requester не
+  owner: владелец питомника может записать на выставку собаку, у которой
+  `owner_id` указывает на другого пользователя. Возможно, это желаемое
+  (питомник управляет своими собаками — симметрично правам на update), но
+  тогда неточен комментарий; если нет — неточен код.
+- Suggestion: решить осознанно и синхронизировать: либо
+  `elif dog.owner_id is None:` перед фолбэком, либо поправить комментарий.
 
-### [CORRECTNESS] Rate-limit sorted-set member can collide under same-instant bursts
-- File: `app/middleware/progressive_ban.py:56`
-- Description: The Lua script stores each request as
-  `zadd(rate_key, now, tostring(now))` where `now = time.time()`. If two requests
-  from one IP land in the same float instant, they map to the same member and
-  `ZADD` updates the score instead of adding a second entry → the window
-  under-counts by one. Extremely unlikely at human request rates, but it slightly
-  weakens the limiter exactly under burst conditions, which is when it matters.
-- Suggestion: Make the member unique, e.g. append a counter:
-  `redis.call('zadd', rate_key, now, now .. ':' .. redis.call('incr', seq_key))`,
-  or include the request id. Keep the score as `now` for the sliding window.
+### [CORRECTNESS] `handler_id` в записи на выставку не проверяется → 500 вместо 422
+- File: `app/services/show.py:388-452` (нет проверки), `app/models/show.py:344-351` (FK)
+- Description: `register_entry` валидирует собаку, класс, породу — но не
+  `handler_id`. Несуществующий UUID хендлера → `IntegrityError` от FK на
+  `users.id` → необработанный 500 (в `register_entry` нет `except
+  IntegrityError`, в отличие от `services/dog.py:89`).
+- Suggestion: проверить существование пользователя (`get_user_by_id`) → 422
+  `handler_not_found`, и/или обернуть commit в `IntegrityError`-трансляцию.
 
-### [SECURITY/CONFIG] Weak default credentials in docker-compose
-- File: `docker-compose.yml:36`, `:55`, `:88`
-- Description: `POSTGRES_PASSWORD:-showtail`, `RABBITMQ_DEFAULT_PASS:-guest`,
-  `MINIO_ROOT_PASSWORD:-showtailminio` default to weak values if env vars are
-  unset. `SECRET_KEY` is correctly *required* (`${SECRET_KEY}` with no default),
-  and `.env.example:SECRET_KEY=change-me-in-production` is an obvious placeholder.
-- Note: The compose file already documents that the host-exposed PG port is for
-  dev convenience (`docker-compose.yml:38`), so this is mostly a prod-deploy
-  reminder, not a code defect.
-- Suggestion: Document in the deploy runbook that all `*_PASSWORD`/`*_KEY` must be
-  set in prod, or drop the `:-default` fallbacks for the secret-bearing vars so a
-  missing value fails loudly instead of silently using `guest`.
+### [CORRECTNESS] Присвоение каталожных номеров при закрытии регистрации не сериализовано
+- File: `app/services/show.py:112-130` (`change_status` берёт `get_show` без лока), `app/repositories/show.py:306-321`
+- Description: комментарий в `next_catalog_number` полагается на блокировку:
+  *«SELECT FOR UPDATE на show гарантирует, что нумерация идёт последовательно
+  в рамках одной транзакции»* — но этот лок берёт только `register_entry`;
+  `change_status` читает show обычным `db.get`. Интерливинг «параллельная
+  запись + закрытие регистрации» может оставить запись без номера или словить
+  нарушение `uq_show_entry_catalog` (→ 500). Также `_assign_catalog_numbers`
+  читает максимум `per_page=10_000` записей — на выставке крупнее лимита
+  хвост останется без номеров (для текущих масштабов ок, но лимит молчаливый).
+- Suggestion: в `change_status` при переходе в `registration_closed` брать
+  `get_show_for_update`; в `_assign_catalog_numbers` — выбирать записи без
+  лимита (или итерировать страницами до конца).
 
-### [TESTING] Critical infrastructure paths lack tests
-- File: `tests/integration/` (no coverage for the modules below)
-- Description: Integration tests exist for auth flow, classifieds, delete
-  endpoints, file ACL, notifications-read and showcase — good coverage of
-  business endpoints. But several **security/availability-critical** mechanisms
-  have no visible tests:
-  - refresh-token **rotation + reuse-attack revocation** (`services/auth.py:185`),
-  - the **idempotency** middleware (cache hit, in-flight 409, body-size skip),
-  - the **progressive rate-limiter** Lua path and `fail_closed` behaviour,
-  - ~~the **ws_manager** pub/sub fan-out~~ — ✅ now covered by
-    `tests/unit/test_ws_manager.py` (added in this pass; a subscription test
-    caught the stale-binding bug).
-- Suggestion: Add focused tests for refresh rotation/reuse and the rate-limiter
-  next (highest remaining security value).
+### [SECURITY/CONFIG] Демо-сид без предохранителя от запуска на проде
+- File: `scripts/seed_demo.py:72` (`DEMO_PASSWORD = "TestPass123!"`)
+- Description: скрипт создаёт пачку активных пользователей с
+  `is_email_verified=True` и общеизвестным паролем, подключаясь к БД из
+  настроек. Запуск с прод-`DATABASE_URL` (ошибка оператора) = набор
+  бэкдор-аккаунтов. Для dev-скрипта пароль в коде нормален; нет только
+  предохранителя.
+- Suggestion: в начале `main()` отказываться работать при
+  `settings.debug is False` (или требовать явный `--force`).
+
+### [SECURITY] Вход разрешён с неподтверждённым email
+- File: `app/services/auth.py:149-186`
+- Description: `login_user` проверяет пароль и `is_active`, но не
+  `is_email_verified` — аккаунт полнофункционален без подтверждения почты.
+  Вся машинерия verify-токенов фактически опциональна. Возможно, это
+  осознанный продуктовый выбор (низкий барьер входа) — но он нигде не
+  задокументирован, а письмо при регистрации обещает «подтверждение».
+- Suggestion: зафиксировать решение: либо блокировать логин/чувствительные
+  операции до верификации, либо комментарий в `login_user`, что это
+  намеренно.
+
+### [SECURITY] При смене email старый адрес не уведомляется
+- File: `app/services/auth.py:266-397`
+- Description: re-auth паролем и подтверждение по ссылке на НОВЫЙ адрес
+  сделаны правильно, но владелец не узнает о смене: письмо уходит только на
+  новый адрес. Атакующий с украденным паролем тихо перевешивает аккаунт на
+  свою почту (отзыв refresh-токенов при confirm ему не мешает — пароль у
+  него есть). Для сравнения: `change_password` шлёт уведомление на текущий
+  адрес (`auth.py:425-431`).
+- Suggestion: при `request_email_change` (или confirm) отправлять
+  информационное письмо на старый адрес — стандартная практика
+  («если это были не вы — смените пароль / обратитесь в поддержку»).
+
+### [HYGIENE] Пароли длиннее 72 байт молча усекаются bcrypt'ом
+- File: `app/utils/security.py:46-48` (лимит 128), `requirements.txt:19`
+- Description: `validate_password` допускает до 128 символов, но bcrypt
+  хеширует только первые 72 байта — символы дальше не влияют на проверку
+  (для UTF-8 кириллицы порог ещё ниже: ~36 символов). Практический риск низок.
+- Note: `requirements.txt:19` уже документирует смежную проблему: *«passlib
+  1.7.4 несовместим с bcrypt>=4.1 (ломает verify: "password > 72 bytes")»* —
+  пин корректный, не менять.
+- Suggestion: либо ограничить пароль 72 байтами на валидации, либо
+  pre-hash (sha256→base64) перед bcrypt — но это миграция, проще первый
+  вариант.
+
+### [CONSISTENCY] `routers/dogs.py` держит локальную копию `_is_admin`
+- File: `app/routers/dogs.py:33-34`
+- Description: review 2026-05-28 консолидировал «кто такой admin» в
+  `dependencies.is_admin` (см. комментарий `dependencies.py:166-170`:
+  «правка в одном месте»), и `shows.py`/`classifieds.py` ссылаются на него
+  (`_is_admin = is_admin`). `dogs.py` остался с собственной копией —
+  при появлении super_admin её забудут.
+- Suggestion: заменить на алиас из `dependencies`, как в `shows.py:47`.
+
+### [PRIVACY] Email'ы пользователей пишутся в security-лог
+- File: `app/services/auth.py:69`, `:89`, `:108`, `:158`, `:329`
+- Description: `security_logger` логирует `email=%s` при login_failed /
+  register_existing / resend. Это осознанное решение — комментарий
+  `auth.py:25-27`: *«Никогда не пишет самих паролей/токенов — только
+  email/user_id и тип события»*. Email тем не менее — ПДн: при выводе логов
+  в SIEM/агрегатор появляется требование к их retention/доступу (152-ФЗ/GDPR).
+- Suggestion: не менять код; зафиксировать в деплой-доке требования к
+  хранению security-логов, либо маскировать локальную часть
+  (`p***v@gmail.com`).
+
+### [DEPENDENCIES] Перенос из отчёта 2026-06-05 — всё ещё открыто
+- File: `requirements.txt`, `packages/`, `scripts/download_packages.sh`
+- Description: оба пункта прошлого ревью не закрыты: (а) все зависимости на
+  `>=` без lock-файла — невоспроизводимые сборки, открытая supply-chain
+  поверхность; (б) закоммиченный кэш `packages/` неполный (нет passlib, jose,
+  boto3, Pillow и др.), платформо-зависимый (`cp313-win_amd64`) и не
+  совпадает по имени с выходом скрипта (`offline_packages/`) — офлайн-установка
+  по документации невозможна.
+- Suggestion: см. прошлый отчёт: `pip-compile --generate-hashes` + решить
+  судьбу `packages/` (удалить из git или регенерировать целиком).
+
+### [DOCS] Мелкие устаревшие комментарии
+- File: `app/services/file_storage.py:13-17` — докстринг перечисляет
+  «JPEG/PNG/WebP/PDF», но `_MAGIC_BYTES` уже принимает и GIF (`:43-44`).
+- File: `app/services/result.py:575` — `# TODO (этап 9): publish event` —
+  этап 9 реализован, событие публикует `show.change_status` (см. Major выше).
+- Suggestion: синхронизировать — комментарии в этом проекте читают как
+  документацию, им принято верить.
 
 ---
 
 ## Positive observations ✅
 
-- **User-enumeration hardening is consistent end-to-end**: register/resend/login
-  all return identical responses regardless of account existence, with a
-  constant-time `dummy_verify_password()` on the no-user login path
-  (`services/auth.py:152`, `utils/security.py:37`).
-- **Refresh-token rotation with reuse detection** revokes the whole chain on a
-  replayed token (`services/auth.py:204`) — textbook defense-in-depth.
-- **N+1 elimination is deliberate and documented**: the official-document builders
-  bulk-load every relation via `_load_map` / `selectinload` instead of per-row
-  `db.get` (`services/document_official.py:43`), turning "thousands of round-trips
-  for a 1000-dog catalog" into a handful of `WHERE id IN (...)` queries.
-- **Transactional outbox** with `SELECT … FOR UPDATE SKIP LOCKED`
-  (`repositories/outbox.py:48`) lets multiple dispatchers run safely in parallel.
-- **Atomic Redis rate-limiting** moved into a single Lua script to close a
-  genuine check-then-act race (`middleware/progressive_ban.py:20`).
-- **Jinja autoescape bug fix** for the `.j2` extension is exactly right and the
-  comment explains the silent-XSS it closed (`services/email.py:43`).
-- **Poison-message caps** (`MAX_TASK_ATTEMPTS`) + DLX queues prevent stuck tasks
-  from looping forever (`worker/handlers/document_handler.py:38`).
-- **Blocking work offloaded** with `asyncio.to_thread` for both docxtpl and Pillow
-  — no event-loop stalls in the worker.
-- **No bare `except:`**, no mutable default args, no wildcard imports observed;
-  every broad `except Exception` is annotated and intentional.
+- **Auth-стек образцовый и не деградировал**: одинаковые ответы независимо от
+  существования аккаунта, constant-time dummy-verify (`utils/security.py:37`),
+  ротация refresh с отзывом всей цепочки при reuse (`services/auth.py:208-218`),
+  re-auth на смену email/пароля, `fail_closed=True` на всех auth-ручках с
+  понятным обоснованием (`routers/auth.py:45-52`).
+- **Находки прошлого ревью реально исправлены**: уникальный member в Lua
+  rate-limiter'е (`progressive_ban.py:108-112`), комментарий о порядке
+  middleware в `main.py:106-120` теперь описывает фактический порядок,
+  `ws_manager` переведён на модульный импорт и покрыт 6 юнит-тестами.
+- **Инъекций нет**: ни одного f-string SQL; единственный сырой SQL —
+  рекурсивный CTE родословной с bound-параметрами и защитой от циклов
+  (`repositories/dog.py:125-155`); сортировки — только через белые списки
+  колонок (`_DOG_SORT`, `_SHOW_SORT`, `_CLASSIFIED_SORT`).
+- **Файлы**: magic-bytes вместо Content-Type, потоковая проверка размера до
+  вычитывания, RFC 6266 `filename*` против header-injection
+  (`routers/files.py:151-153`), приватные документы за ACL.
+- **Доверие к прокси-заголовкам реализовано правильно**: XFF принимается
+  только от CIDR из конфига, leftmost-IP валидируется как IP
+  (`proxy_headers.py:76-96`) — закрыт обход rate-limit ротацией заголовка.
+- **Гигиена async/Python**: голых `except:` нет, мутабельных дефолтов нет,
+  CPU-bound (Pillow/docxtpl) — через `asyncio.to_thread`, сессии БД — через
+  DI/контексты.
+- **Новый код пишется с тестами**: my-shows растёт по TDD (repo-функции +
+  интеграционные тесты в одних коммитах), фильтр по полу объявлений сразу с
+  тестом изоляции. Юнит-сьют: **97 passed**.
+- **Транзакционная дисциплина**: outbox с `FOR UPDATE SKIP LOCKED`,
+  `FOR UPDATE` на show при записи, `FOR UPDATE` на результатах при
+  переизбрании BOB/BIG/BIS с подробным разбором инвариантов BIS ⊆ BIG ⊆ BOB
+  (`result.py:322-350`).
 
 ---
 
 ## Recommendations
 
-1. ✅ **Done — `ws_manager` stale-binding fixed** (module import + tests). This
-   was the only finding affecting a running instance: support-chat pub/sub now
-   actually engages Redis instead of silently degrading to local-only delivery.
-2. **Resolve the packaging story** — either delete `packages/` from git or
-   regenerate a complete, platform-correct cache that matches
-   `download_packages.sh`. Right now the offline path is broken and the repo
-   carries misleading binary artifacts.
-3. **Introduce a hashed lockfile** for reproducible, supply-chain-safe builds;
-   keep the well-reasoned `bcrypt<4.1` pin.
-4. **Reconcile the stale comments** in `main.py` (middleware order) and
-   `worker/main.py` (ack semantics) so future maintainers trust the comments —
-   which, across the rest of this codebase, are genuinely excellent.
-5. **Backfill tests** for refresh rotation, the rate-limiter, idempotency, and a
-   concurrent-connect case for `ws_manager`.
+1. **Сначала — два stale-binding фикса** (`idempotency.py`, `ad.py`): по одной
+   строке импорта + регрессионные тесты. После этого прогрепать репозиторий
+   правилом «`from app.redis import redis_client` запрещён» (можно закрепить
+   flake8-banned-imports или просто тестом на импорты) — это уже третий и
+   четвёртый экземпляры одного бага.
+2. **Закрыть authz-гэп POST /shows** ролью organizer|admin — одна строка
+   зависимости + тест.
+3. **Унифицировать права на собаку вокруг `owner_id`** (update/delete/фото) и
+   обновить четыре устаревших комментария «нет прямого FK dog→user».
+4. **Решить вопрос отзыва титулов** при исправлении результата — это данные,
+   влияющие на чемпионство; минимум — запретить смену grade/placement через
+   PUT и оставить delete+recreate.
+5. **Добавить кросс-валидацию дат в `update_show`** (merged-значения через
+   правила `ShowBase`).
+6. Точечные мелочи: whitelist `folder`, `is_public` на variant-эндпоинтах,
+   событие в `publish_results`, предохранитель в `seed_demo`, уведомление на
+   старый email.
+7. **Перенос из прошлого отчёта**: lockfile с хешами и судьба `packages/` —
+   всё ещё открыто.
+8. Когда роутер my-shows будет дописан: в PATCH записи не забыть проверку
+   `registered_by == user` (репозиторная `get_entry_enriched` сознательно
+   её не делает — докстринг честно предупреждает: *«Авторизация (проверка
+   владельца/прав) — ответственность вызывающего кода»*) и статус-гейт
+   (менять класс после закрытия регистрации нельзя — номера каталога уже
+   присвоены).
