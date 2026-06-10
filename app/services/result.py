@@ -603,21 +603,20 @@ async def publish_results(
     """
     Публикация результатов = смена статуса выставки на completed.
 
-    Дополнительно (для будущего этапа 9 — события) генерирует событие
-    show.results_published. На этапе 7 событие пока не отправляем —
-    оставляем точку расширения комментарием.
+    Тонкая обёртка над show.change_status — одна точка правды для
+    перехода: те же проверки (организатор/admin, allowed-transition) и
+    то же событие show.results_published через transactional outbox.
+    ИСПРАВЛЕНО (review 2026-06-10): раньше статус менялся здесь напрямую
+    БЕЗ события (висел устаревший TODO «этап 9» — этап давно реализован),
+    и подписчики узнавали о результатах только если организатор выбрал
+    PUT /shows/{id}/status вместо /publish.
     """
-    show = await show_repo.get_show(db, show_id)
-    if show is None:
-        raise ValueError("not_found")
-    if not (is_admin or show.organizer_id == user_id):
-        raise ValueError("forbidden")
-    if not show_rules.is_transition_allowed(
-        show.status, ShowStatus.completed
-    ):
-        raise ValueError("invalid_status_transition")
-    show.status = ShowStatus.completed
-    await db.commit()
-    await db.refresh(show)
-    # TODO (этап 9): publish event "show.results_published" в RabbitMQ.
-    return show
+    from app.services import show as show_svc  # локально: не плодим циклы
+
+    return await show_svc.change_status(
+        db,
+        show_id=show_id,
+        requester_id=user_id,
+        is_admin=is_admin,
+        target=ShowStatus.completed,
+    )

@@ -33,6 +33,7 @@ from app.models.show import (
 from app.repositories import dog as dog_repo
 from app.repositories import kennel as kennel_repo
 from app.repositories import show as repo
+from app.repositories import user as user_repo
 from app.schemas.notification import EventMessage
 from app.services import notification as notif_svc
 from app.services import show_rules
@@ -130,7 +131,13 @@ async def change_status(
     is_admin: bool,
     target: ShowStatus,
 ) -> Show:
-    obj = await repo.get_show(db, show_id)
+    # SELECT FOR UPDATE (review 2026-06-10): комментарий в
+    # next_catalog_number полагается на лок строки show, но раньше его
+    # брал только register_entry. Интерливинг «параллельная запись +
+    # закрытие регистрации» мог оставить запись без номера или словить
+    # нарушение uq_show_entry_catalog (500). Лок сериализует переход
+    # статуса с конкурентными записями.
+    obj = await repo.get_show_for_update(db, show_id)
     if obj is None:
         raise ValueError("not_found")
     await _ensure_organizer_owner(obj, requester_id, is_admin)
@@ -198,13 +205,15 @@ async def _assign_catalog_numbers(
     """
     Прогоняет все ShowEntry выставки и присваивает catalog_number тем,
     у кого его ещё нет. Порядок — по дате создания записи (FIFO).
+
+    Выборка без лимита (review 2026-06-10): раньше брали страницу в
+    10_000 записей — на выставке крупнее хвост оставался без номеров.
     """
-    entries = await repo.list_show_entries(db, show_id, page=1, per_page=10_000)
+    entries = await repo.list_entries_without_catalog_number(db, show_id)
     next_num = await repo.next_catalog_number(db, show_id)
     for entry in entries:
-        if entry.catalog_number is None:
-            entry.catalog_number = next_num
-            next_num += 1
+        entry.catalog_number = next_num
+        next_num += 1
 
 
 # ---------------------------------------------------------------------
@@ -381,10 +390,13 @@ async def _check_can_register_dog(
     ):
         raise ValueError("registration_deadline_passed")
 
-    # Записать собаку может её владелец (dog.owner_id) или admin. Для
-    # легаси-собак без owner_id (бэкафилл не сопоставил) — фолбэк на
-    # владельца питомника, как раньше. Это закрывает запись чужой собаки:
-    # без права на собаку — forbidden.
+    # Записать собаку может её владелец (dog.owner_id), владелец
+    # питомника собаки или admin — та же модель прав, что у управления
+    # карточкой (_check_can_manage_dog в services/dog.py). Фолбэк на
+    # владельца питомника действует и при заданном owner_id: питомник
+    # управляет своими собаками (review 2026-06-10 — поведение признано
+    # намеренным, комментарий синхронизирован с кодом). Без права на
+    # собаку — forbidden.
     if not is_admin:
         is_owner = dog.owner_id is not None and dog.owner_id == requester_id
         if not is_owner:
@@ -452,6 +464,12 @@ async def register_entry(
     )
     if not any(c.id == show_class_id for c in available):
         raise ValueError("class_not_available_for_age")
+
+    # Хендлер — FK на users (review 2026-06-10): несуществующий UUID
+    # раньше ронял 500 через IntegrityError, теперь — 404.
+    if handler_id is not None:
+        if await user_repo.get_user_by_id(db, handler_id) is None:
+            raise ValueError("handler_not_found")
 
     obj = await repo.create_show_entry(
         db,
@@ -542,6 +560,9 @@ async def update_entry(
         entry.show_class_id = show_class_id
 
     if handler_id is not None:
+        # Как в register_entry: валидируем FK, чтобы не ловить 500.
+        if await user_repo.get_user_by_id(db, handler_id) is None:
+            raise ValueError("handler_not_found")
         entry.handler_id = handler_id
     if notes is not None:
         entry.notes = notes

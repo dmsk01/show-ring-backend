@@ -66,6 +66,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
         "judge_assignment_not_found",
         "ring_not_found",
         "entry_not_found",
+        "handler_not_found",
     }
     if code in not_found_codes:
         raise HTTPException(404, code)

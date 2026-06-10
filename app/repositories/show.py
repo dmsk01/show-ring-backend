@@ -296,6 +296,27 @@ async def list_user_entries_for_show(
     return (await db.execute(stmt)).scalars().all()
 
 
+async def list_entries_without_catalog_number(
+    db: AsyncSession, show_id: uuid.UUID
+) -> Sequence[ShowEntry]:
+    """
+    Все записи выставки без каталожного номера, FIFO по created_at.
+
+    Намеренно без LIMIT (review 2026-06-10): используется при закрытии
+    регистрации — раньше присвоение шло по странице в 10_000 записей, и
+    на выставке крупнее лимита хвост молча оставался без номеров.
+    """
+    stmt = (
+        select(ShowEntry)
+        .where(
+            ShowEntry.show_id == show_id,
+            ShowEntry.catalog_number.is_(None),
+        )
+        .order_by(ShowEntry.created_at.asc())
+    )
+    return (await db.execute(stmt)).scalars().all()
+
+
 async def create_show_entry(db: AsyncSession, **fields) -> ShowEntry:
     obj = ShowEntry(**fields)
     db.add(obj)
