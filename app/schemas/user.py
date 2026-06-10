@@ -1,10 +1,29 @@
+import re
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.models.user import RoleEnum
 from app.utils.security import validate_password
+
+# E.164: "+", первая цифра 1–9, всего 8–15 цифр. Нормализацию
+# (пробелы/скобки/дефисы) сознательно НЕ делаем — фронт шлёт
+# канонический формат, бэкенд строг (один номер = одна запись).
+_E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+
+
+def _validate_e164(v: str) -> str:
+    v = v.strip()
+    if not _E164_RE.fullmatch(v):
+        raise ValueError(
+            "Номер должен быть в формате E.164, например +79991234567"
+        )
+    return v
+
+
+E164Phone = Annotated[str, AfterValidator(_validate_e164)]
 
 
 class UserCreate(BaseModel):
@@ -29,7 +48,8 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    email: str
+    email: str | None  # None у пользователей, вошедших по телефону
+    phone: str | None = None
     is_active: bool
     is_email_verified: bool
     roles: list[RoleResponse]
@@ -85,12 +105,25 @@ class ResendVerification(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
+    # None в cookie-режиме (AUTH_REFRESH_COOKIE=true): refresh уходит
+    # в httpOnly-cookie и в теле не дублируется.
+    refresh_token: str | None = None
     token_type: str
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    # None разрешён для веб-клиентов: роутер возьмёт refresh из cookie.
+    refresh_token: str | None = None
+
+
+class PhoneSendCodeRequest(BaseModel):
+    phone: E164Phone
+
+
+class PhoneVerifyCodeRequest(BaseModel):
+    phone: E164Phone
+    # Только цифры; длина с запасом под настройку otp_code_length (4–8).
+    code: str = Field(pattern=r"^\d{4,8}$")
 
 
 class UserProfileResponse(BaseModel):
