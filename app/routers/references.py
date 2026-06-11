@@ -31,8 +31,14 @@ from app.schemas.reference import (
     ShowRankResponse,
     TitleResponse,
 )
+from app.utils.locale import Locale, get_locale, localize
 
 router = APIRouter(prefix="/references", tags=["references"])
+
+# Все GET-эндпоинты локализованы по Accept-Language (дефолт ru):
+# name/description в ответе приходят на языке запроса с фолбэком на
+# русский. Резолв на сервере — контракт полей не меняется, фронту
+# достаточно прислать заголовок (см. app/utils/locale.py).
 
 
 @router.get(
@@ -40,8 +46,12 @@ router = APIRouter(prefix="/references", tags=["references"])
     response_model=list[AnimalTypeResponse],
     summary="Виды животных",
 )
-async def list_animal_types(db: AsyncSession = Depends(get_db)):
-    return await repo.list_animal_types(db)
+async def list_animal_types(
+    db: AsyncSession = Depends(get_db),
+    locale: Locale = Depends(get_locale),
+):
+    items = await repo.list_animal_types(db)
+    return [localize(AnimalTypeResponse.model_validate(o), locale) for o in items]
 
 
 @router.get(
@@ -54,8 +64,10 @@ async def list_breed_groups(
         None, description="Если задан — вернуть только группы этого вида"
     ),
     db: AsyncSession = Depends(get_db),
+    locale: Locale = Depends(get_locale),
 ):
-    return await repo.list_breed_groups(db, animal_type_id=animal_type_id)
+    items = await repo.list_breed_groups(db, animal_type_id=animal_type_id)
+    return [localize(BreedGroupResponse.model_validate(o), locale) for o in items]
 
 
 @router.get(
@@ -78,6 +90,7 @@ async def list_breeds(
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    locale: Locale = Depends(get_locale),
 ):
     # bug_219 audit 2026-05-28: эндпоинт public, без auth, c per_page
     # до 200 + поиск через ILIKE — это самый «тяжёлый» из справочников.
@@ -96,6 +109,7 @@ async def list_breeds(
         search=search,
         page=page,
         per_page=per_page,
+        locale=locale,
     )
     total = await repo.count_breeds(
         db,
@@ -104,7 +118,7 @@ async def list_breeds(
         search=search,
     )
     return BreedPage(
-        items=[BreedResponse.model_validate(b) for b in items],
+        items=[localize(BreedResponse.model_validate(b), locale) for b in items],
         total=total,
         page=page,
         per_page=per_page,
@@ -116,11 +130,15 @@ async def list_breeds(
     response_model=BreedResponse,
     summary="Порода по id",
 )
-async def get_breed(breed_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_breed(
+    breed_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    locale: Locale = Depends(get_locale),
+):
     obj = await repo.get_breed(db, breed_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="Порода не найдена")
-    return obj
+    return localize(BreedResponse.model_validate(obj), locale)
 
 
 @router.get(
@@ -131,8 +149,10 @@ async def get_breed(breed_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 async def list_show_classes(
     animal_type_id: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    locale: Locale = Depends(get_locale),
 ):
-    return await repo.list_show_classes(db, animal_type_id=animal_type_id)
+    items = await repo.list_show_classes(db, animal_type_id=animal_type_id)
+    return [localize(ShowClassResponse.model_validate(o), locale) for o in items]
 
 
 @router.get(
@@ -140,8 +160,12 @@ async def list_show_classes(
     response_model=list[ShowRankResponse],
     summary="Ранги выставок (CACIB, CAC ЧРКФ и т.д.)",
 )
-async def list_show_ranks(db: AsyncSession = Depends(get_db)):
-    return await repo.list_show_ranks(db)
+async def list_show_ranks(
+    db: AsyncSession = Depends(get_db),
+    locale: Locale = Depends(get_locale),
+):
+    items = await repo.list_show_ranks(db)
+    return [localize(ShowRankResponse.model_validate(o), locale) for o in items]
 
 
 @router.get(
@@ -152,8 +176,10 @@ async def list_show_ranks(db: AsyncSession = Depends(get_db)):
 async def list_titles(
     animal_type_id: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    locale: Locale = Depends(get_locale),
 ):
-    return await repo.list_titles(db, animal_type_id=animal_type_id)
+    items = await repo.list_titles(db, animal_type_id=animal_type_id)
+    return [localize(TitleResponse.model_validate(o), locale) for o in items]
 
 
 @router.get(
@@ -164,5 +190,7 @@ async def list_titles(
 async def list_grades(
     animal_type_id: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    locale: Locale = Depends(get_locale),
 ):
-    return await repo.list_grades(db, animal_type_id=animal_type_id)
+    items = await repo.list_grades(db, animal_type_id=animal_type_id)
+    return [localize(GradeResponse.model_validate(o), locale) for o in items]

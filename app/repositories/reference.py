@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 from typing import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reference import (
@@ -126,7 +126,12 @@ def _breed_filter_stmt(
         # ILIKE — регистронезависимый поиск по подстроке. На сотнях
         # пород производительность не критична; если станет узким
         # местом — добавим pg_trgm + GIN-индекс на этапе оптимизации.
-        stmt = stmt.where(Breed.name.ilike(f"%{search}%"))
+        # Ищем и по русскому, и по английскому имени независимо от
+        # локали запроса — пользователь может набрать любое из них.
+        pattern = f"%{search}%"
+        stmt = stmt.where(
+            or_(Breed.name.ilike(pattern), Breed.name_en.ilike(pattern))
+        )
     return stmt
 
 
@@ -137,10 +142,17 @@ async def list_breeds(
     search: str | None = None,
     page: int = 1,
     per_page: int = 50,
+    locale: str = "ru",
 ) -> Sequence[Breed]:
+    # Для en сортируем по отображаемому имени — переводу с фолбэком на
+    # русское (coalesce), чтобы алфавитный порядок соответствовал тому,
+    # что реально видит пользователь.
+    order_col = (
+        func.coalesce(Breed.name_en, Breed.name) if locale == "en" else Breed.name
+    )
     stmt = (
         _breed_filter_stmt(animal_type_id, breed_group_id, search)
-        .order_by(Breed.name)
+        .order_by(order_col)
         .offset((page - 1) * per_page)
         .limit(per_page)
     )

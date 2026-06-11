@@ -33,6 +33,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class AnimalTypeBase(BaseModel):
     code: str = Field(..., max_length=32, examples=["dog"])
     name: str = Field(..., max_length=128, examples=["Собака"])
+    # Английский перевод (name — русский, канонический). Публичные
+    # эндпоинты резолвят локаль по Accept-Language и отдают нужный язык
+    # прямо в name; *_en в ответе — дополнительная информация и поле
+    # для админ-CRUD.
+    name_en: str | None = Field(None, max_length=128, examples=["Dog"])
 
 
 class AnimalTypeCreate(AnimalTypeBase):
@@ -42,6 +47,7 @@ class AnimalTypeCreate(AnimalTypeBase):
 class AnimalTypeUpdate(BaseModel):
     code: str | None = Field(None, max_length=32)
     name: str | None = Field(None, max_length=128)
+    name_en: str | None = Field(None, max_length=128)
 
 
 class AnimalTypeResponse(AnimalTypeBase):
@@ -62,7 +68,9 @@ class BreedGroupBase(BaseModel):
     number: int = Field(..., ge=1, le=99)
     code: str = Field(..., max_length=64)
     name: str = Field(..., max_length=255)
+    name_en: str | None = Field(None, max_length=255)
     description: str | None = None
+    description_en: str | None = None
 
 
 class BreedGroupCreate(BreedGroupBase):
@@ -73,7 +81,9 @@ class BreedGroupUpdate(BaseModel):
     number: int | None = Field(None, ge=1, le=99)
     code: str | None = Field(None, max_length=64)
     name: str | None = Field(None, max_length=255)
+    name_en: str | None = Field(None, max_length=255)
     description: str | None = None
+    description_en: str | None = None
 
 
 class BreedGroupResponse(BreedGroupBase):
@@ -94,8 +104,10 @@ class BreedBase(BaseModel):
     breed_group_id: uuid.UUID | None = None
     code: str = Field(..., max_length=128)
     name: str = Field(..., max_length=255)
+    name_en: str | None = Field(None, max_length=255)
     fci_number: str | None = Field(None, max_length=16)
     description: str | None = None
+    description_en: str | None = None
 
 
 class BreedCreate(BreedBase):
@@ -106,8 +118,10 @@ class BreedUpdate(BaseModel):
     breed_group_id: uuid.UUID | None = None
     code: str | None = Field(None, max_length=128)
     name: str | None = Field(None, max_length=255)
+    name_en: str | None = Field(None, max_length=255)
     fci_number: str | None = Field(None, max_length=16)
     description: str | None = None
+    description_en: str | None = None
 
 
 class BreedResponse(BreedBase):
@@ -127,10 +141,12 @@ class ShowClassBase(BaseModel):
     animal_type_id: uuid.UUID
     code: str = Field(..., max_length=64)
     name: str = Field(..., max_length=128)
+    name_en: str | None = Field(None, max_length=128)
     age_from_months: int = Field(..., ge=0, le=360)
     age_to_months: int | None = Field(None, ge=0, le=360)
     can_receive_cac: bool = False
     description: str | None = None
+    description_en: str | None = None
 
 
 class ShowClassCreate(ShowClassBase):
@@ -140,10 +156,12 @@ class ShowClassCreate(ShowClassBase):
 class ShowClassUpdate(BaseModel):
     code: str | None = Field(None, max_length=64)
     name: str | None = Field(None, max_length=128)
+    name_en: str | None = Field(None, max_length=128)
     age_from_months: int | None = Field(None, ge=0, le=360)
     age_to_months: int | None = Field(None, ge=0, le=360)
     can_receive_cac: bool | None = None
     description: str | None = None
+    description_en: str | None = None
 
 
 class ShowClassResponse(ShowClassBase):
@@ -162,7 +180,9 @@ class ShowClassResponse(ShowClassBase):
 class ShowRankBase(BaseModel):
     code: str = Field(..., max_length=64)
     name: str = Field(..., max_length=255)
+    name_en: str | None = Field(None, max_length=255)
     description: str | None = None
+    description_en: str | None = None
 
 
 class ShowRankCreate(ShowRankBase):
@@ -172,7 +192,9 @@ class ShowRankCreate(ShowRankBase):
 class ShowRankUpdate(BaseModel):
     code: str | None = Field(None, max_length=64)
     name: str | None = Field(None, max_length=255)
+    name_en: str | None = Field(None, max_length=255)
     description: str | None = None
+    description_en: str | None = None
 
 
 class ShowRankResponse(ShowRankBase):
@@ -192,8 +214,10 @@ class TitleBase(BaseModel):
     animal_type_id: uuid.UUID
     code: str = Field(..., max_length=64)
     name: str = Field(..., max_length=128)
+    name_en: str | None = Field(None, max_length=128)
     is_reserve: bool = False
     description: str | None = None
+    description_en: str | None = None
 
 
 class TitleCreate(TitleBase):
@@ -203,8 +227,10 @@ class TitleCreate(TitleBase):
 class TitleUpdate(BaseModel):
     code: str | None = Field(None, max_length=64)
     name: str | None = Field(None, max_length=128)
+    name_en: str | None = Field(None, max_length=128)
     is_reserve: bool | None = None
     description: str | None = None
+    description_en: str | None = None
 
 
 class TitleResponse(TitleBase):
@@ -224,9 +250,11 @@ class GradeBase(BaseModel):
     animal_type_id: uuid.UUID
     code: str = Field(..., max_length=64)
     name: str = Field(..., max_length=128)
+    name_en: str | None = Field(None, max_length=128)
     is_disqualifying: bool = False
     is_puppy_grade: bool = False
     description: str | None = None
+    description_en: str | None = None
 
 
 class GradeCreate(GradeBase):
@@ -236,9 +264,11 @@ class GradeCreate(GradeBase):
 class GradeUpdate(BaseModel):
     code: str | None = Field(None, max_length=64)
     name: str | None = Field(None, max_length=128)
+    name_en: str | None = Field(None, max_length=128)
     is_disqualifying: bool | None = None
     is_puppy_grade: bool | None = None
     description: str | None = None
+    description_en: str | None = None
 
 
 class GradeResponse(GradeBase):

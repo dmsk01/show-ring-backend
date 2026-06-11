@@ -57,7 +57,10 @@ class AnimalType(Base, TimestampMixin):
     # Разделяем, чтобы в API/коде можно было полагаться на стабильный код,
     # а отображаемое имя локализовать без миграции.
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    # name — русский (канонический), name_en — английский перевод.
+    # Отдача по Accept-Language с фолбэком на name, поэтому name_en nullable.
     name: Mapped[str] = mapped_column(String(128))
+    name_en: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     breed_groups: Mapped[list["BreedGroup"]] = relationship(
         back_populates="animal_type", cascade="all, delete-orphan"
@@ -98,7 +101,9 @@ class BreedGroup(Base, TimestampMixin):
     number: Mapped[int] = mapped_column(Integer)
     code: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(255))
+    name_en: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     animal_type: Mapped["AnimalType"] = relationship(back_populates="breed_groups")
     breeds: Mapped[list["Breed"]] = relationship(back_populates="group")
@@ -138,11 +143,13 @@ class Breed(Base, TimestampMixin):
     )
     code: Mapped[str] = mapped_column(String(128))
     name: Mapped[str] = mapped_column(String(255), index=True)
+    name_en: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Номер стандарта FCI — строка, потому что встречаются варианты
     # "122", "122a", "344". Не nullable=False, потому что у не-FCI пород
     # его нет.
     fci_number: Mapped[str | None] = mapped_column(String(16), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     animal_type: Mapped["AnimalType"] = relationship(back_populates="breeds")
     group: Mapped["BreedGroup | None"] = relationship(back_populates="breeds")
@@ -174,6 +181,7 @@ class ShowClass(Base, TimestampMixin):
     )
     code: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(128))
+    name_en: Mapped[str | None] = mapped_column(String(128), nullable=True)
     age_from_months: Mapped[int] = mapped_column(Integer)
     age_to_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # На этапе 7 (правила РКФ) логика выдачи титулов опирается на этот
@@ -181,6 +189,7 @@ class ShowClass(Base, TimestampMixin):
     # выдаётся. Храним явно, чтобы не зашивать список классов в код.
     can_receive_cac: Mapped[bool] = mapped_column(Boolean, default=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     animal_type: Mapped["AnimalType"] = relationship()
 
@@ -202,7 +211,9 @@ class ShowRank(Base, TimestampMixin):
     )
     code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255))
+    name_en: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Title(Base, TimestampMixin):
@@ -229,8 +240,10 @@ class Title(Base, TimestampMixin):
     )
     code: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(128))
+    name_en: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_reserve: Mapped[bool] = mapped_column(Boolean, default=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     animal_type: Mapped["AnimalType"] = relationship()
 
@@ -264,8 +277,10 @@ class Grade(Base, TimestampMixin):
     )
     code: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(128))
+    name_en: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_disqualifying: Mapped[bool] = mapped_column(Boolean, default=False)
     is_puppy_grade: Mapped[bool] = mapped_column(Boolean, default=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     animal_type: Mapped["AnimalType"] = relationship()
