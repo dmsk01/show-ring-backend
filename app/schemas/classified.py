@@ -17,6 +17,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 from app.models.classified import (
+    AnimalAvailability,
     ClassifiedCategory,
     ClassifiedPriceKind,
     ClassifiedStatus,
@@ -126,6 +127,10 @@ class ClassifiedUpdate(BaseModel):
     # Смена статуса — это явное действие "закрыть" / "переоткрыть",
     # сервис сам валидирует переходы.
     status: ClassifiedStatus | None = None
+    # Доступность животного: свободен / забронирован / продан. В отличие
+    # от status, переходы не ограничены — это полностью прерогатива автора
+    # (он распоряжается своим животным). Право проверяет _check_owner.
+    availability: AnimalAvailability | None = None
 
     @model_validator(mode="after")
     def _check_price_kind(self) -> "ClassifiedUpdate":
@@ -148,6 +153,7 @@ class ClassifiedResponse(ClassifiedBase):
     id: uuid.UUID
     author_id: uuid.UUID
     status: ClassifiedStatus
+    availability: AnimalAvailability
     views_count: int
     created_at: datetime
     updated_at: datetime

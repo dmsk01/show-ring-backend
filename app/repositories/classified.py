@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.classified import (
+    AnimalAvailability,
     Classified,
     ClassifiedCategory,
     ClassifiedImage,
@@ -47,6 +48,7 @@ def _classified_filter_stmt(
     sex: SexEnum | None,
     city: str | None,
     status: ClassifiedStatus | None,
+    availability: AnimalAvailability | None,
     price_from: Decimal | None,
     price_to: Decimal | None,
     author_id: uuid.UUID | None,
@@ -75,6 +77,11 @@ def _classified_filter_stmt(
         stmt = stmt.where(Classified.city.ilike(f"%{city}%"))
     if status is not None:
         stmt = stmt.where(Classified.status == status)
+    if availability is not None:
+        # Точечный фильтр доступности: ?availability=available отдаёт
+        # только свободных. Объявление остаётся active даже когда животное
+        # sold/reserved — этот фильтр позволяет покупателю отсеять занятых.
+        stmt = stmt.where(Classified.availability == availability)
     if price_from is not None:
         stmt = stmt.where(Classified.price >= price_from)
     if price_to is not None:
@@ -104,6 +111,7 @@ async def list_classifieds(
     sex: SexEnum | None = None,
     city: str | None = None,
     status: ClassifiedStatus | None = ClassifiedStatus.active,
+    availability: AnimalAvailability | None = None,
     price_from: Decimal | None = None,
     price_to: Decimal | None = None,
     author_id: uuid.UUID | None = None,
@@ -117,8 +125,8 @@ async def list_classifieds(
     col = _CLASSIFIED_SORT.get(sort_by, Classified.created_at)
     stmt = (
         _classified_filter_stmt(
-            category, breed_id, sex, city, status, price_from, price_to,
-            author_id,
+            category, breed_id, sex, city, status, availability,
+            price_from, price_to, author_id,
         )
         .order_by(col.asc() if order == "asc" else col.desc())
         .options(selectinload(Classified.images))
@@ -136,13 +144,14 @@ async def count_classifieds(
     sex: SexEnum | None = None,
     city: str | None = None,
     status: ClassifiedStatus | None = ClassifiedStatus.active,
+    availability: AnimalAvailability | None = None,
     price_from: Decimal | None = None,
     price_to: Decimal | None = None,
     author_id: uuid.UUID | None = None,
 ) -> int:
     base = _classified_filter_stmt(
-        category, breed_id, sex, city, status, price_from, price_to,
-        author_id,
+        category, breed_id, sex, city, status, availability,
+        price_from, price_to, author_id,
     ).subquery()
     return int(
         (await db.execute(select(func.count()).select_from(base))).scalar_one()

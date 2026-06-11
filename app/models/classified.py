@@ -94,6 +94,32 @@ class ClassifiedPriceKind(str, enum.Enum):
     negotiable = "negotiable"
 
 
+class AnimalAvailability(str, enum.Enum):
+    """
+    Доступность животного в объявлении — отдельная ось от ClassifiedStatus.
+
+    ClassifiedStatus описывает жизненный цикл *публикации*
+    (active/moderation/closed/archived), а availability — судьбу самого
+    *животного*. Они независимы: объявление может быть active и при этом
+    reserved (карточка висит публично с пометкой «бронь»).
+
+    - available — свободен, доступен к покупке/резерву (значение по
+      умолчанию для новых объявлений и старых строк при миграции).
+    - reserved  — забронирован: кто-то договорился, но сделка не закрыта.
+    - sold      — сделка закрыта. Enum хранит факт, а не формулировку:
+      для платных объявлений фронт показывает «продан», для price_kind=free
+      (в добрые руки) — «пристроен / нашёл дом».
+
+    Имеет смысл только для категорий продажи особи (puppy_sale, adult_sale,
+    отчасти mating). Для услуг (handler/grooming) поле игнорируется фронтом
+    и остаётся в дефолтном available.
+    """
+
+    available = "available"
+    reserved = "reserved"
+    sold = "sold"
+
+
 class Classified(Base, TimestampMixin):
     __tablename__ = "classifieds"
     __table_args__ = (
@@ -181,6 +207,16 @@ class Classified(Base, TimestampMixin):
     status: Mapped[ClassifiedStatus] = mapped_column(
         SAEnum(ClassifiedStatus, name="classifiedstatus"),
         default=ClassifiedStatus.active,
+        index=True,
+    )
+    # Доступность животного — ось, независимая от status (см. докстринг
+    # AnimalAvailability). index=True под фильтр «показать только свободные».
+    # server_default ставит available существующим строкам при миграции,
+    # NOT NULL упрощает запросы (не нужно обрабатывать NULL в фильтрах).
+    availability: Mapped[AnimalAvailability] = mapped_column(
+        SAEnum(AnimalAvailability, name="animalavailability"),
+        default=AnimalAvailability.available,
+        server_default=AnimalAvailability.available.value,
         index=True,
     )
     # server_default="0" чтобы существующие строки при alter получили 0,

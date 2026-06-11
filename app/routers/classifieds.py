@@ -15,7 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user, is_admin
 from app.middleware.progressive_ban import check_rate_limit
-from app.models.classified import ClassifiedCategory, ClassifiedStatus
+from app.models.classified import (
+    AnimalAvailability,
+    ClassifiedCategory,
+    ClassifiedStatus,
+)
 from app.models.dog import SexEnum
 from app.models.user import User
 from app.redis import get_redis
@@ -123,6 +127,13 @@ async def list_classifieds(
     breed_id: uuid.UUID | None = Query(None),
     sex: SexEnum | None = Query(None),
     city: str | None = Query(None, max_length=128),
+    availability: AnimalAvailability | None = Query(
+        None,
+        description=(
+            "Фильтр доступности: available (свободен) / reserved "
+            "(забронирован) / sold (продан). По умолчанию — все."
+        ),
+    ),
     price_from: Decimal | None = Query(None, ge=0),
     price_to: Decimal | None = Query(None, ge=0),
     sort_by: Literal["created_at", "price", "views_count"] = Query("created_at"),
@@ -139,6 +150,7 @@ async def list_classifieds(
         city=city,
         # Публичный список — только активные. Closed/archived не показываем.
         status=ClassifiedStatus.active,
+        availability=availability,
         price_from=price_from,
         price_to=price_to,
         sort_by=sort_by,
@@ -153,6 +165,7 @@ async def list_classifieds(
         sex=sex,
         city=city,
         status=ClassifiedStatus.active,
+        availability=availability,
         price_from=price_from,
         price_to=price_to,
     )
