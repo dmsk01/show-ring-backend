@@ -46,33 +46,73 @@ _REGISTER_RESPONSE = {"message": "Проверьте email для подтвер
 _SEND_CODE_RESPONSE = {"message": "Код отправлен"}
 
 
-def _deliver_refresh(response: Response, tokens: TokenResponse) -> TokenResponse:
+# Заголовок, которым клиент просит токены в теле ответа (React Native:
+# у мобильного приложения нет кук). Без заголовка — режим по умолчанию:
+# оба токена в httpOnly-куках, в теле null (XSS-устойчиво для веба).
+_TOKEN_DELIVERY_HEADER = "X-Token-Delivery"
+
+
+def _access_cookie_path() -> str:
+    # path должен совпадать с ПУБЛИЧНЫМ путём API (за nginx — /api/...),
+    # браузер матчит куку по URL, который видит сам. См. cookie_path_prefix.
+    return settings.cookie_path_prefix.rstrip("/") or "/"
+
+
+def _refresh_cookie_path() -> str:
+    # Refresh-кука уходит только на /auth/* (refresh, logout) —
+    # минимизирует поверхность утечки.
+    return settings.cookie_path_prefix.rstrip("/") + "/auth"
+
+
+def _set_token_cookie(
+    response: Response, name: str, value: str, max_age: int, path: str
+) -> None:
+    response.set_cookie(
+        name,
+        value,
+        httponly=True,
+        secure=not settings.debug,
+        samesite="strict",
+        max_age=max_age,
+        path=path,
+    )
+
+
+def _deliver_tokens(
+    request: Request, response: Response, tokens: TokenResponse
+) -> TokenResponse:
     """
-    Гибкая доставка refresh-токена: по умолчанию — в теле (мобильный
-    клиент), при AUTH_REFRESH_COOKIE=true — httpOnly-cookie для веба
-    (XSS-устойчиво), в теле refresh_token=null.
+    Доставка пары токенов. По умолчанию (веб) — оба в httpOnly-куках,
+    в теле access_token/refresh_token = null. С заголовком
+    `X-Token-Delivery: body` (мобильный клиент) — в теле, без кук.
     """
-    if settings.auth_refresh_cookie and tokens.refresh_token:
-        response.set_cookie(
+    if request.headers.get(_TOKEN_DELIVERY_HEADER, "").lower() == "body":
+        return tokens
+    if tokens.access_token:
+        _set_token_cookie(
+            response,
+            "access_token",
+            tokens.access_token,
+            max_age=settings.access_token_expire_minutes * 60,
+            path=_access_cookie_path(),
+        )
+        tokens.access_token = None
+    if tokens.refresh_token:
+        _set_token_cookie(
+            response,
             "refresh_token",
             tokens.refresh_token,
-            httponly=True,
-            secure=not settings.debug,
-            samesite="strict",
             max_age=settings.refresh_token_expire_days * 86400,
-            # Cookie уходит только на /auth/* (refresh, logout) —
-            # минимизирует поверхность утечки.
-            path="/auth",
+            path=_refresh_cookie_path(),
         )
         tokens.refresh_token = None
     return tokens
 
 
 def _extract_refresh(request: Request, body: RefreshRequest) -> str:
-    # cookie-режим: берём из куки только при явно включённом AUTH_REFRESH_COOKIE.
-    raw = body.refresh_token or (
-        request.cookies.get("refresh_token") if settings.auth_refresh_cookie else None
-    )
+    # Тело (мобильный клиент) → кука (веб). Кука читается всегда:
+    # cookie-режим — дефолт, глобального флага больше нет.
+    raw = body.refresh_token or request.cookies.get("refresh_token")
     if not raw:
         raise HTTPException(status_code=401, detail="missing_refresh_token")
     return raw
@@ -186,7 +226,12 @@ async def confirm_email_change_endpoint(
 @router.post(
     "/login",
     summary="Вход в систему",
-    description="Проверяет email и пароль, возвращает access token (15 мин) и refresh token (7 дней).",
+    description=(
+        "Проверяет email и пароль. По умолчанию ставит access (15 мин) и "
+        "refresh (7 дней) токены в httpOnly-куки, в теле — null. С "
+        "заголовком X-Token-Delivery: body (мобильный клиент) — токены "
+        "в теле ответа, без кук."
+    ),
 )
 async def login(
     request: Request,
@@ -203,7 +248,9 @@ async def login(
         fail_closed=True,  # bug_247: см. /register
     )
     try:
-        return _deliver_refresh(response, await login_user(db, body.email, body.password))
+        return _deliver_tokens(
+            request, response, await login_user(db, body.email, body.password)
+        )
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -232,7 +279,9 @@ async def login_form(
     )
     try:
         # OAuth2 спецификация требует поле username — мапим его на email.
-        return _deliver_refresh(response, await login_user(db, form.username, form.password))
+        return _deliver_tokens(
+            request, response, await login_user(db, form.username, form.password)
+        )
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -263,8 +312,8 @@ async def refresh(
     try:
         # ИСПРАВЛЕНО: возвращаем TokenResponse целиком — клиент обязан
         # заменить refresh-токен. См. rotation в services.auth.refresh_access_token.
-        return _deliver_refresh(
-            response, await refresh_access_token(db, _extract_refresh(request, body))
+        return _deliver_tokens(
+            request, response, await refresh_access_token(db, _extract_refresh(request, body))
         )
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
@@ -289,10 +338,10 @@ async def logout(
         redis=redis,
         fail_closed=True,  # bug_247: см. /register
     )
-    # Cookie чистим всегда, даже если токен уже отозван — иначе браузер
-    # остаётся с невалидной кукой и получает 401 на каждом refresh.
-    if settings.auth_refresh_cookie:
-        response.delete_cookie("refresh_token", path="/auth")
+    # Куки чистим всегда, даже если токен уже отозван — иначе браузер
+    # остаётся с невалидными куками и получает 401 на каждом запросе.
+    response.delete_cookie("access_token", path=_access_cookie_path())
+    response.delete_cookie("refresh_token", path=_refresh_cookie_path())
     try:
         await logout_user(db, _extract_refresh(request, body))
         return {"message": "Успешный выход"}
@@ -337,8 +386,8 @@ async def send_code(
     description=(
         "Проверяет код из SMS (максимум 3 попытки, затем код сжигается). "
         "При первом входе создаёт пользователя по номеру. Возвращает "
-        "access + refresh (refresh — в httpOnly-cookie при "
-        "AUTH_REFRESH_COOKIE=true). 400 — неверный код, 401 — код "
+        "access + refresh (по умолчанию — в httpOnly-куках; с заголовком "
+        "X-Token-Delivery: body — в теле). 400 — неверный код, 401 — код "
         "истёк/исчерпан."
     ),
 )
@@ -360,4 +409,4 @@ async def verify_code(
         raise HTTPException(status_code=401, detail="user_blocked")
     except OTPInvalidError:
         raise HTTPException(status_code=400, detail="invalid_code")
-    return _deliver_refresh(response, tokens)
+    return _deliver_tokens(request, response, tokens)

@@ -45,7 +45,7 @@ def test_ws_handshake_and_push(monkeypatch):
     """auth → auth_ok → пуш доезжает до клиента; disconnect вызывается."""
     fake_user = SimpleNamespace(id=uuid.uuid4(), is_active=True)
 
-    async def fake_auth(db, token):
+    async def fake_auth(db, token, websocket=None):
         return fake_user if token == "good" else None
 
     disconnected: list = []
@@ -80,7 +80,7 @@ def test_ws_handshake_and_push(monkeypatch):
 
 def test_ws_rejects_bad_token(monkeypatch):
     """Невалидный токен → error-кадр и закрытие, регистрации сокета нет."""
-    async def fake_auth(db, token):
+    async def fake_auth(db, token, websocket=None):
         return None
 
     connected: list = []
@@ -103,7 +103,7 @@ def test_ws_rejects_bad_token(monkeypatch):
 
 def test_ws_requires_auth_frame_first(monkeypatch):
     """Первый кадр не auth → error + close."""
-    async def fake_auth(db, token):  # pragma: no cover
+    async def fake_auth(db, token, websocket=None):  # pragma: no cover
         raise AssertionError("authenticate_ws не должен вызываться")
 
     monkeypatch.setattr(notif_router, "authenticate_ws", fake_auth)
@@ -122,7 +122,7 @@ def test_ws_rate_limited(monkeypatch):
         await websocket.close(code=WS_CLOSE_RATE_LIMITED)
         return False
 
-    async def fake_auth(db, token):  # pragma: no cover — не должен вызваться
+    async def fake_auth(db, token, websocket=None):  # pragma: no cover — не должен вызваться
         raise AssertionError("authenticate_ws не должен вызываться при rate-limit")
 
     monkeypatch.setattr(notif_router, "ws_rate_limit", fake_rl)
@@ -147,7 +147,9 @@ async def _make_user(client) -> tuple[uuid.UUID, str]:
         "/auth/register", json={"email": email, "password": PASSWORD}
     )
     r = await client.post(
-        "/auth/login", json={"email": email, "password": PASSWORD}
+        "/auth/login",
+        json={"email": email, "password": PASSWORD},
+        headers={"X-Token-Delivery": "body"},
     )
     access = r.json()["access_token"]
     me = await client.get(

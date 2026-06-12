@@ -269,7 +269,7 @@ async def notifications_ws(websocket: WebSocket):
         return
 
     async with async_session_factory() as db:
-        user = await authenticate_ws(db, first.get("token"))
+        user = await authenticate_ws(db, first.get("token"), websocket)
     if user is None:
         await websocket.send_json(
             {"type": "error", "payload": {"code": "invalid_token"}}

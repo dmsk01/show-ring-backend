@@ -104,9 +104,10 @@ class ResendVerification(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
-    # None в cookie-режиме (AUTH_REFRESH_COOKIE=true): refresh уходит
-    # в httpOnly-cookie и в теле не дублируется.
+    # Оба поля None в cookie-режиме (дефолт для веба): токены уходят в
+    # httpOnly-куки и в теле не дублируются. Мобильный клиент шлёт
+    # заголовок X-Token-Delivery: body и получает токены в теле.
+    access_token: str | None = None
     refresh_token: str | None = None
     token_type: str
 

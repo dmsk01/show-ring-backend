@@ -1,7 +1,7 @@
 import logging
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, WebSocket, status
+from fastapi import Depends, HTTPException, Request, WebSocket, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from jose import JWTError
@@ -23,7 +23,12 @@ WS_CLOSE_RATE_LIMITED = 4429
 # ИСПРАВЛЕНО: tokenUrl указывает на form-эндпоинт /auth/token, который
 # принимает OAuth2PasswordRequestForm. /auth/login по-прежнему живёт
 # как JSON-эндпоинт для прикладных клиентов.
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+#
+# auto_error=False: отсутствие заголовка Authorization — не ошибка, токен
+# может прийти в httpOnly-куке access_token (веб). Заголовок приоритетнее
+# куки — явная передача выигрывает у автоматической (мобилка, Swagger).
+# 401 при полном отсутствии токена кидает сам get_current_user.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
 # Необязательная аутентификация (аудит H1): для публичных ручек, которым
 # нужно ЗНАТЬ пользователя, если токен есть (например, показать черновики
@@ -34,12 +39,19 @@ oauth2_scheme_optional = OAuth2PasswordBearer(
 )
 
 
+def _extract_access_token(request: Request, header_token: str | None) -> str | None:
+    """Access-токен: заголовок Authorization → httpOnly-кука (веб)."""
+    return header_token or request.cookies.get("access_token")
+
+
 async def get_current_user_optional(
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    token: str | None = Depends(oauth2_scheme_optional),
+    header_token: str | None = Depends(oauth2_scheme_optional),
 ) -> User | None:
     """Текущий пользователь или None. Любая ошибка токена → None (не 401):
     публичная ручка продолжает работать как для анонима."""
+    token = _extract_access_token(request, header_token)
     if not token:
         return None
     try:
@@ -66,8 +78,19 @@ def is_writer(user: User | None) -> bool:
 
 
 async def get_current_user(
-    db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme)
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    header_token: str | None = Depends(oauth2_scheme),
 ):
+    token = _extract_access_token(request, header_token)
+    if not token:
+        # auto_error=False больше не кидает 401 сам — отвечаем как
+        # OAuth2PasswordBearer, чтобы контракт для клиентов не поменялся.
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         payload = decode_access_token(token)
         # ИСПРАВЛЕНО: явная проверка типа токена — защита от случая,
@@ -93,16 +116,25 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Невалидный токен")
 
 
-async def authenticate_ws(db: AsyncSession, token: str | None) -> User | None:
+async def authenticate_ws(
+    db: AsyncSession,
+    token: str | None,
+    websocket: WebSocket | None = None,
+) -> User | None:
     """
     Аутентификация WebSocket-соединения по JWT, переданному ПЕРВЫМ
-    сообщением (не в URL — токен не должен попадать в логи прокси).
+    сообщением (не в URL — токен не должен попадать в логи прокси),
+    либо httpOnly-кукой access_token из хендшейка: веб-клиент токен
+    не видит (JS нет доступа), но браузер сам прикладывает куки к
+    upgrade-запросу. Мобильный клиент по-прежнему шлёт токен кадром.
 
     Возвращает активного User или None (роутер закрывает сокет с 4401).
     Раньше эта логика дублировалась приватной _authenticate_ws в
     routers/support.py; на этапе 16 вынесена сюда и переиспользуется
     обоими WS-роутами (поддержка + уведомления).
     """
+    if not token and websocket is not None:
+        token = websocket.cookies.get("access_token")
     if not token:
         return None
     try:

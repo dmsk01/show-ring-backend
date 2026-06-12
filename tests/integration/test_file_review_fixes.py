@@ -26,7 +26,9 @@ async def _make_token(client) -> str:
         "/auth/register", json={"email": email, "password": PASSWORD}
     )
     r = await client.post(
-        "/auth/login", json={"email": email, "password": PASSWORD}
+        "/auth/login",
+        json={"email": email, "password": PASSWORD},
+        headers={"X-Token-Delivery": "body"},
     )
     return r.json()["access_token"]
 

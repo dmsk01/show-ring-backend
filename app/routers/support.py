@@ -271,16 +271,18 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
         except (WebSocketDisconnect, ValueError):
             await websocket.close(code=1003)  # unsupported_data
             return
-        if first.get("type") != "auth" or "token" not in first:
+        # token в кадре опционален: веб-клиент аутентифицируется
+        # httpOnly-кукой из хендшейка (см. authenticate_ws).
+        if first.get("type") != "auth":
             await websocket.send_json(
                 {
                     "type": "error",
-                    "payload": {"code": "auth_required", "detail": "First frame must be {type:auth,token:...}"},
+                    "payload": {"code": "auth_required", "detail": "First frame must be {type:auth,token?:...}"},
                 }
             )
             await websocket.close(code=4401)
             return
-        user = await authenticate_ws(db, first["token"])
+        user = await authenticate_ws(db, first.get("token"), websocket)
         if user is None:
             await websocket.send_json(
                 {"type": "error", "payload": {"code": "invalid_token"}}

@@ -49,9 +49,12 @@ async def test_full_flow_creates_user_and_logs_in(client, sms_capture):
     assert r.status_code == 200, r.text
     code = sms_capture.last_code()
 
-    # 2. Верный код → пара токенов, пользователь создан.
+    # 2. Верный код → пара токенов, пользователь создан. Заголовок
+    # X-Token-Delivery: body — «мобильный» режим: токены в теле ответа.
     r = await client.post(
-        "/auth/verify-code", json={"phone": phone, "code": code}
+        "/auth/verify-code",
+        json={"phone": phone, "code": code},
+        headers={"X-Token-Delivery": "body"},
     )
     assert r.status_code == 200, r.text
     tokens = r.json()
@@ -73,7 +76,9 @@ async def test_full_flow_creates_user_and_logs_in(client, sms_capture):
 
     # 5. Refresh-токен принимается стандартным /auth/refresh.
     r = await client.post(
-        "/auth/refresh", json={"refresh_token": tokens["refresh_token"]}
+        "/auth/refresh",
+        json={"refresh_token": tokens["refresh_token"]},
+        headers={"X-Token-Delivery": "body"},
     )
     assert r.status_code == 200, r.text
 
@@ -83,7 +88,9 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     await client.post("/auth/send-code", json={"phone": phone})
     code = sms_capture.last_code()
     r1 = await client.post(
-        "/auth/verify-code", json={"phone": phone, "code": code}
+        "/auth/verify-code",
+        json={"phone": phone, "code": code},
+        headers={"X-Token-Delivery": "body"},
     )
     assert r1.status_code == 200
 
@@ -92,7 +99,9 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     await client.post("/auth/send-code", json={"phone": phone})
     code2 = sms_capture.last_code()
     r2 = await client.post(
-        "/auth/verify-code", json={"phone": phone, "code": code2}
+        "/auth/verify-code",
+        json={"phone": phone, "code": code2},
+        headers={"X-Token-Delivery": "body"},
     )
     assert r2.status_code == 200
 

@@ -26,7 +26,9 @@ async def test_email_change_notifies_old_address(client, db_session):
         "/auth/register", json={"email": old_email, "password": PASSWORD}
     )
     r = await client.post(
-        "/auth/login", json={"email": old_email, "password": PASSWORD}
+        "/auth/login",
+        json={"email": old_email, "password": PASSWORD},
+        headers={"X-Token-Delivery": "body"},
     )
     token = r.json()["access_token"]
 

@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import engine
 from app.logging_config import setup_logging
+from app.middleware.csrf import CSRFMiddleware
 from app.middleware.error_handler import register_error_handlers
 from app.middleware.idempotency import IdempotencyMiddleware
 from app.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -106,19 +107,24 @@ register_error_handlers(app)
 # добавления к запросу. Значит первым ВЫПОЛНЯЕТСЯ последний добавленный.
 # Идём от "ближе к handler'у" → "ближе к сети":
 #   1. RequestId      — добавить ID до всего остального (логи)
-#   2. Sanitization   — чистить тело до бизнес-логики
-#   3. Idempotency    — ближе к сети, чем Sanitization, поэтому
+#   2. CSRF           — сверка Origin на мутациях (куки-аутентификация);
+#                       ВНУТРИ ProxyHeaders — scheme/host уже поправлены
+#                       по X-Forwarded-*, иначе same-origin проверка
+#                       за nginx сравнивала бы с внутренним хостом.
+#   3. Sanitization   — чистить тело до бизнес-логики
+#   4. Idempotency    — ближе к сети, чем Sanitization, поэтому
 #                       ВЫПОЛНЯЕТСЯ ПЕРЕД ней: body_hash считается по
 #                       СЫРОМУ телу. Это корректно — hash стабилен между
 #                       ретраями клиента, а handler всё равно получает
 #                       очищенное тело (Sanitization выполняется
 #                       внутреннее и перезаписывает _body после нас).
-#   4. SecurityHeaders — на ответ всегда, последним в pipeline
-#   5. ProxyHeaders   — ВЫПОЛНЯЕТСЯ ПЕРВЫМ (сетевой уровень): подменяем
+#   5. SecurityHeaders — на ответ всегда, последним в pipeline
+#   6. ProxyHeaders   — ВЫПОЛНЯЕТСЯ ПЕРВЫМ (сетевой уровень): подменяем
 #                       client IP до того, как rate-limit/ad-fraud его
 #                       прочитают.
-#   6. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
+#   7. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(CSRFMiddleware)
 app.add_middleware(SanitizationMiddleware)
 app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)

@@ -25,9 +25,13 @@ async def test_register_login_me_and_refresh_rotation(client):
     )
     assert r.status_code == 200, r.text
 
-    # 2. Логин — выдаёт пару токенов.
+    # 2. Логин — выдаёт пару токенов. Заголовок X-Token-Delivery: body —
+    # «мобильный» режим: токены в теле ответа, без httpOnly-кук
+    # (cookie-режим покрыт tests/integration/test_cookie_auth.py).
     r = await client.post(
-        "/auth/login", json={"email": email, "password": PASSWORD}
+        "/auth/login",
+        json={"email": email, "password": PASSWORD},
+        headers={"X-Token-Delivery": "body"},
     )
     assert r.status_code == 200, r.text
     tokens = r.json()
@@ -51,7 +55,11 @@ async def test_register_login_me_and_refresh_rotation(client):
     assert r.status_code == 401
 
     # 6. Ротация refresh: старый работает один раз, повторный — 401.
-    r = await client.post("/auth/refresh", json={"refresh_token": refresh})
+    r = await client.post(
+        "/auth/refresh",
+        json={"refresh_token": refresh},
+        headers={"X-Token-Delivery": "body"},
+    )
     assert r.status_code == 200, r.text
     new_refresh = r.json()["refresh_token"]
     assert new_refresh != refresh

@@ -85,10 +85,11 @@ class Settings(BaseSettings):
     # Потолок SMS на номер в сутки — защита от SMS-pumping (каждое SMS
     # стоит денег; атакующий перебором номеров может сжечь бюджет).
     otp_daily_limit: int = 10
-    # Доставка refresh-токена: False — в теле ответа (текущее поведение
-    # /auth/login, удобно мобильному приложению); True — httpOnly-cookie
-    # для веб-фронта, в теле refresh_token=null.
-    auth_refresh_cookie: bool = False
+    # Префикс ПУБЛИЧНОГО пути API для path у auth-кук. Пустой — API на
+    # корне домена (dev). Когда в проде nginx отдаёт SPA на «/», а API
+    # проксирует под /api/, браузер видит /api/auth/... — path кук должен
+    # совпадать с публичным путём: COOKIE_PATH_PREFIX=/api.
+    cookie_path_prefix: str = ""
 
     # --- Этап 14: Production-readiness ---
     # log_json=true — JSON-логи для ELK/Loki. false — человекочитаемый

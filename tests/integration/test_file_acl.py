@@ -28,7 +28,9 @@ async def _make_user(client) -> tuple[uuid.UUID, str]:
         "/auth/register", json={"email": email, "password": PASSWORD}
     )
     r = await client.post(
-        "/auth/login", json={"email": email, "password": PASSWORD}
+        "/auth/login",
+        json={"email": email, "password": PASSWORD},
+        headers={"X-Token-Delivery": "body"},
     )
     access = r.json()["access_token"]
     me = await client.get(
