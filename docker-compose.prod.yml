@@ -68,6 +68,22 @@ services:
         limits:
           memory: 256M
 
+  # Веб-фронт (Next.js, репо show-ring-frontend). Образ пушит CI фронта;
+  # деплой фронта — их же CI: `compose pull web && up -d web` по SSH.
+  # Наружу не публикуется — единственный вход в стек остаётся nginx,
+  # который разводит / → web и /api/ → api.
+  web:
+    image: ghcr.io/dmsk01/show-ring-frontend:${WEB_IMAGE_TAG:-latest}
+    environment:
+      # Фолбэк для SSR-запросов изнутри контейнера (минуя nginx);
+      # браузерные запросы ходят относительным /api через nginx.
+      BACKEND_URL: http://api:8000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
+
   nginx:
     image: nginx:1.27-alpine
     ports:
@@ -83,6 +99,10 @@ services:
     depends_on:
       api:
         condition: service_started
+      # У образа фронта есть HEALTHCHECK на /healthz — ждём готовности,
+      # иначе nginx стартует раньше web и первые запросы ловят 502.
+      web:
+        condition: service_healthy
     # Фоновый reload каждые 6h — подхватывать продлённые certbot'ом
     # сертификаты без ручного вмешательства. $$ — экранирование для compose.
     command: /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & exec nginx -g 'daemon off;'"
