@@ -1,0 +1,4 @@
+# Shell-скрипты исполняются внутри Linux-контейнеров: CRLF ломает их
+# («\r: command not found»). Принудительный LF независимо от
+# core.autocrlf на Windows-машине разработчика.
+*.sh text eol=lf
