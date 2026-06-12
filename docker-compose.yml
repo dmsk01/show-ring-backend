@@ -150,6 +150,13 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
       DEBUG: ${DEBUG:-false}
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-false}
+      # Auth-куки/CSRF: .env в образ не попадает (.dockerignore) — всё,
+      # что должен видеть app.config.Settings, прокидываем явно.
+      # CORS нужен dev-фронту (cross-origin с credentials); в prod при
+      # одном домене остаётся пустым. COOKIE_PATH_PREFIX — публичный
+      # префикс API за прокси (dev-прокси фронта и prod-nginx: /api).
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-[]}
+      COOKIE_PATH_PREFIX: ${COOKIE_PATH_PREFIX:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
