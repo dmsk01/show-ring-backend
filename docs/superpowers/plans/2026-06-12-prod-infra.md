@@ -230,10 +230,10 @@ server {
 - [ ] **Step 4: Проверить синтаксис nginx-конфига**
 
 ```powershell
-docker run --rm -v "${PWD}\deploy\nginx\nginx.conf:/etc/nginx/nginx.conf:ro" -v "${PWD}\deploy\nginx\conf.d:/etc/nginx/conf.d:ro" -v "${PWD}\deploy\nginx\snippets:/etc/nginx/snippets:ro" nginx:1.27-alpine nginx -t
+docker run --rm --add-host api:127.0.0.1 -v "${PWD}\deploy\nginx\nginx.conf:/etc/nginx/nginx.conf:ro" -v "${PWD}\deploy\nginx\conf.d:/etc/nginx/conf.d:ro" -v "${PWD}\deploy\nginx\snippets:/etc/nginx/snippets:ro" nginx:1.27-alpine nginx -t
 ```
 
-Ожидаемо: `syntax is ok` + `test failed`-строки НЕТ. (Резолв upstream `api` при `nginx -t` не выполняется — ошибки «host not found» не будет: проверяется только синтаксис.)
+Ожидаемо: `syntax is ok` + `test is successful`. (`--add-host api:127.0.0.1` обязателен: nginx -t резолвит хосты upstream'ов, вне compose-сети имя `api` не существует.)
 
 - [ ] **Step 5: Commit**
 
