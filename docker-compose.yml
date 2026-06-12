@@ -34,10 +34,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-showtail}
       POSTGRES_USER: ${POSTGRES_USER:-showtail}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-showtail}
-    # Локальный порт открыт ради удобства dev-инструментов (DBeaver,
-    # psql). В prod закрываем: API ходит через внутреннюю сеть compose.
-    ports:
-      - "5432:5432"
+    # Host-порты НЕ публикуем: база прод-безопасна по умолчанию.
+    # Dev-порты (psql/DBeaver и т.п.) добавляет docker-compose.dev.yml.
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -53,10 +51,7 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
-    ports:
-      - "5672:5672"
-      # Management UI — http://localhost:15672 (guest/guest).
-      - "15672:15672"
+    # Host-порты (включая Management UI) — в docker-compose.dev.yml.
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -70,8 +65,6 @@ services:
   redis:
     image: redis:8-alpine
     restart: unless-stopped  # см. постгрес
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -86,9 +79,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-showtail}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-showtailminio}
-    ports:
-      - "9000:9000"  # S3 API
-      - "9001:9001"  # Web Console
+    # Host-порты (S3 API + Web Console) — в docker-compose.dev.yml.
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
@@ -134,8 +125,8 @@ services:
 
   api:
     build: .
-    ports:
-      - "8000:8000"
+    # Host-порт 8000 добавляет docker-compose.dev.yml; в prod вход
+    # только через nginx (docker-compose.prod.yml).
     environment:
       # asyncpg-URL через имя сервиса postgres — compose-сеть резолвит.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}

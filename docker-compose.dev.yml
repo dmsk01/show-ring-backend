@@ -14,6 +14,26 @@
 # docker-compose.yml.
 
 services:
+  # Dev-порты инфры: базовый docker-compose.yml host-порты НЕ публикует
+  # (прод-безопасный дефолт), наружу их выставляет только dev-override.
+  postgres:
+    ports:
+      - "5432:5432"   # psql / DBeaver
+
+  rabbitmq:
+    ports:
+      - "5672:5672"
+      - "15672:15672" # Management UI — http://localhost:15672 (guest/guest)
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  minio:
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web Console
+
   # migrate тоже на bind-mount (как api/воркеры): без него одноразовый
   # контейнер берёт миграции из СТАРОГО образа и не видит ревизий,
   # накатанных через api/CLI с live-кодом — DB уходит вперёд, и
@@ -39,6 +59,9 @@ services:
       retries: 3
 
   api:
+    # Прямой доступ к API без прокси — только dev (в prod вход через nginx).
+    ports:
+      - "8000:8000"
     # Bind-mount всего репозитория: код сразу виден в контейнере.
     # uvicorn --reload отслеживает изменения .py и перезагружается.
     volumes:
