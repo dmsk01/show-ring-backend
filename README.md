@@ -96,6 +96,29 @@ docker compose exec api python -m scripts.bootstrap_admin --email admin@example.
 
 ---
 
+## Тестовые пользователи для e2e
+
+Идемпотентный сид аккаунтов под Playwright-тесты фронта (повторный запуск безопасен, дублей не плодит):
+```powershell
+docker compose exec api python -m scripts.seed_e2e_users --force
+```
+Пароль у всех: **`Password123!`**. Email подтверждён, аккаунт активен — `/auth/login` работает сразу.
+
+| Email | Роли |
+|---|---|
+| organizer@e2e.example | organizer |
+| breeder@e2e.example | breeder |
+| judge@e2e.example | judge |
+| buyer@e2e.example | buyer |
+| operator@e2e.example | operator |
+| multi@e2e.example | breeder + organizer (проверка union прав) |
+
+> Домен `@e2e.example`, а не `@e2e.test`: pydantic `EmailStr` отвергает зарезервированный TLD `.test`, и `/auth/login` отвечал бы 422 ещё до проверки пароля. `.example` тоже зарезервирован под тесты (RFC 2606) — письма туда не уйдут.
+
+Пользователя с ролью admin сид не создаёт — используй существующего админа (см. «Создание первого админа» выше).
+
+---
+
 ## Полезные адреса (dev)
 
 | Сервис | URL | Доступ |
