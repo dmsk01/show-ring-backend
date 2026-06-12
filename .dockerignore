@@ -54,3 +54,7 @@ docker-compose*.yml
 
 # Сторонние пакеты (если ставили wheel'ы локально).
 packages/
+
+# Локальные бэкапы (backup-сервис, docker-compose.prod.yml) — гигабайты
+# дампов не должны уезжать в build-контекст.
+backups/

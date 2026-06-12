@@ -42,6 +42,9 @@ htmlcov/
 # Docker
 *.override.yml
 
+# Локальные бэкапы (bind-mount backup-сервиса из docker-compose.prod.yml)
+backups/
+
 hints/
 
 # Сгенерированные тестовые документы (scripts/render_test_docs.py)

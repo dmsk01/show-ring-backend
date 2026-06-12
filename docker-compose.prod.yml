@@ -1,0 +1,141 @@
+# Прод-оверлей ShowTail. Применяется ПОВЕРХ базового файла:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Что добавляет/меняет:
+# - api/worker*/migrate берут образ из ghcr (тег из IMAGE_TAG, дефолт
+#   latest) — это чинит `docker compose pull` в deploy-стадии CI.
+#   base `build: .` остаётся в merged-конфиге, но без --build не
+#   используется; локальную приёмку гоняем с `up --build`.
+# - nginx — ЕДИНСТВЕННЫЕ наружные порты (80/443). Порты инфры база
+#   не публикует вовсе (см. инверсию в docker-compose.dev.yml).
+# - certbot — под profile "tls", включается при появлении домена
+#   (порядок включения: deploy/nginx/conf.d/showtail.conf, низ файла).
+# - backup — crond: pg_dump + mc mirror + ротация (deploy/backup/).
+# - Фиксированная подсеть 172.28.0.0/16: FORWARDED_ALLOW_IPS должен
+#   ссылаться на стабильный CIDR, иначе proxy_headers.py не доверится
+#   nginx'у после пересоздания сети.
+
+services:
+  api:
+    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
+    # Прод: несколько uvicorn-воркеров вместо одного процесса.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0",
+              "--port", "8000", "--workers", "${UVICORN_WORKERS:-2}"]
+    environment:
+      # JSON-список для pydantic-settings (list[str]).
+      FORWARDED_ALLOW_IPS: '["172.28.0.0/16"]'
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  migrate:
+    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
+
+  worker:
+    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  worker-files:
+    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
+    deploy:
+      resources:
+        limits:
+          # Pillow (превью/watermark) — самый прожорливый воркер.
+          memory: 512M
+
+  worker-events:
+    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  worker-email:
+    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  worker-outbox:
+    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./deploy/nginx/snippets:/etc/nginx/snippets:ro
+      # Сертификаты и ACME-webroot шарятся с certbot.
+      - certbot_etc:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      api:
+        condition: service_started
+    # Фоновый reload каждые 6h — подхватывать продлённые certbot'ом
+    # сертификаты без ручного вмешательства. $$ — экранирование для compose.
+    command: /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & exec nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+  # Авто-продление сертификата. Выключен, пока нет домена:
+  # включается `--profile tls` ПОСЛЕ первичного выпуска сертификата
+  # (см. инструкцию в deploy/nginx/conf.d/showtail.conf).
+  certbot:
+    image: certbot/certbot
+    profiles: ["tls"]
+    volumes:
+      - certbot_etc:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
+  backup:
+    build: ./deploy/backup
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-showtail}
+      POSTGRES_USER: ${POSTGRES_USER:-showtail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-showtail}
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
+      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      BACKUP_CRON: ${BACKUP_CRON:-30 3 * * *}
+      BACKUP_KEEP_DAILY: ${BACKUP_KEEP_DAILY:-7}
+      BACKUP_KEEP_WEEKLY: ${BACKUP_KEEP_WEEKLY:-4}
+      # Offsite: задать все четыре -> бэкапы зеркалятся во внешний S3.
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+    volumes:
+      # bind-mount: бэкапы видны с хоста как ./backups без docker-команд.
+      - ./backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+# Фиксированная подсеть default-сети — стабильный CIDR для
+# FORWARDED_ALLOW_IPS (см. комментарий в шапке).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  certbot_etc:
+  certbot_www:
