@@ -41,10 +41,20 @@ fi
 # ls -1t сортирует по mtime (новые сверху), tail -n +N — всё после N-го.
 # Глоб showtail-* НЕ матчит weekly-showtail-* (имя должно начинаться
 # с showtail-), поэтому политики не пересекаются.
-ls -1t "$BACKUP_DIR/postgres/"showtail-*.dump 2>/dev/null \
-    | tail -n +$((KEEP_DAILY + 1)) | xargs -r rm -f
-ls -1t "$BACKUP_DIR/postgres/"weekly-showtail-*.dump 2>/dev/null \
-    | tail -n +$((KEEP_WEEKLY + 1)) | xargs -r rm -f
+rotate() {
+    # $1 — глоб-префикс, $2 — сколько файлов хранить.
+    # Несматчившийся глоб (например, weekly-дампов ещё нет) роняет ls,
+    # а под set -euo pipefail — весь скрипт. Пустой список — норма,
+    # поэтому листинг гасим (|| true), но САМО удаление не маскируем:
+    # упавший rm обязан завалить бэкап громко.
+    local old
+    old="$(ls -1t "$1"*.dump 2>/dev/null | tail -n +"$(($2 + 1))")" || true
+    if [ -n "$old" ]; then
+        echo "$old" | xargs rm -f
+    fi
+}
+rotate "$BACKUP_DIR/postgres/showtail-" "$KEEP_DAILY"
+rotate "$BACKUP_DIR/postgres/weekly-showtail-" "$KEEP_WEEKLY"
 log "rotation done (daily=$KEEP_DAILY, weekly=$KEEP_WEEKLY)"
 
 # --- 3. MinIO: инкрементальное зеркало бакета (копируются только
