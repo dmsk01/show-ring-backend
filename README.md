@@ -173,7 +173,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env u
 
 **Если `/health/` отдаёт 503 или таймаут** — обычно отвалилась зависимость. Смотри статусы:
 ```powershell
-docker ps -a --filter "name=python-animal-platform" --format "table {{.Names}}\t{{.Status}}"
+docker ps -a --filter "name=show-ring-backend" --format "table {{.Names}}\t{{.Status}}"
 ```
 Если какой-то сервис в `Exited` — подними стек заново:
 ```powershell

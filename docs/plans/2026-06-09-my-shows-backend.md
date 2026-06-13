@@ -6,7 +6,7 @@
 
 **Architecture:** Standard layered FastAPI app (`app/models`, `app/repositories`, `app/schemas`, `app/services`, `app/routers`). New read query (aggregate shows-with-my-entry-count) and enrichment join (dog/class names) go in the repository; the PATCH validation logic goes in the service mirroring `register_entry`. Routers stay thin and translate `ValueError` codes to HTTP via the existing `_raise_for_error`.
 
-**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy 2 (async), Pydantic v2, pytest + pytest-asyncio. Repo: `E:\Coding\python-animal-platform`.
+**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy 2 (async), Pydantic v2, pytest + pytest-asyncio. Repo: `E:\Coding\show-ring\show-ring-backend`.
 
 **Conventions verified:**
 - Entry endpoints live in `app/routers/shows.py` under the `# Entries` section. `/shows/{show_id}/entries/my` is registered BEFORE `/shows/{show_id}/entries/{entry_id}` so "my" isn't parsed as a UUID.

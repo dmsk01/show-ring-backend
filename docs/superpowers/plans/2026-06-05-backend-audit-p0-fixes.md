@@ -395,7 +395,7 @@ Expected: all green (46 integration + 5 unit, ± new blog cases).
 
 - [ ] **Step 2: Confirm no migration/import breakage**
 
-Run: `docker exec python-animal-platform-api-1 python -c "import app.main; print('import OK')"`
+Run: `docker exec show-ring-backend-api-1 python -c "import app.main; print('import OK')"`
 Expected: `import OK`.
 
 ---

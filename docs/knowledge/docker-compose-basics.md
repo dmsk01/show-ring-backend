@@ -114,7 +114,7 @@ docker compose exec postgres psql -U showtail -d showtail
 Проверить статус healthcheck отдельного контейнера:
 
 ```bash
-docker inspect --format '{{.State.Health.Status}}' python-animal-platform-worker-1
+docker inspect --format '{{.State.Health.Status}}' show-ring-backend-worker-1
 ```
 
 ## Осиротевшие контейнеры и очистка
