@@ -1,7 +1,8 @@
 from uuid import UUID
+from typing import Any, cast
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,7 +94,7 @@ async def revoke_refresh_token(db: AsyncSession, token_hash: str) -> int:
         .values(is_revoked=True)
     )
 
-    result = await db.execute(stmt)
+    result = cast("CursorResult[Any]", await db.execute(stmt))
     return result.rowcount or 0
 
 
@@ -112,7 +113,7 @@ async def revoke_all_refresh_tokens_for_user(
         )
         .values(is_revoked=True)
     )
-    result = await db.execute(stmt)
+    result = cast("CursorResult[Any]", await db.execute(stmt))
     return result.rowcount or 0
 
 
@@ -159,7 +160,7 @@ async def mark_email_token_used(db: AsyncSession, token_hash: str) -> int:
         .values(used_at=datetime.now(timezone.utc))
     )
 
-    result = await db.execute(stmt)
+    result = cast("CursorResult[Any]", await db.execute(stmt))
     return result.rowcount or 0
 
 
