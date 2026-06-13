@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
+    # Rate-limit логина (/auth/login и /auth/token). Дефолт = прод-значение
+    # 5/60. В e2e/CI-стеке поднимается через env (AUTH_LOGIN_RATE_LIMIT),
+    # чтобы пачка логинов сид-юзеров в Playwright global setup не упиралась
+    # в экспоненциальный бан progressive_ban (2^v секунд за каждое
+    # превышение с одного IP). Прод и pytest-CI переменную не задают →
+    # остаётся 5/60, и tests/integration/test_auth_flow.py::test_login_is_rate_limited
+    # продолжает ловить 429.
+    auth_login_rate_limit: int = 5
+    auth_login_rate_window_seconds: int = 60
     # ИСПРАВЛЕНО: добавлен явный флаг debug — заменяет хардкод echo=True
     # и используется для отключения dev-эндпоинтов в проде.
     debug: bool = False

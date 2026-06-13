@@ -242,8 +242,8 @@ async def login(
 ) -> TokenResponse:
     await check_rate_limit(
         request,
-        limit=5,
-        window=60,
+        limit=settings.auth_login_rate_limit,
+        window=settings.auth_login_rate_window_seconds,
         redis=redis,
         fail_closed=True,  # bug_247: см. /register
     )
@@ -274,8 +274,13 @@ async def login_form(
     # ИСПРАВЛЕНО: добавлен form-эндпоинт, чтобы tokenUrl в OAuth2PasswordBearer
     # совпадал с реальной реализацией. Раньше Swagger Authorize не работал.
     # bug_247: см. /register — fail_closed для всех auth-callsite'ов.
+    # /token — тот же логин (form-data для Swagger), делит лимит с /auth/login.
     await check_rate_limit(
-        request, limit=5, window=60, redis=redis, fail_closed=True
+        request,
+        limit=settings.auth_login_rate_limit,
+        window=settings.auth_login_rate_window_seconds,
+        redis=redis,
+        fail_closed=True,
     )
     try:
         # OAuth2 спецификация требует поле username — мапим его на email.

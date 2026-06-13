@@ -157,6 +157,11 @@ services:
       # префикс API за прокси (dev-прокси фронта и prod-nginx: /api).
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-[]}
       COOKIE_PATH_PREFIX: ${COOKIE_PATH_PREFIX:-}
+      # Rate-limit логина. Дефолт 5/60 — прод-безопасно; e2e/CI-стек фронта
+      # поднимает AUTH_LOGIN_RATE_LIMIT (напр. 100), чтобы пачка логинов
+      # сид-юзеров в Playwright global setup не ловила экспоненциальный бан.
+      AUTH_LOGIN_RATE_LIMIT: ${AUTH_LOGIN_RATE_LIMIT:-5}
+      AUTH_LOGIN_RATE_WINDOW_SECONDS: ${AUTH_LOGIN_RATE_WINDOW_SECONDS:-60}
     depends_on:
       migrate:
         condition: service_completed_successfully
