@@ -11,7 +11,15 @@ from __future__ import annotations
 
 import uuid
 
+from app.config import settings
+
 PASSWORD = "secret123"
+
+# Refresh-кука ограничена путём <cookie_path_prefix>/auth. За nginx
+# публичный префикс — /api (см. _refresh_cookie_path в routers/auth.py),
+# поэтому ожидаемый Path выводим из настройки, а не хардкодим /auth —
+# иначе тест ломается при ненулевом COOKIE_PATH_PREFIX.
+_REFRESH_COOKIE_PATH = settings.cookie_path_prefix.rstrip("/") + "/auth"
 
 
 def _email() -> str:
@@ -55,12 +63,12 @@ async def test_login_default_sets_httponly_cookies(client):
     assert cookies.get("access_token"), "нет куки access_token"
     assert cookies.get("refresh_token"), "нет куки refresh_token"
 
-    # Атрибуты: httpOnly + SameSite=strict; refresh ограничен /auth.
+    # Атрибуты: httpOnly + SameSite=strict; refresh ограничен <prefix>/auth.
     for header in r.headers.get_list("set-cookie"):
         assert "HttpOnly" in header, header
         assert "samesite=strict" in header.lower(), header
         if header.startswith("refresh_token="):
-            assert "Path=/auth" in header, header
+            assert f"Path={_REFRESH_COOKIE_PATH}" in header, header
 
 
 async def test_login_body_mode_returns_tokens_without_cookies(client):

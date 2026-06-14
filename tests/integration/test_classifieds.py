@@ -27,7 +27,7 @@ from app.models.classified import (
 from app.models.dog import SexEnum
 from app.models.file import UploadedFile
 from app.models.reference import Breed
-from app.models.user import User
+from app.models.user import RoleEnum, User, UserRole
 
 
 async def _breed_id(db_session) -> uuid.UUID:
@@ -239,10 +239,16 @@ async def test_default_availability_is_available(client, db_session):
 
 async def test_author_changes_availability_via_put(client, db_session):
     """
-    Автор меняет доступность через PUT (available → reserved). После этого
+    Админ меняет доступность через PUT (available → reserved). После этого
     объявление выпадает из фильтра ?availability=available и попадает в
     ?availability=reserved. Право меняет _check_owner — подменяем
-    get_current_user на автора.
+    get_current_user.
+
+    Редактор здесь — админ намеренно: правка контента не-админом
+    опубликованного (active) объявления уводит его на ре-модерацию
+    (см. test_resubmit_on_edit_active), и оно бы выпало из публичного
+    списка. Админ-правка не триггерит ре-модерацию, поэтому объявление
+    остаётся active и фильтр доступности проверяем на нём.
     """
     from app.dependencies import get_current_user
     from app.main import app
@@ -251,6 +257,8 @@ async def test_author_changes_availability_via_put(client, db_session):
         email=f"av_{uuid.uuid4().hex[:8]}@example.com", hashed_password="x"
     )
     db_session.add(owner)
+    await db_session.commit()
+    db_session.add(UserRole(user_id=owner.id, role=RoleEnum.admin))
     await db_session.commit()
     # is_admin(user) обходит user.roles — это lazy-relationship. В реальном
     # get_current_user роли грузятся через selectinload; здесь подгружаем
@@ -290,3 +298,218 @@ async def test_author_changes_availability_via_put(client, db_session):
         "/classifieds", params={"city": city, "availability": "reserved"}
     )
     assert {item["id"] for item in r.json()["items"]} == {str(c.id)}
+
+
+# ---------------------------------------------------------------------
+# Гейт модерации (2026-06-14): создание не-админом уходит на модерацию,
+# правка опубликованного объявления — на ре-модерацию, пользовательские
+# переходы статусов закрыты по карте _USER_STATUS_TRANSITIONS.
+# ---------------------------------------------------------------------
+
+
+async def _user(db_session, *, admin: bool = False) -> User:
+    """Пользователь (опц. admin) с подгруженными ролями для is_admin()."""
+    u = User(email=f"cls_{uuid.uuid4().hex[:8]}@example.com", hashed_password="x")
+    db_session.add(u)
+    await db_session.commit()
+    if admin:
+        db_session.add(UserRole(user_id=u.id, role=RoleEnum.admin))
+        await db_session.commit()
+    # is_admin(user) читает lazy-relationship user.roles — подгружаем явно
+    # в async-контексте, иначе обработчик упадёт MissingGreenlet.
+    await db_session.refresh(u, attribute_names=["roles"])
+    return u
+
+
+def _create_body(**over) -> dict:
+    """Валидное тело POST /classifieds (price_kind=negotiable → без price)."""
+    body = {
+        "category": "adult_sale",
+        "title": "Объявление под модерацию",
+        "description": "Достаточно длинное описание объявления.",
+        "price_kind": "negotiable",
+        "city": "ModerationCity",
+    }
+    body.update(over)
+    return body
+
+
+def _as_user(user: User) -> None:
+    """Подменяет get_current_user на заданного пользователя."""
+    from app.dependencies import get_current_user
+    from app.main import app
+
+    app.dependency_overrides[get_current_user] = lambda: user
+
+
+async def _active_classified(
+    db_session,
+    author_id: uuid.UUID,
+    status: ClassifiedStatus = ClassifiedStatus.active,
+    **over,
+) -> Classified:
+    c = Classified(
+        author_id=author_id,
+        category=ClassifiedCategory.adult_sale,
+        title="Опубликованное объявление",
+        description="Описание опубликованного объявления.",
+        price=None,
+        price_kind=ClassifiedPriceKind.negotiable,
+        city="ModerationCity",
+        status=status,
+        **over,
+    )
+    db_session.add(c)
+    await db_session.commit()
+    return c
+
+
+async def test_create_non_admin_goes_to_moderation(client, db_session):
+    """POST не-админом → объявление создаётся в статусе moderation."""
+    author = await _user(db_session)
+    _as_user(author)
+
+    r = await client.post("/classifieds", json=_create_body())
+    assert r.status_code == 201, r.text
+    assert r.json()["status"] == "moderation"
+
+
+async def test_create_admin_is_active(client, db_session):
+    """POST админом → объявление сразу active (минует модерацию)."""
+    admin = await _user(db_session, admin=True)
+    _as_user(admin)
+
+    r = await client.post("/classifieds", json=_create_body())
+    assert r.status_code == 201, r.text
+    assert r.json()["status"] == "active"
+
+
+async def test_user_resubmit_closed_to_moderation(client, db_session):
+    """Автор переотправляет closed → moderation (не сразу в active)."""
+    author = await _user(db_session)
+    c = await _active_classified(
+        db_session, author.id, status=ClassifiedStatus.closed
+    )
+    _as_user(author)
+
+    r = await client.put(f"/classifieds/{c.id}", json={"status": "moderation"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "moderation"
+
+
+async def test_user_withdraw_moderation_to_closed(client, db_session):
+    """Автор снимает заявку с модерации: moderation → closed."""
+    author = await _user(db_session)
+    c = await _active_classified(
+        db_session, author.id, status=ClassifiedStatus.moderation
+    )
+    _as_user(author)
+
+    r = await client.put(f"/classifieds/{c.id}", json={"status": "closed"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "closed"
+
+
+async def test_user_cannot_reopen_closed_to_active(client, db_session):
+    """closed → active автором запрещён (422), админом — разрешён."""
+    author = await _user(db_session)
+    c = await _active_classified(
+        db_session, author.id, status=ClassifiedStatus.closed
+    )
+    _as_user(author)
+    r = await client.put(f"/classifieds/{c.id}", json={"status": "active"})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"] == "status_transition_forbidden"
+
+    # Админ вправе опубликовать напрямую.
+    admin = await _user(db_session, admin=True)
+    _as_user(admin)
+    r = await client.put(f"/classifieds/{c.id}", json={"status": "active"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "active"
+
+
+async def test_resubmit_on_edit_active(client, db_session):
+    """
+    Автор правит контент active-объявления без смены статуса → оно
+    уходит на ре-модерацию (status=moderation) и пишется запись в
+    moderation_logs (action=classified.resubmit).
+    """
+    from app.models.audit import ModerationLog
+
+    author = await _user(db_session)
+    c = await _active_classified(db_session, author.id)
+    _as_user(author)
+
+    r = await client.put(
+        f"/classifieds/{c.id}", json={"title": "Новый заголовок объявления"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "moderation"
+    assert r.json()["title"] == "Новый заголовок объявления"
+
+    log = (
+        await db_session.execute(
+            select(ModerationLog).where(
+                ModerationLog.target_id == c.id,
+                ModerationLog.action == "classified.resubmit",
+            )
+        )
+    ).scalar_one()
+    assert log.actor_id == author.id
+    assert log.extra == {"prev_status": "active", "new_status": "moderation"}
+
+
+async def test_withdraw_active_no_resubmit(client, db_session):
+    """
+    Автор правит active-объявление, одновременно снимая его (status=closed):
+    приоритет у withdraw — остаётся closed, ре-модерации НЕ происходит.
+    """
+    from app.models.audit import ModerationLog
+
+    author = await _user(db_session)
+    c = await _active_classified(db_session, author.id)
+    _as_user(author)
+
+    r = await client.put(
+        f"/classifieds/{c.id}",
+        json={"title": "Снимаю с продажи навсегда", "status": "closed"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "closed"
+
+    logs = (
+        await db_session.execute(
+            select(ModerationLog).where(
+                ModerationLog.target_id == c.id,
+                ModerationLog.action == "classified.resubmit",
+            )
+        )
+    ).scalars().all()
+    assert logs == []
+
+
+async def test_moderation_queue_and_public_list(client, db_session):
+    """
+    create не-админом → объявление видно в /admin/moderation/classifieds
+    и НЕ видно в публичном GET /classifieds.
+    """
+    author = await _user(db_session)
+    city = f"ModQueueCity{uuid.uuid4().hex[:8]}"
+    _as_user(author)
+    r = await client.post("/classifieds", json=_create_body(city=city))
+    assert r.status_code == 201, r.text
+    new_id = r.json()["id"]
+    assert r.json()["status"] == "moderation"
+
+    # Публичный список форсирует status=active — на модерации не показывает.
+    r = await client.get("/classifieds", params={"city": city})
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 0
+
+    # Очередь модерации (admin) — объявление присутствует.
+    admin = await _user(db_session, admin=True)
+    _as_user(admin)
+    r = await client.get("/admin/moderation/classifieds")
+    assert r.status_code == 200, r.text
+    assert new_id in {item["id"] for item in r.json()}

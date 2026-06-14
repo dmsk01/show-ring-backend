@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.classified import Classified, ClassifiedStatus
 from app.models.file import UploadedFile
 from app.repositories import classified as repo
+from app.services import moderation as moderation_svc
 
 
 async def _verify_files_owned(
@@ -59,14 +60,16 @@ async def _check_owner(
 # через PUT /classifieds/{id} с body {"status": "active"} откатить
 # закрытое или находящееся на модерации объявление обратно в active,
 # минуя поток admin-модерации (/admin/moderation/classifieds/{id}).
-# Архитектурное решение: пользователь сам управляет только парой
-# active <-> closed (выложить / снять с продажи); смена в moderation
-# и archived — прерогатива модератора/scheduler'а.
+# Архитектурное решение: пользователь сам управляет переходами
+# active → closed (снять с продажи), closed → moderation (переотправить
+# на модерацию) и moderation → closed (снять заявку с модерации). В
+# active объявление переводит ТОЛЬКО админ (через approve) — напрямую
+# опубликовать, минуя модерацию, пользователь не может. archived —
+# прерогатива scheduler'а.
 _USER_STATUS_TRANSITIONS: dict[ClassifiedStatus, set[ClassifiedStatus]] = {
     ClassifiedStatus.active: {ClassifiedStatus.closed},
-    ClassifiedStatus.closed: {ClassifiedStatus.active},
-    # moderation / archived — терминальные для пользовательских PUT'ов
-    ClassifiedStatus.moderation: set(),
+    ClassifiedStatus.closed: {ClassifiedStatus.moderation},
+    ClassifiedStatus.moderation: {ClassifiedStatus.closed},
     ClassifiedStatus.archived: set(),
 }
 
@@ -91,6 +94,7 @@ def _validate_status_transition(
 async def create_classified(
     db: AsyncSession,
     author_id: uuid.UUID,
+    is_admin: bool,
     fields: dict,
 ) -> Classified:
     """
@@ -99,12 +103,21 @@ async def create_classified(
     images — список dict'ов с file_id/position/is_primary. Каждый —
     ссылка на уже загруженный файл (загрузка идёт через /files/upload
     отдельным запросом).
+
+    Гейт модерации: объявление от обычного пользователя создаётся в
+    статусе moderation (его должен одобрить админ через /admin/moderation/
+    classifieds), от админа — сразу active. Раньше тут срабатывал дефолт
+    модели (active), и очередь модерации всегда была пустой.
     """
     images = fields.pop("images", []) or []
-    # bug_212/216: автор создаёт объявление — он же должен быть владельцем
-    # каждого file_id. is_admin=False, потому что POST идёт от обычного
-    # пользователя; админ-bypass актуален только для update/add_images.
-    await _verify_files_owned(db, images, author_id, is_admin=False)
+    # bug_212/216: каждый file_id должен принадлежать автору. Админ-bypass
+    # тот же, что в update/add_images — модератор вправе прицепить любой
+    # файл при ручном создании/фиксе объявления.
+    await _verify_files_owned(db, images, author_id, is_admin=is_admin)
+    # Явный статус перебивает дефолт модели (active): не-админ → на модерацию.
+    fields["status"] = (
+        ClassifiedStatus.active if is_admin else ClassifiedStatus.moderation
+    )
     obj = await repo.create_classified(db, author_id=author_id, **fields)
 
     for img in images:
@@ -143,12 +156,37 @@ async def update_classified(
     # чтобы не запачкать ORM-объект промежуточным новым значением (в
     # сессии expire_on_commit=False, и при rollback пришлось бы вручную
     # рефрешить).
+    prev_status = obj.status
     new_status = fields.get("status")
     if new_status is not None:
         _validate_status_transition(obj.status, new_status, is_admin)
 
     for k, v in fields.items():
         setattr(obj, k, v)
+
+    # Ре-модерация: не-админ правит контент опубликованного (active)
+    # объявления → оно уходит на повторную модерацию. Явный пользовательский
+    # переход статуса уже отработан выше (валидация по карте), поэтому здесь
+    # смотрим на ИТОГОВЫЙ obj.status: если автор тем же запросом снял
+    # объявление (active → closed), приоритет у withdraw — в модерацию не
+    # уходим. content_changed отсекает «пустой» PUT, где меняется только
+    # status (например, эхо текущего статуса) без правки контента.
+    content_changed = any(k != "status" for k in fields)
+    if (
+        not is_admin
+        and content_changed
+        and prev_status == ClassifiedStatus.active
+        and obj.status == ClassifiedStatus.active
+    ):
+        obj.status = ClassifiedStatus.moderation
+        await moderation_svc._log_action(
+            db,
+            actor_id=requester_id,
+            action="classified.resubmit",
+            target_type="classified",
+            target_id=classified_id,
+            extra={"prev_status": "active", "new_status": "moderation"},
+        )
 
     await db.commit()
     # Дочитываем заново с images — после commit relationship уже

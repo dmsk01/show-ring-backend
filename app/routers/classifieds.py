@@ -72,6 +72,7 @@ async def create_classified(
     return await svc.create_classified(
         db,
         author_id=user.id,
+        is_admin=_is_admin(user),
         fields=body.model_dump(),
     )
 
