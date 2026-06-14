@@ -24,6 +24,12 @@ from app.models.classified import (
 )
 from app.models.dog import SexEnum
 
+# Потолок цены объявления. Колонка price — NUMERIC(10, 2), технический
+# максимум 99 999 999.99, но осмысленный бизнес-лимит для щенков ниже.
+# Без верхней границы клиент мог прислать price > 10^8 и получить 500
+# (asyncpg NumericValueOutOfRangeError при flush) вместо честного 422.
+MAX_PRICE = Decimal("10000000")
+
 
 # ---------------------------------------------------------------------
 # Изображения
@@ -86,7 +92,9 @@ class ClassifiedBase(BaseModel):
     # bug_215: price имеет смысл только при price_kind=fixed.
     # Default'ный price_kind=fixed сохраняет backwards-compatibility
     # для существующих клиентов, которые присылают только price.
-    price: Decimal | None = Field(None, ge=0)
+    # le/decimal_places дублируют ограничения колонки NUMERIC(10, 2),
+    # чтобы перебор отбивался 422, а не падал 500 на flush. См. MAX_PRICE.
+    price: Decimal | None = Field(None, ge=0, le=MAX_PRICE, decimal_places=2)
     price_kind: ClassifiedPriceKind = ClassifiedPriceKind.fixed
     city: str | None = Field(None, max_length=128)
     contact_phone: str | None = Field(None, max_length=32)
@@ -116,7 +124,8 @@ class ClassifiedUpdate(BaseModel):
     sex: SexEnum | None = None
     title: str | None = Field(None, min_length=3, max_length=255)
     description: str | None = Field(None, min_length=10)
-    price: Decimal | None = Field(None, ge=0)
+    # Те же границы, что и в ClassifiedBase: защита от 500 при flush.
+    price: Decimal | None = Field(None, ge=0, le=MAX_PRICE, decimal_places=2)
     # bug_215: price_kind можно менять (например, «fixed → negotiable»
     # после неудачных попыток продать по цене). При смене ОБА поля
     # должны прислать вместе — validator ниже это проверяет.
