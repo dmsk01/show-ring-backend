@@ -178,6 +178,61 @@ async def list_classifieds(
 
 
 @router.get(
+    "/mine",
+    response_model=ClassifiedPage,
+    summary="Мои объявления (все статусы)",
+    description=(
+        "Объявления текущего пользователя во ВСЕХ статусах (active / "
+        "closed / moderation / archived). В отличие от публичного "
+        "GET /classifieds, не форсирует status=active и скоупится по "
+        "author_id=current_user — поэтому владелец видит и снятые с "
+        "публикации, и находящиеся на модерации/в архиве. "
+        "Опциональный ?status сужает выборку до одного статуса."
+    ),
+)
+async def list_my_classifieds(
+    category: ClassifiedCategory | None = Query(None),
+    city: str | None = Query(None, max_length=128),
+    status_filter: ClassifiedStatus | None = Query(
+        None,
+        alias="status",
+        description="Фильтр по статусу; не задан — все статусы.",
+    ),
+    sort_by: Literal["created_at", "price", "views_count"] = Query("created_at"),
+    order: Literal["asc", "desc"] = Query("desc"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    items = await repo.list_classifieds(
+        db,
+        category=category,
+        city=city,
+        # None → без фильтра по статусу (все статусы владельца).
+        status=status_filter,
+        author_id=user.id,
+        sort_by=sort_by,
+        order=order,
+        page=page,
+        per_page=per_page,
+    )
+    total = await repo.count_classifieds(
+        db,
+        category=category,
+        city=city,
+        status=status_filter,
+        author_id=user.id,
+    )
+    return ClassifiedPage(
+        items=[ClassifiedResponse.model_validate(x) for x in items],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.get(
     "/{classified_id}",
     response_model=ClassifiedResponse,
     summary="Карточка объявления (инкрементирует views_count)",
