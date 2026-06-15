@@ -26,6 +26,26 @@ def _validate_e164(v: str) -> str:
 E164Phone = Annotated[str, AfterValidator(_validate_e164)]
 
 
+# Ссылки на соцсети храним и валидируем как абсолютный http(s)-URL.
+# Пустая строка трактуется как «очистить» → None (фронт шлёт "" при
+# удалении ссылки из поля). Хэндл вроде "@kennel" сознательно не
+# принимаем — у разных сетей разные домены, однозначно URL не собрать.
+def _validate_social_url(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    if not re.match(r"^https?://", v, re.IGNORECASE):
+        raise ValueError("Ссылка должна начинаться с http:// или https://")
+    if len(v) > 255:
+        raise ValueError("Ссылка слишком длинная (максимум 255 символов)")
+    return v
+
+
+SocialURL = Annotated[str | None, AfterValidator(_validate_social_url)]
+
+
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
@@ -141,3 +161,21 @@ class UserProfileUpdate(BaseModel):
     first_name: str | None = None
     patronymic: str | None = None
     country: str | None = None
+
+
+class UserSocialsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    instagram: str | None = None
+    facebook: str | None = None
+    vk: str | None = None
+    telegram: str | None = None
+
+
+class UserSocialsUpdate(BaseModel):
+    # PATCH-семантика: непереданные поля не трогаем (exclude_unset в роутере),
+    # переданная пустая строка очищает ссылку (валидатор вернёт None).
+    instagram: SocialURL = None
+    facebook: SocialURL = None
+    vk: SocialURL = None
+    telegram: SocialURL = None

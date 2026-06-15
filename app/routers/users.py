@@ -22,6 +22,8 @@ from app.schemas.user import (
     UserProfileResponse,
     UserProfileUpdate,
     UserResponse,
+    UserSocialsResponse,
+    UserSocialsUpdate,
     UserUpdate,
 )
 from app.services.auth import change_password, request_email_change
@@ -157,6 +159,48 @@ async def update_my_profile(
     profile = await upsert_profile(db, current_user.id, **fields)
     await db.commit()
     return UserProfileResponse.model_validate(profile)
+
+
+@router.get(
+    "/me/socials",
+    response_model=UserSocialsResponse,
+    summary="Мои соцсети",
+    description=(
+        "Ссылки на соцсети текущего пользователя (Instagram, Facebook, "
+        "VK, Telegram). Хранятся в том же профиле 1:1, что и ФИО/страна. "
+        "Если профиль не заведён — отдаём пустой каркас, чтобы фронт "
+        "показал форму без 404."
+    ),
+)
+async def get_my_socials(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    profile = await get_profile(db, current_user.id)
+    if profile is None:
+        return UserSocialsResponse()
+    return UserSocialsResponse.model_validate(profile)
+
+
+@router.patch(
+    "/me/socials",
+    response_model=UserSocialsResponse,
+    summary="Обновить мои соцсети",
+    description=(
+        "Частичное обновление: переданные поля сохраняются, остальные не "
+        "трогаются. Пустая строка в поле очищает ссылку. Значения должны "
+        "быть абсолютными http(s)-URL."
+    ),
+)
+async def update_my_socials(
+    payload: UserSocialsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    fields = payload.model_dump(exclude_unset=True)
+    profile = await upsert_profile(db, current_user.id, **fields)
+    await db.commit()
+    return UserSocialsResponse.model_validate(profile)
 
 
 @router.get(
