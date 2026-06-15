@@ -138,3 +138,24 @@ async def test_under_quota_passes(db_session):
 
     # Не должно поднять исключение.
     await check_upload_quota(db_session, user, declared_size_bytes=100)
+
+
+# --- квота: HTTP-эндпоинт --------------------------------------------
+
+
+async def test_upload_endpoint_returns_429_when_over_quota(client, db_session):
+    """6-я загрузка untrusted-юзера → 429 ДО обращения к MinIO."""
+    uid, token = await _make_user(client)  # untrusted, лимит 5
+    for _ in range(5):
+        db_session.add(_file_row(uid))
+    await db_session.commit()
+
+    files = {"file": ("x.jpg", b"\xff\xd8\xff\xe0junkbytes", "image/jpeg")}
+    r = await client.post("/files/upload", files=files, headers=_auth(token))
+
+    assert r.status_code == 429
+    body = r.json()
+    assert body["tier"] == "untrusted"
+    assert body["limit"] == 5
+    assert body["retry_after_seconds"] > 0
+    assert "retry-after" in {k.lower() for k in r.headers}

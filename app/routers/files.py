@@ -25,10 +25,11 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.file import FileVariant, UploadedFile
@@ -36,7 +37,7 @@ from app.models.user import User
 from app.repositories import task as task_repo
 from app.schemas.file import FileResponse, FileVariantResponse
 from app.schemas.task import TaskMessage
-from app.services import file_storage
+from app.services import file_storage, upload_quota
 from app.services.rabbit import rabbit_service
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,19 @@ async def upload_file(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Квота тира до загрузки в S3: при превышении возвращаем 429/413 и
+    # не тратим запись в MinIO. declared_size — точный размер из Starlette
+    # (file.size), при отсутствии — консервативно потолок одного файла.
+    declared_size = file.size or settings.max_upload_size_bytes
+    try:
+        await upload_quota.check_upload_quota(
+            db, user, declared_size_bytes=declared_size
+        )
+    except upload_quota.UploadQuotaExceeded as e:
+        return JSONResponse(
+            status_code=e.status_code, content=e.body, headers=e.headers
+        )
+
     # Сначала валидируем + загружаем в S3, потом — пишем метаданные в БД.
     # Если в БД произойдёт сбой, файл-сирота в S3 потом подберёт cleanup-job
     # (этап 14, scheduled tasks).
