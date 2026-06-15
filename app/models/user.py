@@ -65,6 +65,12 @@ class User(Base, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(default=True)
     is_email_verified: Mapped[bool] = mapped_column(default=False)
+    # Телефон подтверждён вводом OTP-кода (основной способ верификации,
+    # см. otp_auth.verify_otp_code). Вместе с is_email_verified образует
+    # сигнал доверия для тиров загрузки файлов (upload_quota).
+    is_phone_verified: Mapped[bool] = mapped_column(
+        default=False, server_default="false"
+    )
     # Этап 4: переход с String-плейсхолдера на реальный FK → files.id.
     # SET NULL — если аватар удалён из хранилища, юзер остаётся без
     # аватара, а не "ломается" с висячей ссылкой.
@@ -197,5 +203,13 @@ class UserProfile(Base, TimestampMixin):
     first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     patronymic: Mapped[str | None] = mapped_column(String(128), nullable=True)
     country: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Ссылки на соцсети (фронт /dashboard/profile/socials). Набор сетей
+    # подобран под аудиторию РКФ: VK и Telegram — основные в РФ, Instagram
+    # и Facebook — для международных заводчиков. Храним полный URL строкой
+    # (валидация http/https в схеме UserSocialsUpdate). NULL = не указано.
+    instagram: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    facebook: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    vk: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="profile")

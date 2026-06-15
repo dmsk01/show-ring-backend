@@ -166,5 +166,10 @@ async def verify_otp_code(
         security_logger.warning("otp_login_blocked user_id=%s", user.id)
         raise OTPUserBlockedError
 
+    # Успешный ввод OTP доказывает владение номером — фиксируем явно.
+    # Идемпотентно: повторный вход не плодит лишних UPDATE.
+    if not user.is_phone_verified:
+        user.is_phone_verified = True
+
     security_logger.info("otp_login_success user_id=%s", user.id)
     return await issue_token_pair(db, user)
