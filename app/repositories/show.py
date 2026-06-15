@@ -39,6 +39,7 @@ def _show_filter_stmt(
     date_from: date | None,
     date_to: date | None,
     status: ShowStatus | None,
+    search: str | None,
 ):
     stmt = select(Show)
     if rank_id is not None:
@@ -51,6 +52,8 @@ def _show_filter_stmt(
         stmt = stmt.where(Show.date_start <= date_to)
     if status is not None:
         stmt = stmt.where(Show.status == status)
+    if search:
+        stmt = stmt.where(Show.name.ilike(f"%{search}%"))
     return stmt
 
 
@@ -79,6 +82,7 @@ async def list_shows(
     date_from: date | None = None,
     date_to: date | None = None,
     status: ShowStatus | None = None,
+    search: str | None = None,
     sort_by: str = "date_start",
     order: str = "asc",
     page: int = 1,
@@ -88,7 +92,7 @@ async def list_shows(
     # пользователь ищет "что скоро будет", а не "что недавно создали".
     col = _SHOW_SORT.get(sort_by, Show.date_start)
     stmt = (
-        _show_filter_stmt(rank_id, city, date_from, date_to, status)
+        _show_filter_stmt(rank_id, city, date_from, date_to, status, search)
         .order_by(col.asc() if order == "asc" else col.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
@@ -104,9 +108,10 @@ async def count_shows(
     date_from: date | None = None,
     date_to: date | None = None,
     status: ShowStatus | None = None,
+    search: str | None = None,
 ) -> int:
     base = _show_filter_stmt(
-        rank_id, city, date_from, date_to, status
+        rank_id, city, date_from, date_to, status, search
     ).subquery()
     return int(
         (await db.execute(select(func.count()).select_from(base))).scalar_one()

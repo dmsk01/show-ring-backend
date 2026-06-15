@@ -125,12 +125,15 @@ async def list_shows(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     status_: ShowStatus | None = Query(None, alias="status"),
+    search: str | None = Query(None, max_length=128),
     sort_by: Literal["date_start", "created_at"] = Query("date_start"),
     order: Literal["asc", "desc"] = Query("asc"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
+    # Триммим на границе ввода: "пусто/одни пробелы" → None (без фильтра).
+    search = search.strip() or None if search else None
     items = await repo.list_shows(
         db,
         rank_id=rank_id,
@@ -138,6 +141,7 @@ async def list_shows(
         date_from=date_from,
         date_to=date_to,
         status=status_,
+        search=search,
         sort_by=sort_by,
         order=order,
         page=page,
@@ -150,6 +154,7 @@ async def list_shows(
         date_from=date_from,
         date_to=date_to,
         status=status_,
+        search=search,
     )
     return ShowPage(
         items=[ShowResponse.model_validate(s) for s in items],

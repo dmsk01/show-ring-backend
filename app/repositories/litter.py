@@ -13,6 +13,7 @@ from typing import Sequence
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.kennel import Kennel
 from app.models.litter import Litter, LitterStatus
 
 
@@ -20,6 +21,7 @@ def _litter_filter_stmt(
     kennel_id: uuid.UUID | None,
     breed_id: uuid.UUID | None,
     status: LitterStatus | None,
+    search: str | None,
 ):
     stmt = select(Litter)
     if kennel_id is not None:
@@ -28,6 +30,14 @@ def _litter_filter_stmt(
         stmt = stmt.where(Litter.breed_id == breed_id)
     if status is not None:
         stmt = stmt.where(Litter.status == status)
+    if search:
+        # Поиск по названию питомника — поле в связанной таблице kennels.
+        # JOIN добавляем только при активном поиске: без него лишнее
+        # соединение не нужно. kennel_id обязателен (NOT NULL), поэтому
+        # INNER JOIN ничего не теряет.
+        stmt = stmt.join(Kennel, Litter.kennel_id == Kennel.id).where(
+            Kennel.name.ilike(f"%{search}%")
+        )
     return stmt
 
 
@@ -40,11 +50,12 @@ async def list_litters(
     kennel_id: uuid.UUID | None = None,
     breed_id: uuid.UUID | None = None,
     status: LitterStatus | None = None,
+    search: str | None = None,
     page: int = 1,
     per_page: int = 50,
 ) -> Sequence[Litter]:
     stmt = (
-        _litter_filter_stmt(kennel_id, breed_id, status)
+        _litter_filter_stmt(kennel_id, breed_id, status, search)
         # Сортировка: сначала новые помёты (по born_at, потом по created_at).
         # nullslast — помёты без даты рождения (planned) уходят вниз,
         # чтобы доступные не тонули среди планируемых.
@@ -60,8 +71,9 @@ async def count_litters(
     kennel_id: uuid.UUID | None = None,
     breed_id: uuid.UUID | None = None,
     status: LitterStatus | None = None,
+    search: str | None = None,
 ) -> int:
-    base = _litter_filter_stmt(kennel_id, breed_id, status).subquery()
+    base = _litter_filter_stmt(kennel_id, breed_id, status, search).subquery()
     return int(
         (await db.execute(select(func.count()).select_from(base))).scalar_one()
     )

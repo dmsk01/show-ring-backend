@@ -110,26 +110,30 @@ async def create_litter(
     "",
     response_model=LitterPage,
     summary="Список помётов",
-    description="Фильтры: питомник, порода, статус. Пагинация.",
+    description="Фильтры: питомник, порода, статус; поиск по названию питомника. Пагинация.",
 )
 async def list_litters(
     kennel_id: uuid.UUID | None = Query(None),
     breed_id: uuid.UUID | None = Query(None),
     status_: LitterStatus | None = Query(None, alias="status"),
+    search: str | None = Query(None, max_length=128),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
+    # Триммим на границе ввода: "пусто/одни пробелы" → None (без фильтра).
+    search = search.strip() or None if search else None
     items = await repo.list_litters(
         db,
         kennel_id=kennel_id,
         breed_id=breed_id,
         status=status_,
+        search=search,
         page=page,
         per_page=per_page,
     )
     total = await repo.count_litters(
-        db, kennel_id=kennel_id, breed_id=breed_id, status=status_
+        db, kennel_id=kennel_id, breed_id=breed_id, status=status_, search=search
     )
     return LitterPage(
         items=await _build_litters(db, list(items)),
