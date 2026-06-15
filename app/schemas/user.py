@@ -72,6 +72,7 @@ class UserResponse(BaseModel):
     phone: str | None = None
     is_active: bool
     is_email_verified: bool
+    is_phone_verified: bool
     roles: list[RoleResponse]
     created_at: datetime
 
