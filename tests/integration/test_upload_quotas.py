@@ -159,3 +159,45 @@ async def test_upload_endpoint_returns_429_when_over_quota(client, db_session):
     assert body["limit"] == 5
     assert body["retry_after_seconds"] > 0
     assert "retry-after" in {k.lower() for k in r.headers}
+
+
+# --- админский CRUD лимитов ------------------------------------------
+
+
+async def test_list_quotas_requires_admin(client):
+    """Не-админ → 403."""
+    _, token = await _make_user(client)
+    r = await client.get("/admin/upload-quotas", headers=_auth(token))
+    assert r.status_code == 403
+
+
+async def test_admin_lists_quota_tiers(client, db_session):
+    """Админ видит три засеянных тира."""
+    _, token = await _make_admin(client, db_session)
+    r = await client.get("/admin/upload-quotas", headers=_auth(token))
+    assert r.status_code == 200
+    tiers = {row["tier"] for row in r.json()}
+    assert tiers == {"untrusted", "standard", "breeder"}
+
+
+async def test_admin_updates_tier_limit(client, db_session):
+    """PUT меняет лимит, новое значение видно в ответе."""
+    _, token = await _make_admin(client, db_session)
+    r = await client.put(
+        "/admin/upload-quotas/untrusted",
+        json={"daily_limit": 3, "max_storage_bytes": 10485760},
+        headers=_auth(token),
+    )
+    assert r.status_code == 200
+    assert r.json()["daily_limit"] == 3
+    assert r.json()["max_storage_bytes"] == 10485760
+
+
+async def test_update_unknown_tier_404(client, db_session):
+    _, token = await _make_admin(client, db_session)
+    r = await client.put(
+        "/admin/upload-quotas/nope",
+        json={"daily_limit": 3, "max_storage_bytes": 10485760},
+        headers=_auth(token),
+    )
+    assert r.status_code == 404

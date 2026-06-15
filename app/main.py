@@ -22,6 +22,7 @@ from app.routers import (
     classifieds,
     documents,
     dogs,
+    feature_flags,
     files,
     health,
     kennels,
@@ -38,6 +39,7 @@ from app.routers import (
 from app.routers.admin import references as admin_references
 from app.routers.admin import analytics as admin_analytics
 from app.routers.admin import moderation as admin_moderation
+from app.routers.admin import upload_quotas as admin_upload_quotas
 from app.redis import init_redis, close_redis
 from app.services.rabbit import rabbit_service
 from app.services.scheduler import start_scheduler, stop_scheduler
@@ -161,10 +163,14 @@ if settings.cors_allow_origins:
 
 app.include_router(health.router)
 app.include_router(auth.router)
+# Feature flags: публичный GET для фронта + админ-переключатель. Гейтинг
+# роутов делает require_flag из app.services.feature_flags.
+app.include_router(feature_flags.router)
 app.include_router(users.router)
 # Этап 3: справочники (публичные GET) + админ-CRUD.
 app.include_router(references.router)
 app.include_router(admin_references.router)
+app.include_router(admin_upload_quotas.router)
 # Этап 4: питомники, собаки, файлы (MinIO).
 app.include_router(kennels.router)
 app.include_router(dogs.router)
