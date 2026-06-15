@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # OOM/диск-флуд: на CI/проде обычно ставится на reverse-proxy, но
     # дублируем на уровне приложения для defence-in-depth.
     max_upload_size_bytes: int = 10 * 1024 * 1024  # 10 МБ
+    # Backpressure к MinIO: максимум одновременных загрузок на процесс и
+    # сколько ждать слот, прежде чем отдать 503. Защищает хранилище от
+    # лавины параллельных put_object при всплеске трафика.
+    upload_max_concurrency: int = 10
+    upload_acquire_timeout_seconds: float = 5.0
 
     # --- Этап 9: Email + Scheduler ---
     # SMTP-настройки. В dev — MailPit (порт 1025, без auth, без TLS).

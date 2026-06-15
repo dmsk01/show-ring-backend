@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from contextlib import AbstractAsyncContextManager
@@ -72,6 +73,11 @@ def _detect_file_type(head: bytes) -> DetectedFileType | None:
 # использования между корутинами — она не держит соединений сама.
 _session = aioboto3.Session()
 
+# Backpressure: ограничивает число одновременных загрузок в MinIO на
+# процесс. Создаётся на уровне модуля (лениво привязывается к loop'у при
+# первом acquire в Python 3.10+).
+_upload_semaphore = asyncio.Semaphore(settings.upload_max_concurrency)
+
 
 def _s3_client() -> AbstractAsyncContextManager[Any]:
     """
@@ -99,6 +105,33 @@ def _s3_client() -> AbstractAsyncContextManager[Any]:
 
 
 async def upload_file(
+    upload: UploadFile,
+    *,
+    folder: str = "general",
+) -> tuple[str, str, str, int]:
+    """
+    Backpressure-обёртка над _upload_to_s3: захватывает семафор с
+    таймаутом (при перегрузке — 503), затем делегирует загрузку и
+    гарантированно освобождает слот в finally.
+    """
+    try:
+        await asyncio.wait_for(
+            _upload_semaphore.acquire(),
+            timeout=settings.upload_acquire_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Хранилище временно перегружено, повторите позже",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        return await _upload_to_s3(upload, folder=folder)
+    finally:
+        _upload_semaphore.release()
+
+
+async def _upload_to_s3(
     upload: UploadFile,
     *,
     folder: str = "general",
