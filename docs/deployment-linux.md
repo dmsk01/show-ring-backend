@@ -292,7 +292,7 @@ dc ps
 Все сервисы должны быть `running`/`healthy`; `migrate` и `minio-init` — `exited (0)`
 (это одноразовые контейнеры, так и должно быть). Проверь, что приложение отвечает:
 ```bash
-curl -fsS http://localhost/api/health
+curl -fsSL http://localhost/api/health
 ```
 Ожидаемый ответ — JSON `{"status":"ok", ...}` со всеми компонентами `ok`.
 
@@ -379,9 +379,11 @@ BACKUP_CRON=30 3 * * *        # когда (по умолчанию 03:30)
 BACKUP_KEEP_DAILY=7           # сколько дневных копий хранить
 BACKUP_KEEP_WEEKLY=4          # сколько недельных
 ```
-Для копий во внешнее облако задай все четыре `BACKUP_S3_*`. Разовый бэкап вручную:
+Для копий во внешнее облако задай все четыре `BACKUP_S3_*`. Разовый бэкап вручную
+(скрипт `backup.sh` лежит на `PATH` контейнера; запускаем одноразовым контейнером,
+как документировано в `deploy/backup/backup.sh`):
 ```bash
-dc exec backup /backup.sh
+dc run --rm backup backup.sh
 ```
 
 ---
@@ -448,7 +450,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env 
 # Админ + справочники + проверка
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m scripts.bootstrap_admin --email admin@showtail.example --password '...'
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m scripts.seed_references
-curl -fsS http://localhost/api/health
+curl -fsSL http://localhost/api/health
 ```
 
 ---
