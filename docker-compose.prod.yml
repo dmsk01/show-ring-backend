@@ -1,11 +1,17 @@
 # Прод-оверлей ShowTail. Применяется ПОВЕРХ базового файла:
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 #
-# Что добавляет/меняет:
-# - api/worker*/migrate берут образ из ghcr (тег из IMAGE_TAG, дефолт
-#   latest) — это чинит `docker compose pull` в deploy-стадии CI.
-#   base `build: .` остаётся в merged-конфиге, но без --build не
-#   используется; локальную приёмку гоняем с `up --build`.
+# Образы собираются ЛОКАЛЬНО на сервере (`up --build`) — ни бэк, ни фронт
+# НЕ тянутся из внешнего registry. Нулевая зависимость от ghcr/GitHub:
+# переезд на другой хостинг кода = git clone + up --build, без изменений.
+#
+# Что добавляет/меняет относительно базы:
+# - api: несколько uvicorn-воркеров вместо одного процесса + лимит памяти.
+# - worker*: лимиты памяти (Pillow в worker-files — самый прожорливый).
+# - web: фронт (Next.js, репо show-ring-frontend) собирается из соседнего
+#   каталога ../show-ring-frontend. Слушает 8082, наружу не публикуется —
+#   единственный вход в стек остаётся nginx, который разводит / → web и
+#   /api/ → api. На сервере репо фронта должен лежать рядом с этим репо.
 # - nginx — ЕДИНСТВЕННЫЕ наружные порты (80/443). Порты инфры база
 #   не публикует вовсе (см. инверсию в docker-compose.dev.yml).
 # - certbot — под profile "tls", включается при появлении домена
@@ -17,7 +23,6 @@
 
 services:
   api:
-    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
     # Прод: несколько uvicorn-воркеров вместо одного процесса.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0",
               "--port", "8000", "--workers", "${UVICORN_WORKERS:-2}"]
@@ -29,18 +34,13 @@ services:
         limits:
           memory: 512M
 
-  migrate:
-    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
-
   worker:
-    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
     deploy:
       resources:
         limits:
           memory: 512M
 
   worker-files:
-    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
     deploy:
       resources:
         limits:
@@ -48,32 +48,28 @@ services:
           memory: 512M
 
   worker-events:
-    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
     deploy:
       resources:
         limits:
           memory: 256M
 
   worker-email:
-    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
     deploy:
       resources:
         limits:
           memory: 256M
 
   worker-outbox:
-    image: ghcr.io/dmsk01/show-ring-backend:${IMAGE_TAG:-latest}
     deploy:
       resources:
         limits:
           memory: 256M
 
-  # Веб-фронт (Next.js, репо show-ring-frontend). Образ пушит CI фронта;
-  # деплой фронта — их же CI: `compose pull web && up -d web` по SSH.
-  # Наружу не публикуется — единственный вход в стек остаётся nginx,
-  # который разводит / → web и /api/ → api.
+  # Веб-фронт (Next.js, репо show-ring-frontend). Собирается локально из
+  # соседнего каталога. Наружу не публикуется — вход в стек только через
+  # nginx (/ → web, /api/ → api).
   web:
-    image: ghcr.io/dmsk01/show-ring-frontend:${WEB_IMAGE_TAG:-latest}
+    build: ../show-ring-frontend
     environment:
       # Фолбэк для SSR-запросов изнутри контейнера (минуя nginx);
       # браузерные запросы ходят относительным /api через nginx.
