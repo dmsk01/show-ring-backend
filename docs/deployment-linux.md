@@ -7,8 +7,15 @@
 nginx + TLS + бэкапы) со **сборкой образов бэкенда прямо на сервере**
 (`up --build`), без обязательного доступа к приватному registry для бэка.
 
-> Локальная разработка под Windows — отдельная инструкция в корневом
-> [`README.md`](../README.md). Здесь — только сервер.
+Гайд покрывает два сценария:
+- **Боевой сервер** (VPS, свой домен, HTTPS) — разделы 0–10 ниже.
+- **Локальный запуск на своей Linux-машине** (прогнать весь стек целиком,
+  без домена, по `http://localhost`) — см. [Приложение: локальное
+  развёртывание](#приложение-локальное-развёртывание-на-этой-же-машине).
+  Топология та же (web + nginx + воркеры), отличается лишь конфигом.
+
+> Локальная разработка под Windows с hot-reload и mailpit — отдельная
+> инструкция в корневом [`README.md`](../README.md).
 
 ---
 
@@ -118,6 +125,30 @@ cd showtail  # вернуться в бэкенд
 > `build: ../show-ring-frontend` в `docker-compose.prod.yml` под свою раскладку.
 > nginx стартует только когда `web` стал healthy, поэтому без собранного фронта
 > весь стек до конца не поднимется.
+
+### Фронтенд: что нужно и чего НЕ нужно
+
+У фронта **нет отдельной процедуры развёртывания** — в этой схеме он
+разворачивается как часть бэкенд-стека. Достаточно одного действия выше
+(склонировать репо рядом). Конкретно:
+
+- ✅ **Клонировать `show-ring-frontend` рядом** — единственный ручной шаг.
+- ✅ **Сборка** — автоматически, частью `docker compose up --build` (сервис `web`,
+  его `Dockerfile`: Next.js standalone, non-root, порт 8082, healthcheck `/healthz`).
+- ❌ **Свой `.env` фронту задавать НЕ нужно.** Образ собирается с дефолтами
+  `NEXT_PUBLIC_SERVER_URL=/api` (в его `Dockerfile` помечено: секреты на билде не
+  нужны), а `BACKEND_URL=http://api:8000` мы задаём в `web.environment`
+  прод-оверлея — для SSR-запросов изнутри контейнера.
+- ❌ **Отдельно `npm install` / `npm run build` на сервере запускать НЕ нужно** —
+  всё происходит внутри Docker-сборки образа.
+- ✅ **Маршрутизация** — через nginx: `/` → `web`, `/api/` → `api`
+  (`deploy/nginx/conf.d/showtail.conf`).
+
+> **Расхождение с README фронта.** В `show-ring-frontend/README.md` раздел
+> «Деплой» описывает CI-путь (сборка → публикация образа в ghcr → деплой на VPS).
+> Здесь мы намеренно используем **локальную сборку** на сервере вместо ghcr —
+> ради нулевой зависимости от внешнего реестра. Команды из README фронта
+> (`npm run dev` и т.п.) актуальны только для разработки самого фронта.
 
 ---
 
@@ -339,3 +370,188 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python 
 # 5. проверка
 curl -fsS http://localhost/api/health
 ```
+
+---
+
+## Приложение: локальное развёртывание на этой же машине
+
+Запуск всего прод-стека прямо на твоём ноутбуке с Ubuntu 24 (например, чтобы
+прогнать связку web + nginx + бэкенд целиком перед выкаткой на боевой сервер).
+Это **тот же стек**, что и выше, с тремя поправками: без домена/TLS, доступ по
+`http://localhost`, и `DEBUG=true`, чтобы работал логин по HTTP (см. ниже).
+
+Выполняй разделы **1–4** и **6–7** как для сервера, учитывая отличия:
+
+### Docker на свежей Ubuntu 24 (раздел 0)
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+```
+Ты сейчас в открытой SSH-сессии — членство в группе `docker` в ней ещё не
+подхватилось. Применить без переподключения:
+```bash
+newgrp docker          # или переоткрой SSH-сессию
+docker compose version # проверка, что работает без sudo
+```
+
+### `.env` (раздел 2) — главное отличие
+```bash
+cp .env.prod.example .env && chmod 600 .env
+```
+Поправь в `.env`:
+
+| Переменная | Локально | Почему |
+|---|---|---|
+| `DEBUG` | **`true`** | При `DEBUG=false` auth-куки ставятся с флагом `Secure` (`app/routers/auth.py`) — браузер шлёт их только по HTTPS. По `http://localhost` логин бы молча не работал. `DEBUG=true` снимает `Secure` → логин по HTTP работает. |
+| `SECRET_KEY` | любой ≥32 символов | При `DEBUG=true` строгая валидация ключа отключается, но привычку не теряем: `openssl rand -hex 32`. |
+| `SMTP_*` | можно оставить заглушки | Письма локально никуда не уйдут. Не страшно: админ (`bootstrap_admin`) и сид-юзеры создаются с уже подтверждённым email — `/auth/login` под ними работает сразу. Самостоятельная регистрация через `/auth/register` потребует письма — его не будет. |
+
+Пароли PG/Rabbit/MinIO — любые. `DOMAIN` не задавай.
+
+### Фронт (раздел 3)
+Так же клонируй `show-ring-frontend` рядом — он собирается локально.
+
+### Запуск (раздел 4)
+Та же команда. nginx займёт порт **80** на машине:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
+```
+Если 80-й порт занят (другой веб-сервер) — освободи его или временно поменяй
+маппинг nginx в `docker-compose.prod.yml` на `"8080:80"`.
+
+### Раздел 5 (домен и TLS) — ПРОПУСТИТЬ
+Локально HTTPS не нужен, остаёмся на `:80`.
+
+### Доступ к приложению
+- **С самого ноутбука:** UI — http://localhost/ , API — http://localhost/api/health
+- **С другого компьютера через ту же SSH-сессию** (порт наружу открывать не надо
+  — пробрось туннелем со своей машины):
+  ```bash
+  ssh -L 8080:localhost:80 <user>@<ip-ноутбука>
+  ```
+  затем открой `http://localhost:8080/` в своём браузере — трафик уйдёт в nginx
+  на ноутбуке. `DEBUG=true` обязателен и для этого пути (туннель — тоже HTTP).
+- **По локальной сети:** nginx слушает `0.0.0.0:80`, поэтому с другого устройства
+  в той же сети — `http://<ip-ноутбука>/` (если включён `ufw`: `sudo ufw allow 80`).
+
+### Остановка
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml down      # данные сохранятся
+docker compose -f docker-compose.yml -f docker-compose.prod.yml down -v   # стереть всё
+```
+
+---
+
+## Публичный доступ через туннель (Cloudflare / ngrok)
+
+Альтернатива SSH-туннелю и пробросу портов: дать локальному стеку **постоянный
+публичный HTTPS-адрес**, не открывая ни одного входящего порта. На машине
+запускается демон туннеля, он держит **исходящее** соединение к облаку и
+форвардит трафик на локальный nginx (`http://localhost:80`). NAT и файрвол при
+этом не мешают — наружу ничего слушать не надо.
+
+### Важно: с туннелем оставляем `DEBUG=false`
+
+Это отличие от прямого локального доступа (localhost / LAN / SSH-туннель), где
+нужен `DEBUG=true`. Cloudflare и ngrok **терминируют TLS на своём edge** —
+браузер общается по **HTTPS**. Флаг `Secure` на auth-куках зависит от `DEBUG`
+(`secure=not settings.debug`, `app/routers/auth.py`), и раз браузер на HTTPS —
+Secure-куки принимаются и отправляются нормально.
+
+➡️ Для туннеля в `.env` ставь **`DEBUG=false`** (как в боевом разделе 2), а не
+`true`. Хак `DEBUG=true` нужен только для голого HTTP.
+
+### Поправки в `.env` под публичный хост
+
+| Переменная | Значение | Зачем |
+|---|---|---|
+| `DEBUG` | `false` | Secure-куки по HTTPS-туннелю работают (см. выше). |
+| `SECRET_KEY` | реальный, `openssl rand -hex 32` | `DEBUG=false` включает строгую валидацию ключа. |
+| `ALLOWED_HOSTS` | `["showtail.example.com"]` | Хостнейм туннеля. `TrustedHostMiddleware` (`app/main.py`) отбивает Host-инъекции, когда список задан; пустой = пускает любой Host. |
+| `FRONTEND_BASE_URL` | `https://showtail.example.com` | На него строятся ссылки в письмах верификации (`app/services/auth.py`). Важно, только если шлёшь письма (нужен рабочий SMTP). |
+
+`X-Forwarded-Proto` для самого логина трогать не нужно — флаг куки берётся из
+`DEBUG`, а не из схемы запроса. nginx-конфиг править не требуется.
+
+После правок `.env` — перезапусти api: `docker compose -f docker-compose.yml -f
+docker-compose.prod.yml --env-file .env up -d api`.
+
+---
+
+### Вариант A — Cloudflare Tunnel (рекомендую для постоянного адреса)
+
+Бесплатно даёт **стабильный** поддомен на твоём домене, заведённом в Cloudflare
+(free-план подходит). Демон — `cloudflared`.
+
+**1. Установка на Ubuntu 24:**
+```bash
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt-get update && sudo apt-get install -y cloudflared
+```
+
+**2. Логин и создание именованного туннеля** (один раз):
+```bash
+cloudflared tunnel login                 # откроет браузер, выбери свой домен
+cloudflared tunnel create showtail       # создаст туннель + creds-файл в ~/.cloudflared/
+```
+
+**3. Конфиг `~/.cloudflared/config.yml`:**
+```yaml
+tunnel: showtail
+credentials-file: /home/<user>/.cloudflared/<TUNNEL-UUID>.json
+ingress:
+  - hostname: showtail.example.com
+    service: http://localhost:80     # сюда смотрит локальный nginx
+  - service: http_status:404         # обязательное правило-замыкатель
+```
+
+**4. Привязать DNS и запустить:**
+```bash
+cloudflared tunnel route dns showtail showtail.example.com
+cloudflared tunnel run showtail
+```
+Готово — приложение доступно на `https://showtail.example.com` (сертификат
+выдаёт Cloudflare автоматически).
+
+**5. Автозапуск как systemd-сервис** (чтобы туннель жил после закрытия SSH):
+```bash
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+> **Разовый показ без своего домена:** `cloudflared tunnel --url http://localhost:80`
+> — поднимет туннель на случайном `*.trycloudflare.com` без логина и DNS. URL
+> эфемерный (меняется при каждом запуске), `ALLOWED_HOSTS` тогда оставь пустым.
+
+---
+
+### Вариант B — ngrok (быстрее, статический адрес ограничен)
+
+**1. Установка и токен:**
+```bash
+curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+sudo apt-get update && sudo apt-get install -y ngrok
+ngrok config add-authtoken <ТВОЙ_ТОКЕН>   # из dashboard.ngrok.com
+```
+
+**2. Запуск:**
+```bash
+ngrok http 80                                          # случайный *.ngrok-free.app
+ngrok http --domain=твой-статик.ngrok-free.app 80      # статический (1 домен на free-аккаунт)
+```
+ngrok выдаёт публичный `https://...`-адрес и терминирует TLS — `DEBUG=false`
+так же корректно работает. В `ALLOWED_HOSTS` впиши выданный хостнейм.
+
+---
+
+### Безопасность: ты в публичном интернете
+
+- **Реальные секреты** в `.env` — стек теперь доступен всем. Никаких дефолтных паролей.
+- **Rate-limit nginx** включён по умолчанию (зоны `auth`/`general`).
+- **Приватный показ:** поверх Cloudflare Tunnel можно включить **Cloudflare
+  Access** (Zero Trust) — доступ только по списку email/Google-аккаунтов, без
+  правок в приложении. У ngrok аналог — `--basic-auth 'user:pass'` на запуске.
+- Закрыл показ — **останови демон** (`Ctrl+C` или `systemctl stop cloudflared`):
+  пока он не запущен, снаружи ничего не висит.
