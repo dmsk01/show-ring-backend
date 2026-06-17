@@ -100,10 +100,16 @@ docker compose exec api bash
 Проверка бэкенда — снаружи (порт проброшен) и изнутри сети:
 
 ```bash
-curl http://localhost:8000/health          # с хоста
-curl http://localhost:8000/docs            # Swagger UI в браузере
-docker compose exec api curl -fsS http://localhost:8000/health   # изнутри контейнера
+curl -L http://localhost:8000/health        # детальный статус компонентов (-L: /health 307-редиректит на /health/)
+curl http://localhost:8000/docs             # Swagger UI в браузере
+docker compose exec api curl -fsS http://localhost:8000/health/ready   # readiness изнутри контейнера (как HEALTHCHECK)
 ```
+
+В ShowTail два health-эндпоинта: `/health/` всегда отдаёт 200 с разбивкой по
+компонентам (для дашборда), а `/health/ready` — бинарный readiness (200 если PG
+жив, 503 если БД down). `HEALTHCHECK` контейнера (см. `Dockerfile`) бьёт именно
+в `/health/ready` — он и помечает контейнер unhealthy при падении БД. Подробнее —
+`docs/knowledge/fastapi-lifespan-healthcheck.md`.
 
 Подключиться к БД внутри контейнера:
 

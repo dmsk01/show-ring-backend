@@ -29,28 +29,36 @@ app = FastAPI(lifespan=lifespan)
 
 Вызывается **периодически во время работы** — Docker `HEALTHCHECK`, Kubernetes liveness/readiness probes, внешний мониторинг (UptimeRobot, Grafana и т.д.).
 
+В ShowTail health разведён на **два эндпоинта** с разными статус-кодами (`app/routers/health.py`), потому что у «жив ли я» и «можно ли слать трафик» разные потребители:
+
 ```python
-@router.get("/")
+@router.get("/")          # GET /health/ — детальный, ВСЕГДА 200
 async def health_check(db: AsyncSession = Depends(get_db)):
-    try:
-        await db.execute(text("SELECT 1"))
-        return {"status": "ok", "db": "connected"}
-    except Exception:
-        return {"status": "ok", "db": "unavailable"}
+    # параллельно проверяет db/redis/rabbitmq/minio, каждый → "ok" | "down"
+    return {"status": "ok", "components": {"db": db_s, "redis": redis_s, ...}}
+
+@router.get("/ready")     # GET /health/ready — бинарный, 503 если PG down
+async def readiness_probe(db: AsyncSession = Depends(get_db)):
+    if await _check_db(db) != "ok":
+        raise HTTPException(status_code=503, detail={"db": ...})
+    return {"status": "ready"}
 ```
 
-Почему `status: ok` даже при `db: unavailable`: HTTP-статус 200 нужен, чтобы мониторинг получил данные. Если вернуть 503, некоторые системы перестанут опрашивать эндпоинт и потеряют детали. Сам факт недоступности БД виден в теле ответа.
+- **`/health/`** — для **дашборда/мониторинга**: всегда 200, чтобы система не перестала опрашивать эндпоинт и видела детали в теле (какой именно компонент `down`). HTTP-код стабилен — деградация читается из JSON, а не из статуса.
+- **`/health/ready`** — для **Docker `HEALTHCHECK` и load balancer'ов**: бинарное 200/503. Критичен только PostgreSQL (без БД API не работает); Redis/Rabbit/MinIO могут деградировать, но не выводят инстанс из ротации. Именно `/health/ready` стоит в `HEALTHCHECK` нашего `Dockerfile`.
+
+> **Тонкость с trailing slash.** Роут объявлен `@router.get("/")` при `prefix="/health"`, поэтому канонический путь — `/health/`. Запрос `/health` отдаёт **307-редирект** на `/health/`; в `curl`-проверках добавляй `-L` либо бей сразу в `/health/`. С `-f` без `-L` проверка «проходила» уже на редиректе, не доходя до реального ответа — поэтому `HEALTHCHECK` бьёт в точный `/health/ready` (без редиректа).
 
 ## Зачем оба механизма
 
-| | Lifespan (startup) | GET /health |
+| | Lifespan (startup) | Health-эндпоинты (runtime) |
 |---|---|---|
-| Когда | Один раз при старте | Периодически (каждые 30 сек) |
-| Вопрос | "Могу ли я начать работу?" | "Я всё ещё жив?" |
+| Когда | Один раз при старте | Периодически (каждые 15–30 сек) |
+| Вопрос | "Могу ли я начать работу?" | "Я всё ещё жив? Можно слать трафик?" |
 | Кто вызывает | FastAPI сам при запуске | Docker, Kubernetes, мониторинг |
-| При сбое | Процесс не стартует | Контейнер перезапускается |
+| При сбое БД | Процесс не стартует | `/health/` → всё ещё 200 (деталь в JSON); `/health/ready` → 503 → контейнер `unhealthy` |
 
-БД может быть доступна при старте и упасть через 2 часа — lifespan это не поймает. Поэтому нужны оба.
+БД может быть доступна при старте и упасть через 2 часа — lifespan это не поймает. Поэтому нужны оба механизма, а health дополнительно разведён на детальный и бинарный.
 
 ## Ссылки
 
