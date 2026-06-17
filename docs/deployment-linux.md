@@ -1,373 +1,453 @@
-# Развёртывание ShowTail на Linux-сервере
+# Развёртывание ShowTail на Linux-сервере — пошагово
 
-Полная инструкция: от клонирования репозитория до засеянной БД и работающего
-прод-стека за nginx с TLS.
+Инструкция «с нуля»: от подключения к серверу по SSH и установки пакетов до
+работающего прод-стека за nginx и засеянной базы. Рассчитана на то, что Linux ты
+видишь впервые — каждая команда с пояснением и проверкой результата.
 
-Этот гайд описывает **полный прод-стек** (бэкенд + воркеры + инфраструктура +
-nginx + TLS + бэкапы) со **сборкой образов бэкенда прямо на сервере**
-(`up --build`), без обязательного доступа к приватному registry для бэка.
+Стек собирается **прямо на сервере** (`docker compose up --build`), без скачивания
+готовых образов из внешнего реестра — то есть зависимости от GitHub/ghcr нет.
 
 Гайд покрывает два сценария:
-- **Боевой сервер** (VPS, свой домен, HTTPS) — разделы 0–10 ниже.
-- **Локальный запуск на своей Linux-машине** (прогнать весь стек целиком,
-  без домена, по `http://localhost`) — см. [Приложение: локальное
-  развёртывание](#приложение-локальное-развёртывание-на-этой-же-машине).
-  Топология та же (web + nginx + воркеры), отличается лишь конфигом.
+- **Боевой сервер** (VPS, свой домен, HTTPS) — Части I–II ниже.
+- **Локальный запуск на своей Linux-машине** (без домена, по `http://localhost`) —
+  см. [Приложение: локальное развёртывание](#приложение-локальное-развёртывание-на-этой-же-машине).
 
-> Локальная разработка под Windows с hot-reload и mailpit — отдельная
-> инструкция в корневом [`README.md`](../README.md).
+> Что понадобится: сервер (VPS) с **Ubuntu 22.04/24.04**, доступ к нему (IP-адрес +
+> логин/пароль или SSH-ключ — их выдаёт хостинг при создании сервера), и ~2 ГБ
+> свободной RAM. Разработка под Windows с hot-reload — отдельная инструкция в
+> корневом [`README.md`](../README.md).
 
----
-
-## 0. Что должно быть на сервере
-
-- **ОС:** любой современный Linux (Ubuntu 22.04/24.04 LTS — эталон).
-- **Docker Engine + Docker Compose v2** (плагин `docker compose`, не старый
-  `docker-compose`). Проверка:
-  ```bash
-  docker --version
-  docker compose version
-  ```
-  Если не установлено — официальный способ:
-  ```bash
-  curl -fsSL https://get.docker.com | sh
-  sudo usermod -aG docker $USER   # чтобы не писать sudo перед docker; перелогиниться
-  ```
-- **git**: `sudo apt-get install -y git`.
-- **Ресурсы:** ~2 ГБ свободной RAM под стек (Pillow-воркер и сборка образа —
-  самые прожорливые). Под сборку нужно ещё ~1–2 ГБ временно.
-- **Сетевые порты:** наружу открыты только **80** и **443** (их публикует
-  nginx). Порты PostgreSQL/Redis/RabbitMQ/MinIO в проде **не публикуются**
-  вовсе — это заложено в `docker-compose.yml` (host-порты добавляет только
-  dev-оверлей). В фаерволе (ufw/security group облака) откройте 80/443 и 22 (SSH).
+> **Соглашение по командам.** Если ты подключаешься под пользователем `root` —
+> убирай `sudo` из команд (root и так всё может). Под обычным пользователем —
+> оставляй `sudo` как написано. `$` в начале строки в примерах не печатается, это
+> приглашение терминала.
 
 ---
 
-## 1. Клонировать репозиторий
+# Часть I. Подготовка сервера с нуля
+
+## 1. Подключиться к серверу по SSH
+
+SSH — это способ управлять удалённым сервером через терминал. С **своего**
+компьютера (на Windows — PowerShell или Git Bash, на Mac/Linux — терминал) выполни,
+подставив выданные хостингом логин и IP:
 
 ```bash
-cd /opt                       # или любой каталог под сервисы
-git clone git@github.com:dmsk01/show-ring-backend.git showtail
-cd showtail
+ssh root@123.45.67.89
+```
+(`root` — имя пользователя, `123.45.67.89` — IP-адрес сервера).
+
+Что увидишь при первом подключении:
+- Вопрос вида `Are you sure you want to continue connecting (yes/no)?` — это сервер
+  показывает свой «отпечаток». Напечатай `yes` и Enter (только при первом разе).
+- Запрос пароля — введи пароль сервера. **Символы при вводе не отображаются** (даже
+  звёздочки) — это нормально, просто печатай и жми Enter.
+
+Если хостинг дал **SSH-ключ** вместо пароля — подключайся так:
+```bash
+ssh -i путь/к/ключу root@123.45.67.89
 ```
 
-> Если на сервере нет SSH-ключа для GitHub — клонируйте по HTTPS:
-> `git clone https://github.com/dmsk01/show-ring-backend.git showtail`.
+Признак успеха — приглашение сменилось на что-то вроде `root@server:~#`. Теперь все
+команды ниже выполняются **на сервере**, в этой SSH-сессии.
+
+> Не закрывай это окно до конца установки. Если связь оборвётся — просто подключись
+> снова той же командой.
 
 ---
 
-## 2. Создать `.env` и заполнить секреты
+## 2. Обновить систему
 
-В репозитории `.env` **не лежит** (он в `.gitignore`) — его создаём из шаблона:
+Свежесозданный сервер стоит обновить — это подтянет последние версии пакетов и
+заплатки безопасности:
+
+```bash
+sudo apt update          # обновить список доступных пакетов
+sudo apt upgrade -y      # установить обновления (-y = отвечать «да» на вопросы)
+```
+
+Первый раз может занять пару минут. Если в конце попросит перезагрузку
+(`*** System restart required ***`) — выполни `sudo reboot`, подожди минуту и
+подключись по SSH заново (шаг 1).
+
+---
+
+## 3. Установить Git
+
+Git нужен, чтобы скачать («склонировать») код проекта:
+
+```bash
+sudo apt install -y git
+git --version            # проверка: должно вывести версию, напр. "git version 2.43.0"
+```
+
+---
+
+## 4. Установить Docker и Docker Compose
+
+Весь проект работает в Docker-контейнерах, поэтому вручную ставить Python,
+PostgreSQL и т.д. **не нужно** — только Docker. Самый простой способ — официальный
+установочный скрипт:
+
+```bash
+curl -fsSL https://get.docker.com -o get-docker.sh   # скачать скрипт установки
+sudo sh get-docker.sh                                # запустить его
+```
+Идёт 1–3 минуты, ставит и Docker Engine, и плагин `docker compose`.
+
+Дальше — разреши своему пользователю запускать Docker **без `sudo`** (иначе
+придётся писать `sudo` перед каждой docker-командой):
+
+```bash
+sudo usermod -aG docker $USER    # добавить себя в группу docker
+newgrp docker                    # применить в текущей сессии (или выйди/зайди по SSH)
+```
+
+Проверь, что всё работает:
+```bash
+docker --version          # напр. "Docker version 27.x"
+docker compose version    # напр. "Docker Compose version v2.x"  ← с пробелом, это плагин v2
+docker run hello-world    # тестовый контейнер; должен напечатать "Hello from Docker!"
+```
+Если `hello-world` напечатал приветствие — Docker готов.
+
+> Под `root` шаг с `usermod`/`newgrp` можно пропустить — root и так запускает Docker.
+
+---
+
+## 5. Настроить файрвол (ufw)
+
+Файрвол закроет лишние порты и оставит только нужные: SSH (чтобы не потерять доступ),
+HTTP (80) и HTTPS (443).
+
+> ⚠️ **Сначала разреши SSH, потом включай файрвол.** Если включить ufw, не разрешив
+> SSH, ты потеряешь доступ к серверу. Соблюдай порядок команд:
+
+```bash
+sudo ufw allow OpenSSH    # разрешить SSH — ОБЯЗАТЕЛЬНО первым
+sudo ufw allow 80/tcp     # HTTP (через него работает сайт и выпуск TLS-сертификата)
+sudo ufw allow 443/tcp    # HTTPS
+sudo ufw enable           # включить файрвол (спросит подтверждение — напечатай y)
+sudo ufw status           # проверка: увидишь список разрешённых портов
+```
+
+Порты PostgreSQL/Redis/RabbitMQ/MinIO открывать **не нужно** — они доступны только
+внутри Docker-сети, наружу не публикуются.
+
+---
+
+## 6. Настроить доступ к GitHub
+
+Код лежит в двух репозиториях на GitHub. Как их скачать — зависит от того, открытые
+они или закрытые:
+
+- **Если репозитории публичные** — ничего настраивать не надо, клонируй по HTTPS
+  (это сделаем в шаге 7). Переходи к Части II.
+- **Если репозитории приватные** — серверу нужен доступ. Самый простой способ —
+  завести на сервере SSH-ключ и добавить его в GitHub:
+
+```bash
+ssh-keygen -t ed25519 -C "showtail-server"   # три раза Enter (без пароля на ключ)
+cat ~/.ssh/id_ed25519.pub                     # покажет публичный ключ — скопируй ВСЮ строку
+```
+Затем на сайте GitHub: **Settings → SSH and GPG keys → New SSH key**, вставь
+скопированную строку, сохрани. Проверь связь:
+```bash
+ssh -T git@github.com     # при первом разе спросит fingerprint — напечатай yes
+```
+Ответ `Hi <логин>! You've successfully authenticated...` означает, что доступ есть.
+
+---
+
+# Часть II. Развёртывание приложения
+
+## 7. Клонировать репозитории (бэкенд + фронтенд)
+
+Оба репозитория должны лежать **рядом** (в одном родительском каталоге) — так
+бэкенд-стек найдёт исходники фронта для сборки. Кладём в `/opt`:
+
+```bash
+cd /opt
+```
+
+**Если репозитории публичные (HTTPS, проще):**
+```bash
+sudo git clone https://github.com/dmsk01/show-ring-backend.git showtail
+sudo git clone https://github.com/dmsk01/show-ring-frontend.git
+```
+
+**Если приватные (по SSH, требует шаг 6):**
+```bash
+sudo git clone git@github.com:dmsk01/show-ring-backend.git showtail
+sudo git clone git@github.com:dmsk01/show-ring-frontend.git
+```
+
+Чтобы дальше не воевать с правами, сделай каталог своим и зайди в бэкенд:
+```bash
+sudo chown -R $USER:$USER /opt/showtail /opt/show-ring-frontend
+cd /opt/showtail
+```
+
+Должна получиться такая раскладка:
+```
+/opt/
+├── showtail/              ← бэкенд (этот репо), отсюда запускаем все команды
+└── show-ring-frontend/    ← фронт, его соберёт сервис web
+```
+
+> Если назовёшь каталог фронта иначе — поправь путь `build: ../show-ring-frontend`
+> в `docker-compose.prod.yml`.
+
+### Про фронтенд: что нужно и чего НЕ нужно
+
+У фронта **нет отдельной процедуры развёртывания** — он разворачивается как часть
+бэкенд-стека. Достаточно одного действия выше (склонировать рядом):
+
+- ✅ **Клонировать `show-ring-frontend` рядом** — единственный ручной шаг.
+- ✅ **Сборка** — автоматически, частью `docker compose up --build` (сервис `web`).
+- ❌ **Свой `.env` фронту задавать НЕ нужно** — образ собирается с рабочими
+  дефолтами, а `BACKEND_URL` задаётся в `docker-compose.prod.yml`.
+- ❌ **`npm install` / `npm run build` на сервере вручную запускать НЕ нужно** —
+  всё происходит внутри Docker-сборки.
+- ✅ **Маршрутизация** — через nginx: `/` → фронт, `/api/` → бэкенд.
+
+> README фронта в разделе «Деплой» описывает CI-путь через ghcr — здесь мы
+> намеренно собираем локально, ради независимости от внешнего реестра.
+
+---
+
+## 8. Создать `.env` и заполнить секреты
+
+`.env` — файл с паролями и настройками. В репозитории его нет (он секретный),
+создаём из шаблона:
 
 ```bash
 cp .env.prod.example .env
-chmod 600 .env                # секреты не должны читаться кем попало
+chmod 600 .env           # чтобы файл с секретами читал только владелец
 ```
 
-Сгенерируйте значения и впишите их в `.env` (любым редактором, например `nano .env`):
-
+Сгенерируй случайные секреты (выполни команды, скопируй вывод):
 ```bash
-openssl rand -hex 32          # → SECRET_KEY (минимум 32 символа, ОБЯЗАТЕЛЬНО)
-openssl rand -hex 24          # → POSTGRES_PASSWORD
-openssl rand -hex 24          # → RABBITMQ_PASSWORD
-openssl rand -hex 16          # → S3_ACCESS_KEY
-openssl rand -hex 24          # → S3_SECRET_KEY
+openssl rand -hex 32     # → SECRET_KEY
+openssl rand -hex 24     # → POSTGRES_PASSWORD
+openssl rand -hex 24     # → RABBITMQ_PASSWORD
+openssl rand -hex 16     # → S3_ACCESS_KEY
+openssl rand -hex 24     # → S3_SECRET_KEY
 ```
 
-**Обязательно заполнить:**
+Открой файл редактором (`nano` — простой; сохранить `Ctrl+O` Enter, выйти `Ctrl+X`):
+```bash
+nano .env
+```
+и впиши значения:
 
 | Переменная | Чем заполнить |
 |---|---|
-| `SECRET_KEY` | `openssl rand -hex 32`. При `DEBUG=false` приложение **упадёт на старте**, если ключ короче 32 символов или похож на плейсхолдер (валидация в `app/config.py`). |
+| `SECRET_KEY` | вывод `openssl rand -hex 32`. При `DEBUG=false` приложение **не запустится**, если ключ короче 32 символов. |
 | `POSTGRES_PASSWORD` | случайная строка |
 | `RABBITMQ_PASSWORD` | случайная строка |
-| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | случайные строки (доступ к внутреннему MinIO) |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | случайные строки (доступ к внутреннему хранилищу файлов MinIO) |
 | `DEBUG` | `false` (уже стоит в шаблоне — не менять) |
 | `SCHEDULER_ENABLED` | `true` (фоновые задачи: дедлайны выставок и т.п.) |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL` | реквизиты **реального** SMTP (Sendgrid/Mailgun/SES). В проде нет mailpit — без рабочего SMTP не уйдут письма верификации и уведомлений. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL` | данные **реального** почтового сервиса (Sendgrid/Mailgun/SES). Без рабочего SMTP не будут уходить письма верификации. |
 
-`POSTGRES_DB`/`POSTGRES_USER` можно оставить `showtail`. `COOKIE_PATH_PREFIX=/api`
-уже задан — без него браузер не приложит auth-куки к `/api/*` и логин «молча» не
-сработает. Не трогайте его.
+`POSTGRES_DB`/`POSTGRES_USER` оставь `showtail`. `COOKIE_PATH_PREFIX=/api` уже
+задан — не трогай (без него не работает вход).
 
-> **Почему столько переменных прокидывается явно?** `.env` не попадает в образ
-> (он в `.dockerignore`), поэтому всё, что нужно `app.config.Settings`,
-> compose передаёт в контейнеры через `environment:`. Менять переменные → править
-> `.env` и перезапускать сервис.
+> **Зачем секреты прокидываются явно?** `.env` не попадает внутрь Docker-образа,
+> поэтому всё нужное приложению `docker compose` передаёт в контейнеры отдельно.
+> Поменял `.env` → перезапусти сервис, чтобы подхватил.
 
 ---
 
-## 3. Клонировать репозиторий фронтенда рядом
+## 9. Собрать образы и запустить стек
 
-Прод-стек включает сервис `web` (Next.js, отдельный репозиторий
-`show-ring-frontend`). Он собирается **локально** из соседнего каталога —
-в `docker-compose.prod.yml` указано `build: ../show-ring-frontend`. Никакой
-внешний registry не нужен: фронт, как и бэкенд, билдится на сервере.
-
-Поэтому репо фронта должен лежать **рядом** с этим репо (на один уровень выше):
-
-```bash
-cd ..        # подняться из каталога бэкенда (showtail)
-git clone git@github.com:dmsk01/show-ring-frontend.git
-cd showtail  # вернуться в бэкенд
-```
-
-Раскладка на сервере должна получиться такой:
-
-```
-/opt/
-├── showtail/              ← этот репо (бэкенд), отсюда запускаем compose
-└── show-ring-frontend/    ← репо фронта, его собирает сервис web
-```
-
-> Если каталог фронта называется иначе или лежит в другом месте — поправьте путь
-> `build: ../show-ring-frontend` в `docker-compose.prod.yml` под свою раскладку.
-> nginx стартует только когда `web` стал healthy, поэтому без собранного фронта
-> весь стек до конца не поднимется.
-
-### Фронтенд: что нужно и чего НЕ нужно
-
-У фронта **нет отдельной процедуры развёртывания** — в этой схеме он
-разворачивается как часть бэкенд-стека. Достаточно одного действия выше
-(склонировать репо рядом). Конкретно:
-
-- ✅ **Клонировать `show-ring-frontend` рядом** — единственный ручной шаг.
-- ✅ **Сборка** — автоматически, частью `docker compose up --build` (сервис `web`,
-  его `Dockerfile`: Next.js standalone, non-root, порт 8082, healthcheck `/healthz`).
-- ❌ **Свой `.env` фронту задавать НЕ нужно.** Образ собирается с дефолтами
-  `NEXT_PUBLIC_SERVER_URL=/api` (в его `Dockerfile` помечено: секреты на билде не
-  нужны), а `BACKEND_URL=http://api:8000` мы задаём в `web.environment`
-  прод-оверлея — для SSR-запросов изнутри контейнера.
-- ❌ **Отдельно `npm install` / `npm run build` на сервере запускать НЕ нужно** —
-  всё происходит внутри Docker-сборки образа.
-- ✅ **Маршрутизация** — через nginx: `/` → `web`, `/api/` → `api`
-  (`deploy/nginx/conf.d/showtail.conf`).
-
-> **Расхождение с README фронта.** В `show-ring-frontend/README.md` раздел
-> «Деплой» описывает CI-путь (сборка → публикация образа в ghcr → деплой на VPS).
-> Здесь мы намеренно используем **локальную сборку** на сервере вместо ghcr —
-> ради нулевой зависимости от внешнего реестра. Команды из README фронта
-> (`npm run dev` и т.п.) актуальны только для разработки самого фронта.
-
----
-
-## 4. Собрать образы и поднять стек
-
-Бэкенд (api, воркеры, migrate, backup) собирается прямо на сервере флагом
-`--build`. Прод-оверлей применяется **поверх** базового compose:
+Одна команда соберёт бэкенд и фронт и поднимет всё (база, очереди, хранилище,
+api, воркеры, nginx):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
 ```
 
-Что произойдёт автоматически:
-
-1. Соберутся образы бэкенда из `Dockerfile` и фронта из `../show-ring-frontend`
-   (multi-stage, первый билд — несколько минут; фронт ставит npm-зависимости).
-2. Поднимутся PostgreSQL, RabbitMQ, Redis, MinIO (порты наружу не публикуются).
-3. Одноразовый `minio-init` создаст bucket для файлов.
-4. Одноразовый `migrate` накатит миграции (`alembic upgrade head`) **до** старта api.
-5. Стартуют `api` (несколько uvicorn-воркеров), `worker`, `worker-files`, `web`, `nginx`.
-
-> **Email-воркеры** (`worker-events`, `worker-email`, `worker-outbox`) сидят под
-> профилем `events` и по умолчанию **не стартуют**. Без `worker-outbox`
-> транзакционный outbox не доставляет письма — события копятся в БД. Чтобы
-> поднять весь email-пайплайн, добавьте профиль:
-> ```bash
-> docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env --profile events up -d
-> ```
-
-Проверьте, что всё живо:
-
+Команда длинная (два `-f` файла), поэтому заведи удобный псевдоним — дальше можно
+писать просто `dc`:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+echo "alias dc='docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env'" >> ~/.bashrc
+source ~/.bashrc
+# теперь та же команда короче:
+dc up -d --build
 ```
 
-Все сервисы должны быть `running`/`healthy`; `migrate` и `minio-init` —
-`exited (0)` (это одноразовые контейнеры, так и должно быть).
+Что произойдёт автоматически:
+1. Соберутся образы бэкенда (`Dockerfile`) и фронта (`../show-ring-frontend`).
+   **Первый раз — несколько минут** (ставятся зависимости, собирается Next.js).
+2. Поднимутся PostgreSQL, RabbitMQ, Redis, MinIO (наружу не публикуются).
+3. Одноразовый контейнер создаст хранилище файлов и накатит миграции БД.
+4. Стартуют `api`, воркеры, `web` (фронт) и `nginx`.
 
-На этом этапе API уже отвечает **внутри сети**. Снаружи он доступен через nginx
-на `http://<IP-сервера>/` (фронт) и `http://<IP-сервера>/api/` (API). Health:
-
+Проверь статусы:
+```bash
+dc ps
+```
+Все сервисы должны быть `running`/`healthy`; `migrate` и `minio-init` — `exited (0)`
+(это одноразовые контейнеры, так и должно быть). Проверь, что приложение отвечает:
 ```bash
 curl -fsS http://localhost/api/health
 ```
+Ожидаемый ответ — JSON `{"status":"ok", ...}` со всеми компонентами `ok`.
+
+Снаружи приложение уже доступно по `http://<IP-сервера>/` (пока по HTTP, без домена).
+
+> **Email-воркеры** (`worker-events`, `worker-email`, `worker-outbox`) по умолчанию
+> не стартуют. Без них письма (верификация, уведомления) копятся в базе и не
+> отправляются. Чтобы поднять весь почтовый конвейер, добавь профиль `events`:
+> ```bash
+> dc --profile events up -d
+> ```
 
 ---
 
-## 5. Подключить домен и TLS (HTTPS)
+## 10. Подключить домен и TLS (HTTPS) — опционально
 
-Пока домена нет, стек работает по HTTP на `:80`. Для боевого режима нужен домен и
-сертификат Let's Encrypt (порядок продублирован в
-`deploy/nginx/conf.d/showtail.conf`, низ файла):
+Пока домена нет, всё работает по HTTP. Для боевого режима нужен домен и бесплатный
+сертификат Let's Encrypt:
 
-1. **DNS:** заведите A-запись домена → IP сервера. Дождитесь, пока резолвится:
-   `dig +short showtail.example`.
-2. В `.env` задайте `DOMAIN=showtail.example`.
-3. В `deploy/nginx/conf.d/showtail.conf` замените `showtail.example` на ваш домен
-   (3 места в закомментированном 443-блоке).
-4. Однократно выпустите сертификат (webroot-челлендж ходит через уже работающий
-   nginx на :80):
+1. **DNS:** в панели регистратора домена заведи A-запись: домен → IP сервера.
+   Проверь, что резолвится: `dig +short showtail.example`.
+2. В `.env` задай `DOMAIN=showtail.example`.
+3. В `deploy/nginx/conf.d/showtail.conf` замени `showtail.example` на свой домен
+   (3 места в закомментированном блоке 443 внизу файла).
+4. Однократно выпусти сертификат:
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm certbot \
-     certonly --webroot -w /var/www/certbot \
+   dc run --rm certbot certonly --webroot -w /var/www/certbot \
      -d showtail.example --email admin@showtail.example --agree-tos
    ```
-5. Раскомментируйте `server { listen 443 ssl; ... }` в `showtail.conf`, а в
-   `:80`-блоке замените `location /` на редирект:
-   `return 301 https://$host$request_uri;`.
-6. Перезапустите с включённым авто-продлением сертификата:
+5. Раскомментируй блок `server { listen 443 ssl; ... }` в `showtail.conf`, а в
+   блоке `:80` замени `location /` на редирект `return 301 https://$host$request_uri;`.
+6. Перезапусти с авто-продлением сертификата:
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env --profile tls up -d
+   dc --profile tls up -d
    ```
-   nginx сам перечитывает сертификаты (reload-цикл каждые 6 часов заложен в его
-   команде), а сервис `certbot` продлевает их каждые 12 часов.
 
 ---
 
-## 6. Создать первого администратора
+## 11. Создать первого администратора
 
-После миграций в БД нет ни одного admin'а (регистрация через `/auth/register`
-создаёт обычного пользователя). Создаём админа идемпотентным скриптом внутри
-контейнера `api`:
+После запуска в базе нет администратора (обычная регистрация создаёт рядового
+пользователя). Создаём админа командой внутри контейнера `api`:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api \
-  python -m scripts.bootstrap_admin --email admin@showtail.example --password 'СильныйПароль123!'
+dc exec api python -m scripts.bootstrap_admin \
+  --email admin@showtail.example --password 'СильныйПароль123!'
 ```
-
-Скрипт идемпотентный — повторный запуск безопасен.
+Команду можно повторять безопасно — дубликат не создаст.
 
 ---
 
-## 7. Засеять базу
+## 12. Засеять базу
 
-Скрипты запускаются внутри контейнера `api` — у него уже есть все нужные
-переменные окружения (`DATABASE_URL`, доступ к MinIO). Дальше — `docker compose
-… exec api …`; команды ниже укорочены до `exec api` (полный префикс с `-f` файлами
-тот же, что выше).
+Скрипты запускаются внутри контейнера `api` (у него есть доступ к базе).
 
-### 7.1. Справочники — ОБЯЗАТЕЛЬНО
-
-Без справочников (виды животных, FCI-группы, породы, выставочные классы, титулы,
-оценки) приложение нефункционально — на них завязаны регистрации и результаты.
-Скрипт идемпотентный:
-
+### 12.1. Справочники — ОБЯЗАТЕЛЬНО
+Без них (виды животных, породы, выставочные классы, титулы, оценки) приложение
+неработоспособно — на них завязаны регистрации и результаты:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api \
-  python -m scripts.seed_references
+dc exec api python -m scripts.seed_references
 ```
 
-### 7.2. Демо-данные — ОПЦИОНАЛЬНО (только для тестового/демо-стенда)
-
-Наполняет БД разнообразными данными по всем разделам (питомники, собаки,
-помёты, выставки, объявления, блог, тикеты и т.д.) — удобно «пощупать» UI.
-**На боевом стенде с реальными пользователями обычно НЕ запускают** — это
-синтетика. Идемпотентный, использует отдельные namespace'ы (`*-demo@dogshow.ru`),
-чтобы не конфликтовать с реальными данными:
-
+### 12.2. Демо-данные — ОПЦИОНАЛЬНО (тестовый/демо-стенд)
+Наполняет базу примерами по всем разделам — удобно «пощупать» интерфейс. **На
+боевом стенде с реальными пользователями обычно НЕ запускают**:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api \
-  python -m scripts.seed_demo
+dc exec api python -m scripts.seed_demo
 ```
 
-### 7.3. E2E-пользователи — ОПЦИОНАЛЬНО (под Playwright-тесты фронта)
-
-Только если на этом стенде гоняются e2e-тесты фронтенда. Пароль у всех —
-`Password123!`, аккаунты сразу активны:
-
+### 12.3. E2E-пользователи — ОПЦИОНАЛЬНО (для тестов фронта)
+Пароль у всех — `Password123!`, аккаунты сразу активны:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api \
-  python -m scripts.seed_e2e_users --force
+dc exec api python -m scripts.seed_e2e_users --force
 ```
 
 ---
 
-## 8. Бэкапы
+## 13. Бэкапы
 
-Сервис `backup` (crond) уже включён прод-оверлеем: ежедневно делает `pg_dump` +
-зеркалит файлы из MinIO и ротирует старые копии. Бэкапы видны на хосте в
-`./backups` (bind-mount, без docker-команд). Параметры — в `.env`:
-
+Сервис `backup` уже включён: ежедневно делает дамп базы, зеркалит файлы и ротирует
+старые копии. Они видны на сервере в каталоге `./backups`. Параметры — в `.env`:
 ```ini
 BACKUP_CRON=30 3 * * *        # когда (по умолчанию 03:30)
 BACKUP_KEEP_DAILY=7           # сколько дневных копий хранить
 BACKUP_KEEP_WEEKLY=4          # сколько недельных
 ```
-
-Для **offsite-копий** во внешний S3 задайте все четыре переменные
-`BACKUP_S3_*` (endpoint/ключи/bucket) — иначе бэкапы только локальные.
-
-Разовый бэкап вручную:
+Для копий во внешнее облако задай все четыре `BACKUP_S3_*`. Разовый бэкап вручную:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup /backup.sh
+dc exec backup /backup.sh
 ```
 
 ---
 
-## 9. Обновление кода
+## 14. Обновление кода
 
-После `git pull` нового кода бэкенда — **обязательно** пересобирайте образы,
-иначе Docker оставит старые слои (частая причина рассинхрона кода и миграций,
-`alembic … Can't locate revision …`):
-
+После выхода нового кода:
 ```bash
 git pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
+dc up -d --build      # --build ОБЯЗАТЕЛЬНО, иначе останется старый образ
 ```
-
-Миграции накатятся автоматически контейнером `migrate` при каждом `up`.
+Миграции базы накатятся автоматически при запуске.
 
 ---
 
-## 10. Эксплуатация и неполадки
+## 15. Эксплуатация и неполадки
 
 ```bash
-# короткий алиас, чтобы не повторять -f каждый раз (добавьте в ~/.bashrc):
-alias dc='docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env'
-
 dc ps                          # статусы всех сервисов
-dc logs -f api                 # логи API в реальном времени
+dc logs -f api                 # логи API в реальном времени (выход — Ctrl+C)
 dc logs --tail=50 migrate      # почему упала миграция
-dc restart worker worker-files # перезапустить воркеры после правок их кода
-dc down                        # остановить всё (данные в volume сохраняются)
-dc down -v                     # ОСТАНОВИТЬ и СТЕРЕТЬ ВСЕ ДАННЫЕ (чистый старт)
+dc restart worker worker-files # перезапустить воркеры
+dc down                        # остановить всё (данные сохраняются)
+dc down -v                     # остановить и СТЕРЕТЬ ВСЕ ДАННЫЕ (чистый старт)
 ```
 
-- **Стек сам поднимается после ребута сервера** — у сервисов `restart:
-  unless-stopped`.
-- **`/api/health` отдаёт 503 или таймаут** — обычно отвалилась зависимость.
-  Смотрите `dc ps`: если сервис в `Exited` — `dc up -d`, затем `dc logs <сервис>`.
-- **api/migrate падает с ошибкой про SECRET_KEY** — ключ короче 32 символов или
-  выглядит как плейсхолдер при `DEBUG=false`. Сгенерируйте `openssl rand -hex 32`.
-- **nginx не стартует, ждёт `web`** — фронт не собрался или unhealthy. Проверьте,
-  что репо `show-ring-frontend` лежит рядом (шаг 3) и путь `build:` в
-  `docker-compose.prod.yml` верный; смотрите `dc logs web`.
-- **Логин не логинит, кук нет** — проверьте `COOKIE_PATH_PREFIX=/api` в `.env`.
+- **Стек сам поднимается после перезагрузки сервера** — у сервисов задан автозапуск.
+- **`/api/health` отдаёт 503 или таймаут** — отвалилась зависимость. Смотри `dc ps`:
+  если сервис в `Exited` — `dc up -d`, затем `dc logs <сервис>`.
+- **api/migrate падает с ошибкой про SECRET_KEY** — ключ короче 32 символов.
+  Сгенерируй заново: `openssl rand -hex 32`.
+- **nginx не стартует, ждёт `web`** — фронт не собрался. Проверь, что репо
+  `show-ring-frontend` лежит рядом (шаг 7), смотри `dc logs web`.
+- **Вход не работает, куки не ставятся** — проверь `COOKIE_PATH_PREFIX=/api` в `.env`.
+  По «голому» HTTP (без домена/TLS) вход не работает специально — см. приложение ниже.
 
 ---
 
 ## Краткая шпаргалка (TL;DR)
 
+Для тех, кто уже всё это делал и хочет просто команды:
 ```bash
-# 1. клон бэкенда + фронта рядом
-git clone git@github.com:dmsk01/show-ring-backend.git showtail
-git clone git@github.com:dmsk01/show-ring-frontend.git
-cd showtail
+# Подготовка сервера
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER && newgrp docker
+sudo ufw allow OpenSSH && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp && sudo ufw enable
 
-# 2. секреты
+# Код (HTTPS-вариант для публичных репозиториев)
+cd /opt
+sudo git clone https://github.com/dmsk01/show-ring-backend.git showtail
+sudo git clone https://github.com/dmsk01/show-ring-frontend.git
+sudo chown -R $USER:$USER /opt/showtail /opt/show-ring-frontend
+cd /opt/showtail
+
+# Секреты
 cp .env.prod.example .env && chmod 600 .env
-# заполнить SECRET_KEY (openssl rand -hex 32), пароли PG/Rabbit/MinIO, SMTP
+# nano .env → вписать SECRET_KEY (openssl rand -hex 32), пароли, SMTP
 
-# 3. сборка и старт (бэк и фронт собираются локально, registry не нужен)
+# Запуск
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
 
-# 4. админ + справочники (обязательно)
+# Админ + справочники + проверка
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m scripts.bootstrap_admin --email admin@showtail.example --password '...'
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m scripts.seed_references
-
-# 5. проверка
 curl -fsS http://localhost/api/health
 ```
 
@@ -375,64 +455,40 @@ curl -fsS http://localhost/api/health
 
 ## Приложение: локальное развёртывание на этой же машине
 
-Запуск всего прод-стека прямо на твоём ноутбуке с Ubuntu 24 (например, чтобы
-прогнать связку web + nginx + бэкенд целиком перед выкаткой на боевой сервер).
-Это **тот же стек**, что и выше, с тремя поправками: без домена/TLS, доступ по
-`http://localhost`, и `DEBUG=true`, чтобы работал логин по HTTP (см. ниже).
+Запуск всего стека прямо на своём ноутбуке/ПК с Ubuntu (например, прогнать всё
+целиком перед выкаткой на боевой сервер). Это **тот же стек**, с тремя поправками:
+без домена/TLS, доступ по `http://localhost`, и `DEBUG=true` (чтобы работал вход по
+HTTP — см. ниже).
 
-Выполняй разделы **1–4** и **6–7** как для сервера, учитывая отличия:
+Делай те же шаги, но с отличиями:
 
-### Docker на свежей Ubuntu 24 (раздел 0)
-```bash
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-```
-Ты сейчас в открытой SSH-сессии — членство в группе `docker` в ней ещё не
-подхватилось. Применить без переподключения:
-```bash
-newgrp docker          # или переоткрой SSH-сессию
-docker compose version # проверка, что работает без sudo
-```
+- **Подготовка (Часть I):** SSH-подключение (шаг 1) не нужно — ты уже за машиной.
+  Docker ставится так же (шаг 4). Файрвол (шаг 5) для локального запуска не
+  обязателен.
+- **`.env` (шаг 8) — главное отличие:**
 
-### `.env` (раздел 2) — главное отличие
-```bash
-cp .env.prod.example .env && chmod 600 .env
-```
-Поправь в `.env`:
+  | Переменная | Локально | Почему |
+  |---|---|---|
+  | `DEBUG` | **`true`** | При `DEBUG=false` куки входа ставятся с флагом `Secure` (`app/routers/auth.py`) — браузер шлёт их только по HTTPS. По `http://localhost` вход молча не сработает. `DEBUG=true` снимает `Secure`. |
+  | `SECRET_KEY` | любой ≥32 символов | При `DEBUG=true` строгая проверка ключа выключена, но привычку не теряем: `openssl rand -hex 32`. |
+  | `SMTP_*` | можно заглушки | Письма локально не уйдут. Не страшно: админ и сид-юзеры создаются с уже подтверждённым email — вход под ними работает сразу. |
 
-| Переменная | Локально | Почему |
-|---|---|---|
-| `DEBUG` | **`true`** | При `DEBUG=false` auth-куки ставятся с флагом `Secure` (`app/routers/auth.py`) — браузер шлёт их только по HTTPS. По `http://localhost` логин бы молча не работал. `DEBUG=true` снимает `Secure` → логин по HTTP работает. |
-| `SECRET_KEY` | любой ≥32 символов | При `DEBUG=true` строгая валидация ключа отключается, но привычку не теряем: `openssl rand -hex 32`. |
-| `SMTP_*` | можно оставить заглушки | Письма локально никуда не уйдут. Не страшно: админ (`bootstrap_admin`) и сид-юзеры создаются с уже подтверждённым email — `/auth/login` под ними работает сразу. Самостоятельная регистрация через `/auth/register` потребует письма — его не будет. |
-
-Пароли PG/Rabbit/MinIO — любые. `DOMAIN` не задавай.
-
-### Фронт (раздел 3)
-Так же клонируй `show-ring-frontend` рядом — он собирается локально.
-
-### Запуск (раздел 4)
-Та же команда. nginx займёт порт **80** на машине:
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
-```
-Если 80-й порт занят (другой веб-сервер) — освободи его или временно поменяй
-маппинг nginx в `docker-compose.prod.yml` на `"8080:80"`.
-
-### Раздел 5 (домен и TLS) — ПРОПУСТИТЬ
-Локально HTTPS не нужен, остаёмся на `:80`.
+  Пароли PG/Rabbit/MinIO — любые. `DOMAIN` не задавай.
+- **Фронт (шаг 7):** так же клонируй `show-ring-frontend` рядом.
+- **Запуск (шаг 9):** та же команда. nginx займёт порт **80** на машине. Если он
+  занят — поменяй маппинг nginx в `docker-compose.prod.yml` на `"8080:80"`.
+- **Домен и TLS (шаг 10): ПРОПУСТИТЬ.**
 
 ### Доступ к приложению
 - **С самого ноутбука:** UI — http://localhost/ , API — http://localhost/api/health
-- **С другого компьютера через ту же SSH-сессию** (порт наружу открывать не надо
-  — пробрось туннелем со своей машины):
+- **С другого компьютера через SSH** (порт наружу открывать не надо — пробрось
+  туннелем со своей машины):
   ```bash
   ssh -L 8080:localhost:80 <user>@<ip-ноутбука>
   ```
-  затем открой `http://localhost:8080/` в своём браузере — трафик уйдёт в nginx
-  на ноутбуке. `DEBUG=true` обязателен и для этого пути (туннель — тоже HTTP).
-- **По локальной сети:** nginx слушает `0.0.0.0:80`, поэтому с другого устройства
-  в той же сети — `http://<ip-ноутбука>/` (если включён `ufw`: `sudo ufw allow 80`).
+  затем открой `http://localhost:8080/` в своём браузере. `DEBUG=true` нужен и здесь.
+- **По локальной сети:** nginx слушает `0.0.0.0:80` → с другого устройства в той же
+  сети `http://<ip-ноутбука>/` (если включён ufw: `sudo ufw allow 80`).
 
 ### Остановка
 ```bash
@@ -444,114 +500,83 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml down -v   # ст
 
 ## Публичный доступ через туннель (Cloudflare / ngrok)
 
-Альтернатива SSH-туннелю и пробросу портов: дать локальному стеку **постоянный
-публичный HTTPS-адрес**, не открывая ни одного входящего порта. На машине
-запускается демон туннеля, он держит **исходящее** соединение к облаку и
-форвардит трафик на локальный nginx (`http://localhost:80`). NAT и файрвол при
-этом не мешают — наружу ничего слушать не надо.
+Альтернатива пробросу портов: дать локальному стеку **постоянный публичный
+HTTPS-адрес**, не открывая входящих портов. На машине запускается демон туннеля, он
+держит **исходящее** соединение к облаку и форвардит трафик на локальный nginx
+(`http://localhost:80`). NAT и файрвол не мешают.
 
 ### Важно: с туннелем оставляем `DEBUG=false`
 
-Это отличие от прямого локального доступа (localhost / LAN / SSH-туннель), где
-нужен `DEBUG=true`. Cloudflare и ngrok **терминируют TLS на своём edge** —
-браузер общается по **HTTPS**. Флаг `Secure` на auth-куках зависит от `DEBUG`
-(`secure=not settings.debug`, `app/routers/auth.py`), и раз браузер на HTTPS —
-Secure-куки принимаются и отправляются нормально.
+Это отличие от прямого локального доступа (где нужен `DEBUG=true`). Cloudflare и
+ngrok **терминируют TLS на своём edge** — браузер общается по **HTTPS**. Флаг
+`Secure` на куках зависит от `DEBUG` (`secure=not settings.debug`,
+`app/routers/auth.py`), и раз браузер на HTTPS — Secure-куки работают.
 
-➡️ Для туннеля в `.env` ставь **`DEBUG=false`** (как в боевом разделе 2), а не
-`true`. Хак `DEBUG=true` нужен только для голого HTTP.
+➡️ Для туннеля ставь **`DEBUG=false`** (как на боевом сервере). Хак `DEBUG=true`
+нужен только для голого HTTP.
 
 ### Поправки в `.env` под публичный хост
 
 | Переменная | Значение | Зачем |
 |---|---|---|
 | `DEBUG` | `false` | Secure-куки по HTTPS-туннелю работают (см. выше). |
-| `SECRET_KEY` | реальный, `openssl rand -hex 32` | `DEBUG=false` включает строгую валидацию ключа. |
-| `ALLOWED_HOSTS` | `["showtail.example.com"]` | Хостнейм туннеля. `TrustedHostMiddleware` (`app/main.py`) отбивает Host-инъекции, когда список задан; пустой = пускает любой Host. |
-| `FRONTEND_BASE_URL` | `https://showtail.example.com` | На него строятся ссылки в письмах верификации (`app/services/auth.py`). Важно, только если шлёшь письма (нужен рабочий SMTP). |
+| `SECRET_KEY` | реальный, `openssl rand -hex 32` | `DEBUG=false` включает строгую проверку. |
+| `ALLOWED_HOSTS` | `["showtail.example.com"]` | Хостнейм туннеля. `TrustedHostMiddleware` (`app/main.py`) отбивает Host-инъекции; пустой = пускает любой Host. |
+| `FRONTEND_BASE_URL` | `https://showtail.example.com` | На него строятся ссылки в письмах (`app/services/auth.py`). Важно, если шлёшь письма. |
 
-`X-Forwarded-Proto` для самого логина трогать не нужно — флаг куки берётся из
-`DEBUG`, а не из схемы запроса. nginx-конфиг править не требуется.
+После правок `.env` перезапусти api: `dc up -d api`.
 
-После правок `.env` — перезапусти api: `docker compose -f docker-compose.yml -f
-docker-compose.prod.yml --env-file .env up -d api`.
+### Вариант A — Cloudflare Tunnel (стабильный адрес, бесплатно при своём домене)
 
----
-
-### Вариант A — Cloudflare Tunnel (рекомендую для постоянного адреса)
-
-Бесплатно даёт **стабильный** поддомен на твоём домене, заведённом в Cloudflare
-(free-план подходит). Демон — `cloudflared`.
-
-**1. Установка на Ubuntu 24:**
+**1. Установка на Ubuntu:**
 ```bash
 curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
 echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
 sudo apt-get update && sudo apt-get install -y cloudflared
 ```
-
-**2. Логин и создание именованного туннеля** (один раз):
+**2. Логин и создание туннеля (один раз):**
 ```bash
 cloudflared tunnel login                 # откроет браузер, выбери свой домен
-cloudflared tunnel create showtail       # создаст туннель + creds-файл в ~/.cloudflared/
+cloudflared tunnel create showtail
 ```
-
 **3. Конфиг `~/.cloudflared/config.yml`:**
 ```yaml
 tunnel: showtail
 credentials-file: /home/<user>/.cloudflared/<TUNNEL-UUID>.json
 ingress:
   - hostname: showtail.example.com
-    service: http://localhost:80     # сюда смотрит локальный nginx
-  - service: http_status:404         # обязательное правило-замыкатель
+    service: http://localhost:80
+  - service: http_status:404
 ```
-
 **4. Привязать DNS и запустить:**
 ```bash
 cloudflared tunnel route dns showtail showtail.example.com
 cloudflared tunnel run showtail
 ```
-Готово — приложение доступно на `https://showtail.example.com` (сертификат
-выдаёт Cloudflare автоматически).
-
-**5. Автозапуск как systemd-сервис** (чтобы туннель жил после закрытия SSH):
+**5. Автозапуск как сервис (чтобы жил после закрытия SSH):**
 ```bash
 sudo cloudflared service install
 sudo systemctl enable --now cloudflared
 ```
-
 > **Разовый показ без своего домена:** `cloudflared tunnel --url http://localhost:80`
-> — поднимет туннель на случайном `*.trycloudflare.com` без логина и DNS. URL
-> эфемерный (меняется при каждом запуске), `ALLOWED_HOSTS` тогда оставь пустым.
-
----
+> — случайный `*.trycloudflare.com`, эфемерный. `ALLOWED_HOSTS` тогда оставь пустым.
 
 ### Вариант B — ngrok (быстрее, статический адрес ограничен)
-
-**1. Установка и токен:**
 ```bash
 curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
 echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
 sudo apt-get update && sudo apt-get install -y ngrok
 ngrok config add-authtoken <ТВОЙ_ТОКЕН>   # из dashboard.ngrok.com
-```
 
-**2. Запуск:**
-```bash
-ngrok http 80                                          # случайный *.ngrok-free.app
-ngrok http --domain=твой-статик.ngrok-free.app 80      # статический (1 домен на free-аккаунт)
+ngrok http 80                                     # случайный *.ngrok-free.app
+ngrok http --domain=твой-статик.ngrok-free.app 80 # статический (1 домен на free-аккаунт)
 ```
-ngrok выдаёт публичный `https://...`-адрес и терминирует TLS — `DEBUG=false`
-так же корректно работает. В `ALLOWED_HOSTS` впиши выданный хостнейм.
-
----
+ngrok выдаёт публичный `https://...` и терминирует TLS — `DEBUG=false` работает.
+В `ALLOWED_HOSTS` впиши выданный хостнейм.
 
 ### Безопасность: ты в публичном интернете
-
-- **Реальные секреты** в `.env` — стек теперь доступен всем. Никаких дефолтных паролей.
-- **Rate-limit nginx** включён по умолчанию (зоны `auth`/`general`).
-- **Приватный показ:** поверх Cloudflare Tunnel можно включить **Cloudflare
-  Access** (Zero Trust) — доступ только по списку email/Google-аккаунтов, без
-  правок в приложении. У ngrok аналог — `--basic-auth 'user:pass'` на запуске.
-- Закрыл показ — **останови демон** (`Ctrl+C` или `systemctl stop cloudflared`):
-  пока он не запущен, снаружи ничего не висит.
+- **Реальные секреты** в `.env`, никаких дефолтных паролей.
+- **Rate-limit nginx** включён по умолчанию.
+- **Приватный показ:** поверх Cloudflare Tunnel — **Cloudflare Access** (доступ по
+  списку email). У ngrok аналог — `--basic-auth 'user:pass'`.
+- Закрыл показ — **останови демон** (`Ctrl+C` или `systemctl stop cloudflared`).
