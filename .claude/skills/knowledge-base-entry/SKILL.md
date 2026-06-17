@@ -1,6 +1,6 @@
 ---
 name: knowledge-base-entry
-description: Use when explaining a reusable backend concept to the ShowTail user — saves the explanation to docs/knowledge/ as a living reference (one topic per file, Markdown, Russian)
+description: Use when explaining a reusable backend concept to the Show Ring user — saves the explanation to docs/knowledge/ as a living reference (one topic per file, Markdown, Russian)
 ---
 
 # Ведение `docs/knowledge/`

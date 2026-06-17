@@ -5,7 +5,7 @@ bug_239 audit 2026-05-28: раньше nack(requeue=False) (или TTL/length-
 limit) тихо удалял сообщения — они не попадали ни в одну очередь, и
 видимости в malformed payload'ы / истёкшие сообщения у оператора не
 было. Сейчас все durable workflow-очереди (document_task, email_tasks,
-ad_events, tasks, showtail.events.dispatcher и т.п.) объявляются с
+ad_events, tasks, show-ring.events.dispatcher и т.п.) объявляются с
 аргументами `x-dead-letter-exchange` + `x-dead-letter-routing-key` —
 RabbitMQ автоматически переотправляет "мёртвые" сообщения в общий
 DLX, откуда они оседают в DLQ.

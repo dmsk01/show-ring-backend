@@ -1,4 +1,4 @@
-# Dev-override для ShowTail (этап 15).
+# Dev-override для Show Ring (этап 15).
 #
 # Подключается поверх базового docker-compose.yml:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up

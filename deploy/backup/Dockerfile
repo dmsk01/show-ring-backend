@@ -1,4 +1,4 @@
-# Backup-контейнер ShowTail: pg_dump + mc (MinIO client) + busybox crond.
+# Backup-контейнер Show Ring: pg_dump + mc (MinIO client) + busybox crond.
 #
 # База — postgres:17-alpine: pg_dump ТОЙ ЖЕ мажорной версии, что сервер.
 # Несовпадение версий клиента/сервера — классическая причина дампов,

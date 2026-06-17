@@ -1,11 +1,11 @@
 ---
 name: stage-verification
-description: Use when the user asks whether a stage of the 15-stage ShowTail plan is ready, or when closing a stage — verifies each criterion from docs/plans/stages/stage-XX-*.md against actual repo/DB state
+description: Use when the user asks whether a stage of the 15-stage Show Ring plan is ready, or when closing a stage — verifies each criterion from docs/plans/stages/stage-XX-*.md against actual repo/DB state
 ---
 
 # Проверка готовности этапа
 
-ShowTail разбит на 15 этапов (см. `docs/plans/README.md`). Каждый файл `docs/plans/stages/stage-XX-<name>.md` заканчивается разделом **"Как проверить"** — это критерии готовности этапа. Skill проверяет каждый критерий против реального состояния репозитория и БД, а не по memory / CLAUDE.md.
+Show Ring разбит на 15 этапов (см. `docs/plans/README.md`). Каждый файл `docs/plans/stages/stage-XX-<name>.md` заканчивается разделом **"Как проверить"** — это критерии готовности этапа. Skill проверяет каждый критерий против реального состояния репозитория и БД, а не по memory / CLAUDE.md.
 
 ## Когда вызывать
 
@@ -21,7 +21,7 @@ ShowTail разбит на 15 этапов (см. `docs/plans/README.md`). Ка�
    - Файл должен существовать → Glob / Read
    - Команда должна отработать (`alembic upgrade head`, `uvicorn app.main:app --reload`) → Bash, **только с разрешения пользователя**
    - Endpoint должен возвращать конкретный JSON → curl / HTTP-запрос, с разрешения
-   - Таблица в БД → `docker exec postgres psql -U showtail -d showtail -c "\d <table>"`
+   - Таблица в БД → `docker exec postgres psql -U show_ring -d show_ring -c "\d <table>"`
 4. **НЕ доверяй**:
    - "Текущий статус" в CLAUDE.md — это снимок на момент записи
    - `memory/project_state.md` — персональный снимок, может устареть

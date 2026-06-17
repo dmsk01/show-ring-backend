@@ -1,4 +1,4 @@
-# CI/CD pipeline для ShowTail (GitLab CI).
+# CI/CD pipeline для Show Ring (GitLab CI).
 #
 # Эквивалент .github/workflows/ci.yml — на случай переезда/зеркала на GitLab.
 # Стадии: lint → test → build → deploy.
@@ -38,11 +38,11 @@ test:
     - name: redis:8-alpine
       alias: redis
   variables:
-    POSTGRES_DB: showtail_test
-    POSTGRES_USER: showtail
-    POSTGRES_PASSWORD: showtail
+    POSTGRES_DB: show_ring_test
+    POSTGRES_USER: show_ring
+    POSTGRES_PASSWORD: show_ring
     # В GitLab services резолвятся по alias-имени (postgres/redis), не localhost.
-    DATABASE_URL: "postgresql+asyncpg://showtail:showtail@postgres:5432/showtail_test"
+    DATABASE_URL: "postgresql+asyncpg://show_ring:show_ring@postgres:5432/show_ring_test"
     REDIS_URL: "redis://redis:6379/0"
     # ≥32 символов и не плейсхолдер (app/config.py). CI-значение, не для прода.
     SECRET_KEY: "ci-secret-key-not-for-production-0123456789abcdef"
@@ -81,11 +81,11 @@ deploy:
     # Деплой через прод-связку compose: docker-compose.prod.yml даёт
     # api/worker'ам образ из registry, nginx и backup. Compose-файлы
     # приезжают на сервер git pull'ом (репозиторий клонирован в
-    # /opt/showtail). ВНИМАНИЕ: образ в docker-compose.prod.yml захардкожен
+    # /opt/show-ring-backend). ВНИМАНИЕ: образ в docker-compose.prod.yml захардкожен
     # на ghcr.io — при переезде на GitLab Container Registry заменить
     # на $CI_REGISTRY_IMAGE.
     # Нужные CI/CD variables (protected): DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY.
-    - ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd /opt/showtail
+    - ssh "$DEPLOY_USER@$DEPLOY_HOST" "cd /opt/show-ring-backend
         && git pull --ff-only
         && docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
         && docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm migrate

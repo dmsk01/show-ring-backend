@@ -29,7 +29,7 @@ app = FastAPI(lifespan=lifespan)
 
 Вызывается **периодически во время работы** — Docker `HEALTHCHECK`, Kubernetes liveness/readiness probes, внешний мониторинг (UptimeRobot, Grafana и т.д.).
 
-В ShowTail health разведён на **два эндпоинта** с разными статус-кодами (`app/routers/health.py`), потому что у «жив ли я» и «можно ли слать трафик» разные потребители:
+В Show Ring health разведён на **два эндпоинта** с разными статус-кодами (`app/routers/health.py`), потому что у «жив ли я» и «можно ли слать трафик» разные потребители:
 
 ```python
 @router.get("/")          # GET /health/ — детальный, ВСЕГДА 200

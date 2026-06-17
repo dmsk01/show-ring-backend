@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 #
-# Multi-stage build для ShowTail backend (этап 15).
+# Multi-stage build для Show Ring backend (этап 15).
 #
 # Почему multi-stage:
 # - Builder ставит зависимости с компиляцией (gcc/wheel-build);

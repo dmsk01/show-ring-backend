@@ -1,7 +1,7 @@
 """
 Воркер событий (этап 9).
 
-Подписан на Topic Exchange showtail.events с паттерном "#" (все
+Подписан на Topic Exchange show-ring.events с паттерном "#" (все
 события). Для каждого события:
 1. Парсим payload → EventMessage.
 2. Извлекаем breed_id / region (если есть в payload).
@@ -314,6 +314,6 @@ async def bind_topic_queue(
     # bug_239 audit 2026-05-28: workflow-очередь с DLX. Имя зашиваем,
     # чтобы очередь была одна на всех воркеров (work queue semantics:
     # каждое сообщение получает ровно один из них).
-    queue = await declare_workflow_queue(channel, "showtail.events.dispatcher")
+    queue = await declare_workflow_queue(channel, "show-ring.events.dispatcher")
     await queue.bind(exchange, routing_key=pattern)
     return queue

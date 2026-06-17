@@ -42,9 +42,9 @@ class Settings(BaseSettings):
     # endpoint без https — в проде поменяется на реальный домен с TLS.
     # bucket пер-сервис: разные сервисы платформы не пересекаются по namespace.
     s3_endpoint: str = "http://127.0.0.1:9000"
-    s3_access_key: str = "showtail"
-    s3_secret_key: str = "showtailminio"
-    s3_bucket: str = "showtail-files"
+    s3_access_key: str = "show_ring"
+    s3_secret_key: str = "show_ring_minio"
+    s3_bucket: str = "show-ring-files"
     s3_region: str = "us-east-1"
     # Максимальный размер загружаемого файла. Лимит чтобы не словить
     # OOM/диск-флуд: на CI/проде обычно ставится на reverse-proxy, но
@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     # STARTTLS актуален для prod-SMTP. MailPit его не поддерживает —
     # оставляем False по умолчанию.
     smtp_use_tls: bool = False
-    smtp_from_email: str = "noreply@showtail.local"
-    smtp_from_name: str = "ShowTail"
+    smtp_from_email: str = "noreply@show-ring.local"
+    smtp_from_name: str = "Show Ring"
 
     # APScheduler: включать ли встроенный планировщик. На dev удобно
     # держать выключенным, чтобы тестовые задания не запускались на
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
 
     # Имя topic exchange для событий платформы. То же, что и в очередях
     # воркера для подписок — обе стороны читают из этого поля.
-    exchange_topic: str = "showtail.events"
+    exchange_topic: str = "show-ring.events"
 
     # Этап 19: базовый URL фронтенда для ссылок в письмах
     # (подтверждение смены email, в будущем — сброс пароля). Письмо
@@ -123,7 +123,7 @@ class Settings(BaseSettings):
 
     # --- Доменно-специфичные политики ---
     # Список разрешённых Host-заголовков. Пустой = не проверяем (для dev).
-    # В prod ставим ["api.showtail.example", "*.showtail.example"] —
+    # В prod ставим ["api.show-ring.example", "*.show-ring.example"] —
     # защищает от Host header injection и host rebinding attacks.
     allowed_hosts: list[str] = []
     # Сети, которым доверяем X-Forwarded-For / X-Forwarded-Proto.

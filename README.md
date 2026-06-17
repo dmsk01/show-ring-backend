@@ -1,4 +1,4 @@
-# ShowTail — backend
+# Show Ring — backend
 
 Платформа управления выставками животных. Стек: **FastAPI (async) · PostgreSQL · RabbitMQ · Redis · MinIO**, всё поднимается в Docker Compose.
 

@@ -1,6 +1,6 @@
 # Бэкапы: pg_dump, ротация, правило 3-2-1
 
-Как устроено резервное копирование ShowTail (сервис `backup` в
+Как устроено резервное копирование Show Ring (сервис `backup` в
 `docker-compose.prod.yml`, скрипты в `deploy/backup/`) и почему оно
 устроено именно так.
 
@@ -30,8 +30,8 @@ offsite-копия (см. правило 3-2-1 ниже).
 `pg_dump` умеет несколько форматов вывода:
 
 ```bash
-pg_dump -d showtail > dump.sql          # plain: текстовый SQL
-pg_dump -d showtail -Fc -f dump.dump    # custom: бинарный архив
+pg_dump -d show_ring > dump.sql          # plain: текстовый SQL
+pg_dump -d show_ring -Fc -f dump.dump    # custom: бинарный архив
 ```
 
 Мы используем **custom (`-Fc`)**, потому что он:
@@ -66,11 +66,11 @@ pg_restore --list dump.dump > /dev/null  # exit 0 = архив цел
 
 ```bash
 # ls -1t: новые сверху; tail -n +8: всё начиная с 8-го; rm: удалить.
-ls -1t /backups/postgres/showtail-*.dump | tail -n +8 | xargs -r rm -f
+ls -1t /backups/postgres/show-ring-*.dump | tail -n +8 | xargs -r rm -f
 ```
 
-Глоб `showtail-*` не матчит `weekly-showtail-*` (имя должно начинаться
-с `showtail-`), поэтому дневная и недельная политики не пересекаются.
+Глоб `show-ring-*` не матчит `weekly-show-ring-*` (имя должно начинаться
+с `show-ring-`), поэтому дневная и недельная политики не пересекаются.
 
 ## Правило 3-2-1
 
@@ -80,7 +80,7 @@ ls -1t /backups/postgres/showtail-*.dump | tail -n +8 | xargs -r rm -f
 - **2** разных носителя;
 - **1** копия вне площадки (offsite).
 
-Текущее состояние ShowTail: боевая БД + локальный `./backups` — это
+Текущее состояние Show Ring: боевая БД + локальный `./backups` — это
 «2 копии, 1 носитель, 0 offsite». Осознанный старт (решение спеки
 2026-06-12): offsite включается **четырьмя строками в `.env`** без
 правки кода:
@@ -89,7 +89,7 @@ ls -1t /backups/postgres/showtail-*.dump | tail -n +8 | xargs -r rm -f
 BACKUP_S3_ENDPOINT=https://s3.storage.selcloud.ru
 BACKUP_S3_ACCESS_KEY=...
 BACKUP_S3_SECRET_KEY=...
-BACKUP_S3_BUCKET=showtail-backups
+BACKUP_S3_BUCKET=show-ring-backups
 ```
 
 После этого `backup.sh` начнёт зеркалить весь `/backups` во внешний
@@ -102,18 +102,18 @@ S3 после каждого локального бэкапа.
 
 ```bash
 # 1. Отдельная БД, чтобы не трогать боевую
-docker compose exec postgres createdb -U showtail showtail_restore
+docker compose exec postgres createdb -U show_ring show_ring_restore
 
 # 2. Восстановление дампа в неё
 docker compose run --rm backup restore.sh \
-    /backups/postgres/showtail-2026-06-12.dump showtail_restore
+    /backups/postgres/show-ring-2026-06-12.dump show_ring_restore
 
 # 3. Проверка: количество строк ключевых таблиц совпадает с боевой
-docker compose exec postgres psql -U showtail -d showtail_restore \
+docker compose exec postgres psql -U show_ring -d show_ring_restore \
     -c "SELECT count(*) FROM users;"
 
 # 4. Уборка
-docker compose exec postgres dropdb -U showtail showtail_restore
+docker compose exec postgres dropdb -U show_ring show_ring_restore
 ```
 
 Файлы MinIO восстанавливаются зеркалом в обратную сторону

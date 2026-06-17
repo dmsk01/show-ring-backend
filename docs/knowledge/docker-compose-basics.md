@@ -1,6 +1,6 @@
 # Docker Compose — образы, контейнеры, сеть
 
-Как устроен стек ShowTail в Docker Compose: что скачивается, что собирается, как сервисы находят друг друга, и какими командами это всё инспектировать и чистить.
+Как устроен стек Show Ring в Docker Compose: что скачивается, что собирается, как сервисы находят друг друга, и какими командами это всё инспектировать и чистить.
 
 ## Образ vs контейнер
 
@@ -38,7 +38,7 @@ migrate: build: .
 
 ## Один Dockerfile — несколько ролей
 
-В ShowTail `api`, `worker`, `worker-files`, `migrate` собираются из **одного** `Dockerfile` (один рецепт). Но это **не один контейнер** — это отдельные контейнеры, каждый свой процесс. Различаются командой запуска `command:`:
+В Show Ring `api`, `worker`, `worker-files`, `migrate` собираются из **одного** `Dockerfile` (один рецепт). Но это **не один контейнер** — это отдельные контейнеры, каждый свой процесс. Различаются командой запуска `command:`:
 
 ```yaml
 api:     command: uvicorn app.main:app ...        # веб-сервер
@@ -105,7 +105,7 @@ curl http://localhost:8000/docs             # Swagger UI в браузере
 docker compose exec api curl -fsS http://localhost:8000/health/ready   # readiness изнутри контейнера (как HEALTHCHECK)
 ```
 
-В ShowTail два health-эндпоинта: `/health/` всегда отдаёт 200 с разбивкой по
+В Show Ring два health-эндпоинта: `/health/` всегда отдаёт 200 с разбивкой по
 компонентам (для дашборда), а `/health/ready` — бинарный readiness (200 если PG
 жив, 503 если БД down). `HEALTHCHECK` контейнера (см. `Dockerfile`) бьёт именно
 в `/health/ready` — он и помечает контейнер unhealthy при падении БД. Подробнее —
@@ -114,7 +114,7 @@ docker compose exec api curl -fsS http://localhost:8000/health/ready   # readine
 Подключиться к БД внутри контейнера:
 
 ```bash
-docker compose exec postgres psql -U showtail -d showtail
+docker compose exec postgres psql -U show_ring -d show_ring
 ```
 
 Проверить статус healthcheck отдельного контейнера:

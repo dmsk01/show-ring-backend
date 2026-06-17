@@ -1,5 +1,5 @@
 #!/bin/bash
-# Бэкап ShowTail: PostgreSQL (pg_dump -Fc) + зеркало MinIO + ротация
+# Бэкап Show Ring: PostgreSQL (pg_dump -Fc) + зеркало MinIO + ротация
 # + опциональный offsite-S3. Расписание задаёт crond (см. entrypoint.sh),
 # ручной запуск: docker compose run --rm backup backup.sh
 #
@@ -21,7 +21,7 @@ mkdir -p "$BACKUP_DIR/postgres" "$BACKUP_DIR/minio"
 
 # --- 1. PostgreSQL: custom format (-Fc) — сжат, позволяет селективный
 # restore отдельных таблиц через pg_restore -t.
-DUMP="$BACKUP_DIR/postgres/showtail-$STAMP.dump"
+DUMP="$BACKUP_DIR/postgres/show-ring-$STAMP.dump"
 log "pg_dump -> $DUMP"
 PGPASSWORD="$POSTGRES_PASSWORD" pg_dump \
     -h postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f "$DUMP"
@@ -33,14 +33,14 @@ log "dump verified: $(du -h "$DUMP" | cut -f1)"
 
 # Воскресный дамп получает weekly-копию (живёт дольше, см. ротацию).
 if [ "$DOW" = "7" ]; then
-    cp "$DUMP" "$BACKUP_DIR/postgres/weekly-showtail-$STAMP.dump"
+    cp "$DUMP" "$BACKUP_DIR/postgres/weekly-show-ring-$STAMP.dump"
     log "weekly copy created"
 fi
 
 # --- 2. Ротация: храним KEEP_DAILY свежих дневных и KEEP_WEEKLY недельных.
 # ls -1t сортирует по mtime (новые сверху), tail -n +N — всё после N-го.
-# Глоб showtail-* НЕ матчит weekly-showtail-* (имя должно начинаться
-# с showtail-), поэтому политики не пересекаются.
+# Глоб show-ring-* НЕ матчит weekly-show-ring-* (имя должно начинаться
+# с show-ring-), поэтому политики не пересекаются.
 rotate() {
     # $1 — глоб-префикс, $2 — сколько файлов хранить.
     # Несматчившийся глоб (например, weekly-дампов ещё нет) роняет ls,
@@ -53,8 +53,8 @@ rotate() {
         echo "$old" | xargs rm -f
     fi
 }
-rotate "$BACKUP_DIR/postgres/showtail-" "$KEEP_DAILY"
-rotate "$BACKUP_DIR/postgres/weekly-showtail-" "$KEEP_WEEKLY"
+rotate "$BACKUP_DIR/postgres/show-ring-" "$KEEP_DAILY"
+rotate "$BACKUP_DIR/postgres/weekly-show-ring-" "$KEEP_WEEKLY"
 log "rotation done (daily=$KEEP_DAILY, weekly=$KEEP_WEEKLY)"
 
 # --- 3. MinIO: инкрементальное зеркало бакета (копируются только

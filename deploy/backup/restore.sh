@@ -1,11 +1,11 @@
 #!/bin/bash
-# Восстановление ShowTail из дампа.
+# Восстановление Show Ring из дампа.
 #   docker compose run --rm backup restore.sh /backups/postgres/<file>.dump [dbname]
 #
 # По умолчанию восстанавливает в $POSTGRES_DB (боевую!). Для учения
 # восстановления передавайте отдельную БД вторым аргументом:
-#   docker compose exec postgres createdb -U showtail showtail_restore
-#   docker compose run --rm backup restore.sh /backups/postgres/<f>.dump showtail_restore
+#   docker compose exec postgres createdb -U show_ring show_ring_restore
+#   docker compose run --rm backup restore.sh /backups/postgres/<f>.dump show_ring_restore
 #
 # Файлы MinIO восстанавливаются зеркалом в обратную сторону:
 #   docker compose run --rm backup mc alias set src http://minio:9000 <key> <secret>

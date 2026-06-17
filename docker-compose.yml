@@ -1,4 +1,4 @@
-# docker-compose для ShowTail (этап 15).
+# docker-compose для Show Ring (этап 15).
 #
 # Поднимает весь стек: PostgreSQL, RabbitMQ, Redis, MinIO, API, Worker,
 # плюс одноразовый init-контейнер для миграций.
@@ -31,16 +31,16 @@ services:
     # будет отдавать 503 на мёртвые зависимости (инцидент 2026-06-01).
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-showtail}
-      POSTGRES_USER: ${POSTGRES_USER:-showtail}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-showtail}
+      POSTGRES_DB: ${POSTGRES_DB:-show_ring}
+      POSTGRES_USER: ${POSTGRES_USER:-show_ring}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-show_ring}
     # Host-порты НЕ публикуем: база прод-безопасна по умолчанию.
     # Dev-порты (psql/DBeaver и т.п.) добавляет docker-compose.dev.yml.
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       # pg_isready — встроенная утилита PG, специально для healthcheck.
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-showtail}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-show_ring}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -77,8 +77,8 @@ services:
     image: minio/minio
     restart: unless-stopped  # см. постгрес
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-showtail}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-showtailminio}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-show_ring}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-show_ring_minio}
     # Host-порты (S3 API + Web Console) — в docker-compose.dev.yml.
     volumes:
       - minio_data:/data
@@ -101,8 +101,8 @@ services:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-showtail} ${S3_SECRET_KEY:-showtailminio} &&
-      mc mb --ignore-existing local/${S3_BUCKET:-showtail-files} &&
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-show_ring} ${S3_SECRET_KEY:-show_ring_minio} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-show-ring-files} &&
       echo 'MinIO bucket ready'
       "
     restart: "no"
@@ -113,7 +113,7 @@ services:
   migrate:
     build: .
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-show_ring}:${POSTGRES_PASSWORD:-show_ring}@postgres:5432/${POSTGRES_DB:-show_ring}
       # secret_key обязателен для alembic env.py (хотя миграциям
       # сам секрет не нужен, app.config.Settings проверяет наличие).
       SECRET_KEY: ${SECRET_KEY}
@@ -129,23 +129,23 @@ services:
     # только через nginx (docker-compose.prod.yml).
     environment:
       # asyncpg-URL через имя сервиса postgres — compose-сеть резолвит.
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-show_ring}:${POSTGRES_PASSWORD:-show_ring}@postgres:5432/${POSTGRES_DB:-show_ring}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0
       # MinIO внутри сети compose: эндпойнт http://minio:9000.
       # Не https — внутренняя сеть, TLS терминируется на reverse-proxy
       # в проде.
       S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
-      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-show_ring}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-show_ring_minio}
+      S3_BUCKET: ${S3_BUCKET:-show-ring-files}
       S3_REGION: ${S3_REGION:-us-east-1}
       # SMTP — placeholder. В prod ставить реальный SMTP (Sendgrid).
       # В dev override (docker-compose.dev.yml) переключаем на mailpit.
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
       SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
-      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@showtail.local}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@show-ring.local}
       SECRET_KEY: ${SECRET_KEY}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
       DEBUG: ${DEBUG:-false}
@@ -186,13 +186,13 @@ services:
   worker:
     build: .
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-show_ring}:${POSTGRES_PASSWORD:-show_ring}@postgres:5432/${POSTGRES_DB:-show_ring}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
-      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-show_ring}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-show_ring_minio}
+      S3_BUCKET: ${S3_BUCKET:-show-ring-files}
       S3_REGION: ${S3_REGION:-us-east-1}
       SECRET_KEY: ${SECRET_KEY}
     depends_on:
@@ -220,13 +220,13 @@ services:
   worker-files:
     build: .
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-show_ring}:${POSTGRES_PASSWORD:-show_ring}@postgres:5432/${POSTGRES_DB:-show_ring}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
-      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-show_ring}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-show_ring_minio}
+      S3_BUCKET: ${S3_BUCKET:-show-ring-files}
       S3_REGION: ${S3_REGION:-us-east-1}
       SECRET_KEY: ${SECRET_KEY}
     depends_on:
@@ -251,7 +251,7 @@ services:
     build: .
     profiles: ["events"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-show_ring}:${POSTGRES_PASSWORD:-show_ring}@postgres:5432/${POSTGRES_DB:-show_ring}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY}
@@ -270,11 +270,11 @@ services:
     build: .
     profiles: ["events"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-show_ring}:${POSTGRES_PASSWORD:-show_ring}@postgres:5432/${POSTGRES_DB:-show_ring}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
-      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@showtail.local}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@show-ring.local}
       SECRET_KEY: ${SECRET_KEY}
     depends_on:
       migrate:
@@ -297,7 +297,7 @@ services:
     build: .
     profiles: ["events"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-showtail}:${POSTGRES_PASSWORD:-showtail}@postgres:5432/${POSTGRES_DB:-showtail}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-show_ring}:${POSTGRES_PASSWORD:-show_ring}@postgres:5432/${POSTGRES_DB:-show_ring}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       SECRET_KEY: ${SECRET_KEY}
     depends_on:

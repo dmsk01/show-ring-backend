@@ -1,4 +1,4 @@
-# Прод-оверлей ShowTail. Применяется ПОВЕРХ базового файла:
+# Прод-оверлей Show Ring. Применяется ПОВЕРХ базового файла:
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 #
 # Образы собираются ЛОКАЛЬНО на сервере (`up --build`) — ни бэк, ни фронт
@@ -15,7 +15,7 @@
 # - nginx — ЕДИНСТВЕННЫЕ наружные порты (80/443). Порты инфры база
 #   не публикует вовсе (см. инверсию в docker-compose.dev.yml).
 # - certbot — под profile "tls", включается при появлении домена
-#   (порядок включения: deploy/nginx/conf.d/showtail.conf, низ файла).
+#   (порядок включения: deploy/nginx/conf.d/show-ring.conf, низ файла).
 # - backup — crond: pg_dump + mc mirror + ротация (deploy/backup/).
 # - Фиксированная подсеть 172.28.0.0/16: FORWARDED_ALLOW_IPS должен
 #   ссылаться на стабильный CIDR, иначе proxy_headers.py не доверится
@@ -106,7 +106,7 @@ services:
 
   # Авто-продление сертификата. Выключен, пока нет домена:
   # включается `--profile tls` ПОСЛЕ первичного выпуска сертификата
-  # (см. инструкцию в deploy/nginx/conf.d/showtail.conf).
+  # (см. инструкцию в deploy/nginx/conf.d/show-ring.conf).
   certbot:
     image: certbot/certbot
     profiles: ["tls"]
@@ -119,13 +119,13 @@ services:
   backup:
     build: ./deploy/backup
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-showtail}
-      POSTGRES_USER: ${POSTGRES_USER:-showtail}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-showtail}
+      POSTGRES_DB: ${POSTGRES_DB:-show_ring}
+      POSTGRES_USER: ${POSTGRES_USER:-show_ring}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-show_ring}
       S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-showtail}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-showtailminio}
-      S3_BUCKET: ${S3_BUCKET:-showtail-files}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-show_ring}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-show_ring_minio}
+      S3_BUCKET: ${S3_BUCKET:-show-ring-files}
       BACKUP_CRON: ${BACKUP_CRON:-30 3 * * *}
       BACKUP_KEEP_DAILY: ${BACKUP_KEEP_DAILY:-7}
       BACKUP_KEEP_WEEKLY: ${BACKUP_KEEP_WEEKLY:-4}
