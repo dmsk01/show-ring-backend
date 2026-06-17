@@ -1,7 +1,15 @@
 r"""
 Демо-сид для ручного тестирования UI: наполняет БД разнообразными
-данными по всем основным разделам витрины (питомники, собаки с
-родословной, помёты, выставки в РАЗНЫХ статусах, объявления, реклама).
+данными по ВСЕМ разделам с фронтенд-ручками — питомники, собаки с
+родословной, помёты, выставки в разных статусах, объявления (включая
+одно «на модерации»), реклама, блог, подписки и уведомления, тикеты
+поддержки с перепиской, лог модерации, журнал безопасности аккаунта,
+фоновые задачи и тиры квот. Создаются роли admin/operator/organizer/
+judge/breeder/buyer — чтобы пройти и админские, и пользовательские ручки.
+
+Не сеются чисто инфраструктурные таблицы без фронтенд-ручек:
+outbox_events (наполняется воркером), refresh/email-токены (создаются
+при логине/верификации).
 
 В отличие от scripts.seed_test_show (узкий сценарий «одна завершённая
 выставка для генерации документов»), этот скрипт даёт «широту»: списки,
@@ -30,7 +38,7 @@ import io
 import logging
 import sys
 import uuid
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -45,9 +53,11 @@ from app.database import async_session_factory, engine
 # Регистрируем все модели в Base.metadata (ленивые FK).
 from app.models import (  # noqa: F401
     ad, audit, classified, dog, file, kennel, litter,
-    notification, outbox, reference, result, show, support, task,
+    notification, outbox, post, reference, result, security_audit,
+    show, support, task, upload_quota,
 )
 from app.models.ad import AdBanner, AdCampaign, BannerPlacement, CampaignStatus
+from app.models.audit import ModerationLog
 from app.models.classified import (
     Classified,
     ClassifiedCategory,
@@ -58,9 +68,26 @@ from app.models.dog import Dog, DogPhoto, SexEnum
 from app.models.file import UploadedFile
 from app.models.kennel import Kennel
 from app.models.litter import Litter, LitterStatus
+from app.models.notification import (
+    EventType,
+    Notification,
+    NotificationChannel,
+    NotificationStatus,
+    Subscription,
+)
+from app.models.post import Post, PostPublish
 from app.models.reference import Breed, Grade, ShowClass, ShowRank
 from app.models.result import ShowResult
+from app.models.security_audit import SecurityAuditLog
 from app.models.show import Show, ShowEntry, ShowJudge, ShowRing, ShowStatus
+from app.models.support import (
+    SupportMessage,
+    SupportTicket,
+    TicketPriority,
+    TicketStatus,
+)
+from app.models.task import Task, TaskStatusEnum
+from app.models.upload_quota import UploadQuotaTier
 from app.models.user import RoleEnum, User, UserProfile, UserRole
 from app.services import file_storage
 from app.utils.security import hash_password
@@ -95,25 +122,50 @@ async def _get_or_create(db, model, lookup: dict, create: dict):
 
 async def _user_with_profile(
     db, email, *, last, first, patr=None, country="Россия", role=None,
+    phone=None, is_phone_verified=False, socials=None,
 ) -> User:
-    # UserProfile хранит только ФИО + страну (город живёт у питомника /
+    # UserProfile хранит ФИО + страну + соцсети (город живёт у питомника /
     # объявления), поэтому city здесь не принимаем.
     user, _ = await _get_or_create(
         db, User, {"email": email},
         {
             "email": email,
+            # phone опционален — заполняем только у части юзеров, чтобы
+            # в UserResponse было видно и заполненный, и пустой телефон.
+            "phone": phone,
             "hashed_password": hash_password(DEMO_PASSWORD),
             "is_active": True,
             "is_email_verified": True,
+            "is_phone_verified": is_phone_verified,
         },
     )
-    await _get_or_create(
+    # phone/верификацию проставляем и существующим юзерам (БД могла быть
+    # засеяна прошлой версией сида без этих полей). _get_or_create не
+    # обновляет найденные строки, поэтому делаем это явно и идемпотентно.
+    if phone is not None:
+        user.phone = phone
+        user.is_phone_verified = is_phone_verified
+
+    # socials — dict из {instagram, facebook, vk, telegram}; None = без сетей.
+    socials = socials or {}
+    profile, _ = await _get_or_create(
         db, UserProfile, {"user_id": user.id},
         {
             "user_id": user.id, "last_name": last, "first_name": first,
             "patronymic": patr, "country": country,
+            "instagram": socials.get("instagram"),
+            "facebook": socials.get("facebook"),
+            "vk": socials.get("vk"),
+            "telegram": socials.get("telegram"),
         },
     )
+    # Те же соображения, что и для phone: обновляем соцсети существующему
+    # профилю (по той же причине идемпотентности на уже засеянной БД).
+    if socials:
+        profile.instagram = socials.get("instagram")
+        profile.facebook = socials.get("facebook")
+        profile.vk = socials.get("vk")
+        profile.telegram = socials.get("telegram")
     if role is not None:
         await _get_or_create(
             db, UserRole, {"user_id": user.id, "role": role},
@@ -198,10 +250,25 @@ async def seed(db: AsyncSession) -> None:
     # 0. Справочники.
     await seed_references(db)
 
-    # 1. Люди: организатор, два судьи, четыре заводчика, два покупателя.
+    # 1. Люди: админ, оператор поддержки, организатор, два судьи, четыре
+    #    заводчика, два покупателя. admin/operator нужны, чтобы протестировать
+    #    /admin/* и /support/admin/* ручки на фронте.
+    admin = await _user_with_profile(
+        db, "admin-demo@dogshow.ru", last="Администраторов", first="Админ",
+        role=RoleEnum.admin,
+        phone="+79990000001", is_phone_verified=True,
+    )
+    operator = await _user_with_profile(
+        db, "operator-demo@dogshow.ru", last="Операторова", first="Оксана",
+        patr="Ивановна", role=RoleEnum.operator,
+    )
     organizer = await _user_with_profile(
         db, "org-demo@dogshow.ru", last="Воронцова", first="Ирина",
         patr="Сергеевна", role=RoleEnum.organizer,
+        socials={
+            "vk": "https://vk.com/showtail_org",
+            "telegram": "https://t.me/showtail_org",
+        },
     )
     judge1 = await _user_with_profile(
         db, "judge1-demo@dogshow.ru", last="Лебедев", first="Андрей",
@@ -226,8 +293,19 @@ async def seed(db: AsyncSession) -> None:
     for i, (email, last, first, kname, prefix, city, phone) in enumerate(
         breeders_spec
     ):
+        # Первому заводчику прописываем соцсети — чтобы блок соцссылок в
+        # профиле/карточке питомника было на чём проверить.
+        socials = (
+            {
+                "instagram": "https://instagram.com/arkadia_kennel",
+                "vk": "https://vk.com/arkadia_kennel",
+                "telegram": "https://t.me/arkadia_kennel",
+            }
+            if i == 0 else None
+        )
         u = await _user_with_profile(
             db, email, last=last, first=first, role=RoleEnum.breeder,
+            socials=socials,
         )
         kennel, _ = await _get_or_create(
             db, Kennel, {"kennel_prefix": f"{prefix} (демо)"},
@@ -250,6 +328,7 @@ async def seed(db: AsyncSession) -> None:
     buyer1 = await _user_with_profile(
         db, "buyer1-demo@dogshow.ru", last="Соколов", first="Дмитрий",
         role=RoleEnum.buyer,
+        phone="+79990000002", is_phone_verified=True,
     )
     buyer2 = await _user_with_profile(
         db, "buyer2-demo@dogshow.ru", last="Морозова", first="Алина",
@@ -494,6 +573,26 @@ async def seed(db: AsyncSession) -> None:
                 "contact_email": author.email,
             },
         )
+    # Одно объявление «на модерации» — чтобы список GET
+    # /admin/moderation/classifieds был не пустой и модерацию можно было
+    # пройти с фронта (одобрить/отклонить).
+    await _get_or_create(
+        db, Classified, {"title": "Щенки на модерации (демо)"},
+        {
+            "author_id": buyer2.id,
+            "category": ClassifiedCategory.puppy_sale,
+            "breed_id": breeds[4].id,
+            "title": "Щенки на модерации (демо)",
+            "description": "Новое объявление, ожидает проверки модератором. "
+                           "Появится в публичной выдаче после одобрения.",
+            "price": Decimal("55000.00"),
+            "price_kind": ClassifiedPriceKind.fixed,
+            "city": "Нижний Новгород",
+            "status": ClassifiedStatus.moderation,
+            "contact_phone": "+7 (900) 000-00-00",
+            "contact_email": buyer2.email,
+        },
+    )
 
     # 6. Реклама — кампания с баннерами в разных местах размещения.
     advertiser = breeders[0][0]
@@ -631,6 +730,259 @@ async def seed(db: AsyncSession) -> None:
                     titles_cache=titles,
                 ))
 
+    # Опорное «сейчас» для timestamp-полей (sent_at/read_at/created_at).
+    # Привязано к TODAY ради стабильности повторных запусков.
+    now = datetime(TODAY.year, TODAY.month, TODAY.day, 12, 0, tzinfo=timezone.utc)
+
+    # 9. Блог: два опубликованных поста и один черновик (для проверки фильтра
+    #    publish и доступа writer'а к черновику). slug задаём явно — сид
+    #    идемпотентен по нему, не дёргаем генератор slug из сервиса.
+    posts_spec = [
+        ("kak-vybrat-shchenka-demo", "Как выбрать щенка шоу-класса",
+         PostPublish.published, organizer,
+         ["щенки", "выбор", "шоу"],
+         "<p>Породный тип, движения и темперамент — три кита оценки "
+         "перспективного щенка. Смотрите на родителей и тесты здоровья.</p>"),
+        ("podgotovka-k-vystavke-demo", "Подготовка собаки к выставке",
+         PostPublish.published, admin,
+         ["выставка", "хендлинг", "груминг"],
+         "<p>За месяц до ринга: кондиция, шерсть, отработка стойки и "
+         "движения по рингу. Чек-лист дня выставки внутри.</p>"),
+        ("chernovik-novosti-demo", "Черновик: новости платформы",
+         PostPublish.draft, admin,
+         ["новости"],
+         "<p>Неопубликованный черновик — виден только admin/organizer.</p>"),
+    ]
+    for slug, title, publish, author, tags, content in posts_spec:
+        await _get_or_create(
+            db, Post, {"slug": slug},
+            {
+                "title": title,
+                "slug": slug,
+                "description": title + ". Демо-материал блога ShowTail.",
+                "content": content,
+                "tags": tags,
+                "meta_keywords": tags,
+                "meta_title": title,
+                "meta_description": title + " — практическое руководство.",
+                "publish": publish,
+                "author_id": author.id,
+                # Денормализованные счётчики — чтобы карточки блога были «живыми».
+                "total_views": 120, "total_shares": 4,
+                "total_comments": 0, "total_favorites": 7,
+            },
+        )
+
+    # 10. Подписки на события (GET /subscriptions). Натуральный ключ —
+    #     UNIQUE (user, event, breed, region, channel), по нему и идемпотентим.
+    subs_spec = [
+        (buyer1, EventType.LITTER_ANNOUNCED, breeds[0].id, None,
+         NotificationChannel.email),
+        (buyer1, EventType.SHOW_RESULTS_PUBLISHED, None, None,
+         NotificationChannel.in_app),
+        (buyer2, EventType.LITTER_ANNOUNCED, None, "Москва",
+         NotificationChannel.email),
+        (buyer2, EventType.DOG_TITLE_EARNED, None, None,
+         NotificationChannel.email),
+    ]
+    for sub_user, event, breed_id, region, channel in subs_spec:
+        await _get_or_create(
+            db, Subscription,
+            {
+                "user_id": sub_user.id,
+                "event_type": event.value,
+                "filter_breed_id": breed_id,
+                "filter_region": region,
+                "channel": channel,
+            },
+            {
+                "user_id": sub_user.id,
+                "event_type": event.value,
+                "filter_breed_id": breed_id,
+                "filter_region": region,
+                "channel": channel,
+                "is_active": True,
+            },
+        )
+
+    # 11. Уведомления (GET /notifications, бейдж непрочитанных). Разные каналы
+    #     и статусы: in_app непрочитанное/прочитанное, email отправленное,
+    #     pending и failed. message_id детерминированный → идемпотентность.
+    notif_spec = [
+        (NotificationChannel.in_app, EventType.SHOW_RESULTS_PUBLISHED.value,
+         "Опубликованы результаты выставки «Кубок столицы — 2026»",
+         NotificationStatus.sent, None, False),  # непрочитанное в ленте
+        (NotificationChannel.in_app, EventType.LITTER_ANNOUNCED.value,
+         "Новый помёт в питомнике «Аркадия»",
+         NotificationStatus.sent, None, True),    # прочитанное в ленте
+        (NotificationChannel.email, EventType.LITTER_ANNOUNCED.value,
+         "Доступен новый помёт по вашей подписке",
+         NotificationStatus.sent, None, True),
+        (NotificationChannel.email, EventType.DOG_TITLE_EARNED.value,
+         "Собака получила новый титул",
+         NotificationStatus.pending, None, False),
+        (NotificationChannel.email, EventType.SHOW_REGISTRATION_OPENED.value,
+         "Открыта регистрация на «Летний CACIB»",
+         NotificationStatus.failed, "SMTP timeout", False),
+    ]
+    for i, (channel, event, subject, nstatus, error, is_read) in enumerate(
+        notif_spec
+    ):
+        mid = uuid.uuid5(uuid.NAMESPACE_URL, f"demo-notif:{buyer1.id}:{i}")
+        await _get_or_create(
+            db, Notification, {"message_id": mid},
+            {
+                "message_id": mid,
+                "user_id": buyer1.id,
+                "event_type": event,
+                "channel": channel,
+                "subject": subject,
+                "status": nstatus,
+                "error": error,
+                "sent_at": (
+                    now - timedelta(hours=i)
+                    if nstatus == NotificationStatus.sent else None
+                ),
+                "read_at": now - timedelta(hours=i) if is_read else None,
+            },
+        )
+
+    # 12. Поддержка: один открытый тикет (buyer1) с перепиской и один
+    #     решённый (buyer2). Натуральный ключ тикета — (user_id, subject).
+    ticket1, t1_created = await _get_or_create(
+        db, SupportTicket,
+        {"user_id": buyer1.id, "subject": "Не приходит письмо-подтверждение"},
+        {
+            "user_id": buyer1.id,
+            "subject": "Не приходит письмо-подтверждение",
+            "status": TicketStatus.in_progress,
+            "priority": TicketPriority.high,
+            "assigned_to_id": operator.id,
+        },
+    )
+    if t1_created:
+        db.add(SupportMessage(
+            ticket_id=ticket1.id, sender_id=buyer1.id,
+            is_from_operator=False, is_read=True,
+            body="Здравствуйте! Зарегистрировался, но письмо для "
+                 "подтверждения email так и не пришло. Подскажите, что делать?",
+        ))
+        db.add(SupportMessage(
+            ticket_id=ticket1.id, sender_id=operator.id,
+            is_from_operator=True, is_read=False,
+            body="Здравствуйте! Проверьте папку «Спам». Я повторно отправила "
+                 "письмо на ваш адрес — оно должно прийти в течение 5 минут.",
+        ))
+
+    ticket2, t2_created = await _get_or_create(
+        db, SupportTicket,
+        {"user_id": buyer2.id, "subject": "Как опубликовать объявление?"},
+        {
+            "user_id": buyer2.id,
+            "subject": "Как опубликовать объявление?",
+            "status": TicketStatus.resolved,
+            "priority": TicketPriority.normal,
+            "assigned_to_id": operator.id,
+        },
+    )
+    if t2_created:
+        db.add(SupportMessage(
+            ticket_id=ticket2.id, sender_id=buyer2.id,
+            is_from_operator=False, is_read=True,
+            body="Подскажите, как разместить объявление о продаже щенка?",
+        ))
+        db.add(SupportMessage(
+            ticket_id=ticket2.id, sender_id=operator.id,
+            is_from_operator=True, is_read=True,
+            body="В разделе «Объявления» нажмите «Создать». После модерации "
+                 "оно появится в публичной выдаче. Хорошего дня!",
+        ))
+
+    # 13. Лог модерации (admin видит историю решений). Полиморфные target —
+    #     питомники (верификация) и объявление (одобрение). Идемпотентны по
+    #     (actor, action, target_id).
+    verified_kennels = (await db.execute(
+        select(Kennel).where(Kennel.is_verified.is_(True))
+    )).scalars().all()
+    for k in verified_kennels:
+        await _get_or_create(
+            db, ModerationLog,
+            {"actor_id": admin.id, "action": "kennel.verify",
+             "target_id": k.id},
+            {
+                "actor_id": admin.id,
+                "action": "kennel.verify",
+                "target_type": "kennel",
+                "target_id": k.id,
+                "reason": "Документы РКФ проверены, питомник подтверждён.",
+                "extra": {"prev": False, "new": True},
+            },
+        )
+
+    # 14. Журнал безопасности аккаунта (GET истории операций над собой).
+    sec_spec = [
+        ("password_changed", {"method": "self_service"}),
+        ("email_change_requested",
+         {"old_email": buyer1.email, "new_email": "new-buyer1@dogshow.ru"}),
+    ]
+    for action, extra in sec_spec:
+        await _get_or_create(
+            db, SecurityAuditLog,
+            {"user_id": buyer1.id, "action": action},
+            {
+                "user_id": buyer1.id,
+                "action": action,
+                "ip": "203.0.113.10",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "ShowTail-Demo",
+                "extra": extra,
+            },
+        )
+
+    # 15. Фоновые задачи (GET /tasks/{id}). Одна завершённая (с file_id
+    #     результата) и одна в очереди. Идемпотентны по (type, created_by).
+    catalog_show = (await db.execute(
+        select(Show).where(Show.name == SHOW_COMPLETED)
+    )).scalar_one_or_none()
+    if catalog_show is not None:
+        await _get_or_create(
+            db, Task,
+            {"type": "generate_catalog", "created_by": organizer.id},
+            {
+                "type": "generate_catalog",
+                "status": TaskStatusEnum.done,
+                "payload": {"show_id": str(catalog_show.id)},
+                "result": {"file_id": str(uuid.uuid4())},
+                "created_by": organizer.id,
+                "attempts": 1,
+            },
+        )
+        await _get_or_create(
+            db, Task,
+            {"type": "generate_diploma", "created_by": organizer.id},
+            {
+                "type": "generate_diploma",
+                "status": TaskStatusEnum.pending,
+                "payload": {"show_id": str(catalog_show.id)},
+                "result": None,
+                "created_by": organizer.id,
+                "attempts": 0,
+            },
+        )
+
+    # 16. Тиры квот загрузки. Обычно засеяны миграцией; страхуемся, чтобы
+    #     GET /admin/upload-quotas всегда отдавал три строки.
+    quota_defaults = [
+        ("untrusted", 5, 50 * 1024 * 1024),
+        ("standard", 50, 500 * 1024 * 1024),
+        ("breeder", 200, 5 * 1024 * 1024 * 1024),
+    ]
+    for tier, daily, storage in quota_defaults:
+        await _get_or_create(
+            db, UploadQuotaTier, {"tier": tier},
+            {"tier": tier, "daily_limit": daily, "max_storage_bytes": storage},
+        )
+
     await db.commit()
     await _print_summary(db)
 
@@ -642,16 +994,33 @@ async def _print_summary(db: AsyncSession) -> None:
     n_litters = len((await db.execute(select(Litter.id))).scalars().all())
     n_class = len((await db.execute(select(Classified.id))).scalars().all())
     n_photos = len((await db.execute(select(DogPhoto.id))).scalars().all())
+    n_posts = len((await db.execute(select(Post.id))).scalars().all())
+    n_subs = len((await db.execute(select(Subscription.id))).scalars().all())
+    n_notif = len((await db.execute(select(Notification.id))).scalars().all())
+    n_tickets = len(
+        (await db.execute(select(SupportTicket.id))).scalars().all()
+    )
+    n_modlog = len((await db.execute(select(ModerationLog.id))).scalars().all())
+    n_tasks = len((await db.execute(select(Task.id))).scalars().all())
     print("\n" + "=" * 60)
     print("ДЕМО-СИД ГОТОВ")
-    print(f"  выставок:   {n_shows}")
-    print(f"  собак:      {n_dogs}")
-    print(f"  фото собак: {n_photos}")
-    print(f"  питомников: {n_kennels}")
-    print(f"  помётов:    {n_litters}")
-    print(f"  объявлений: {n_class}")
+    print(f"  выставок:    {n_shows}")
+    print(f"  собак:       {n_dogs}")
+    print(f"  фото собак:  {n_photos}")
+    print(f"  питомников:  {n_kennels}")
+    print(f"  помётов:     {n_litters}")
+    print(f"  объявлений:  {n_class}")
+    print(f"  постов:      {n_posts}")
+    print(f"  подписок:    {n_subs}")
+    print(f"  уведомлений: {n_notif}")
+    print(f"  тикетов:     {n_tickets}")
+    print(f"  лог модер.:  {n_modlog}")
+    print(f"  задач:       {n_tasks}")
     print(f"  логины (пароль у всех {DEMO_PASSWORD}):")
+    print("    admin-demo@dogshow.ru      — администратор")
+    print("    operator-demo@dogshow.ru   — оператор поддержки")
     print("    org-demo@dogshow.ru        — организатор")
+    print("    judge1-demo@dogshow.ru     — судья")
     print("    breeder1-demo@dogshow.ru   — заводчик")
     print("    buyer1-demo@dogshow.ru     — покупатель")
     print("=" * 60)
