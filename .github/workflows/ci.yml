@@ -1,8 +1,11 @@
-# CI/CD pipeline для ShowTail (GitHub Actions).
+# CI/CD pipeline для Show Ring (GitHub Actions).
 #
-# Стадии: lint → test → build → deploy.
-# - lint/test гоняются на каждый push и pull request.
-# - build/deploy — только на main (push), чтобы не пушить образы с PR.
+# Стадии: lint → test → deploy.
+# - lint/test гоняются на каждый push и pull request (облачные раннеры).
+# - deploy — только push в main, на self-hosted runner'е (на самом
+#   прод-сервере): тянет оба репо и пересобирает стек локально через
+#   deploy/deploy.sh. Реестр (ghcr) НЕ используется — образы собираются
+#   на сервере, как и задумано в docker-compose.prod.yml.
 #
 # Тонкость: интеграционные тесты требуют ЖИВЫЕ Postgres + Redis (иначе
 # conftest.py делает skip) и накатанные миграции (conftest только
@@ -39,12 +42,12 @@ jobs:
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_DB: showtail_test
-          POSTGRES_USER: showtail
-          POSTGRES_PASSWORD: showtail
+          POSTGRES_DB: show_ring_test
+          POSTGRES_USER: show_ring
+          POSTGRES_PASSWORD: show_ring
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U showtail"
+          --health-cmd "pg_isready -U show_ring"
           --health-interval 5s --health-timeout 3s --health-retries 10
       redis:
         image: redis:8-alpine
@@ -54,7 +57,7 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       # asyncpg-URL на localhost:5432 (порт services проброшен на хост раннера).
-      DATABASE_URL: postgresql+asyncpg://showtail:showtail@localhost:5432/showtail_test
+      DATABASE_URL: postgresql+asyncpg://show_ring:show_ring@localhost:5432/show_ring_test
       REDIS_URL: redis://localhost:6379/0
       # SECRET_KEY обязан быть ≥32 символов и не из плейсхолдеров
       # (app/config.py: _validate_secret_key падает при debug=false).
@@ -73,68 +76,18 @@ jobs:
       - name: Run tests
         run: pytest -q
 
-  build:
-    needs: [lint, test]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write   # пуш в GitHub Container Registry (ghcr.io)
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # GitHub Actions cache — ускоряет повторные сборки слоёв.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   deploy:
-    needs: build
+    needs: [lint, test]
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    # environment: production → можно навесить required reviewers /
-    # protection rules в настройках репозитория (ручной аппрув деплоя).
-    environment: production
+    # self-hosted runner стоит на ПРОД-СЕРВЕРЕ (метка show-ring). Он держит
+    # ИСХОДЯЩЕЕ соединение к GitHub, поэтому работает за NAT — входящий SSH
+    # и секреты деплоя в репозитории не нужны. Деплой идёт против рабочих
+    # копий в /opt (там лежит .env с секретами), а не против checkout'а
+    # раннера — поэтому actions/checkout здесь намеренно НЕ нужен.
+    # ВНИМАНИЕ: путь ниже — под реальную раскладку сервера (/opt/show-ring-
+    # backend). Сам deploy.sh самолокализуется и пути не хардкодит; здесь
+    # хардкод только до точки входа. Поменяешь каталог — поправь и тут.
+    runs-on: [self-hosted, show-ring]
     steps:
-      # Деплой через прод-связку compose (docker-compose.prod.yml даёт
-      # api/worker'ам image: ghcr.io/..., nginx, backup). Compose-файлы
-      # и deploy/ приезжают на сервер через git pull — репозиторий
-      # должен быть клонирован в /opt/showtail. --build backup
-      # пересобирает локальный backup-образ при изменении скриптов.
-      #
-      # Нужные secrets репозитория:
-      #   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY  — доступ по SSH
-      #   REGISTRY_USER, REGISTRY_TOKEN             — read:packages для ghcr
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            set -e
-            cd /opt/showtail
-            git pull --ff-only
-            echo "${{ secrets.REGISTRY_TOKEN }}" | docker login ghcr.io -u "${{ secrets.REGISTRY_USER }}" --password-stdin
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm migrate
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build backup
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-            docker image prune -f
+      - name: Pull repos & rebuild stack
+        run: bash /opt/show-ring-backend/deploy/deploy.sh

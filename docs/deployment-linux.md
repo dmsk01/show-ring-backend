@@ -1,4 +1,4 @@
-# Развёртывание ShowTail на Linux-сервере — пошагово
+# Развёртывание Show Ring на Linux-сервере — пошагово
 
 Инструкция «с нуля»: от подключения к серверу по SSH и установки пакетов до
 работающего прод-стека за nginx и засеянной базы. Рассчитана на то, что Linux ты
@@ -147,7 +147,7 @@ sudo ufw status           # проверка: увидишь список раз
   завести на сервере SSH-ключ и добавить его в GitHub:
 
 ```bash
-ssh-keygen -t ed25519 -C "showtail-server"   # три раза Enter (без пароля на ключ)
+ssh-keygen -t ed25519 -C "show-ring-server"   # три раза Enter (без пароля на ключ)
 cat ~/.ssh/id_ed25519.pub                     # покажет публичный ключ — скопируй ВСЮ строку
 ```
 Затем на сайте GitHub: **Settings → SSH and GPG keys → New SSH key**, вставь
@@ -172,26 +172,26 @@ cd /opt
 
 **Если репозитории публичные (HTTPS, проще):**
 ```bash
-sudo git clone https://github.com/dmsk01/show-ring-backend.git showtail
+sudo git clone https://github.com/dmsk01/show-ring-backend.git
 sudo git clone https://github.com/dmsk01/show-ring-frontend.git
 ```
 
 **Если приватные (по SSH, требует шаг 6):**
 ```bash
-sudo git clone git@github.com:dmsk01/show-ring-backend.git showtail
+sudo git clone git@github.com:dmsk01/show-ring-backend.git
 sudo git clone git@github.com:dmsk01/show-ring-frontend.git
 ```
 
 Чтобы дальше не воевать с правами, сделай каталог своим и зайди в бэкенд:
 ```bash
-sudo chown -R $USER:$USER /opt/showtail /opt/show-ring-frontend
-cd /opt/showtail
+sudo chown -R $USER:$USER /opt/show-ring-backend /opt/show-ring-frontend
+cd /opt/show-ring-backend
 ```
 
 Должна получиться такая раскладка:
 ```
 /opt/
-├── showtail/              ← бэкенд (этот репо), отсюда запускаем все команды
+├── show-ring-backend/              ← бэкенд (этот репо), отсюда запускаем все команды
 └── show-ring-frontend/    ← фронт, его соберёт сервис web
 ```
 
@@ -251,7 +251,7 @@ nano .env
 | `SCHEDULER_ENABLED` | `true` (фоновые задачи: дедлайны выставок и т.п.) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL` | данные **реального** почтового сервиса (Sendgrid/Mailgun/SES). Без рабочего SMTP не будут уходить письма верификации. |
 
-`POSTGRES_DB`/`POSTGRES_USER` оставь `showtail`. `COOKIE_PATH_PREFIX=/api` уже
+`POSTGRES_DB`/`POSTGRES_USER` оставь `show_ring`. `COOKIE_PATH_PREFIX=/api` уже
 задан — не трогай (без него не работает вход).
 
 > **Зачем секреты прокидываются явно?** `.env` не попадает внутрь Docker-образа,
@@ -266,7 +266,7 @@ nano .env
 api, воркеры, nginx):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
+  docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
 ```
 
 Команда длинная (два `-f` файла), поэтому заведи удобный псевдоним — дальше можно
@@ -313,16 +313,16 @@ curl -fsSL http://localhost/api/health
 сертификат Let's Encrypt:
 
 1. **DNS:** в панели регистратора домена заведи A-запись: домен → IP сервера.
-   Проверь, что резолвится: `dig +short showtail.example`.
-2. В `.env` задай `DOMAIN=showtail.example`.
-3. В `deploy/nginx/conf.d/showtail.conf` замени `showtail.example` на свой домен
+   Проверь, что резолвится: `dig +short show-ring.example`.
+2. В `.env` задай `DOMAIN=show-ring.example`.
+3. В `deploy/nginx/conf.d/show-ring.conf` замени `show-ring.example` на свой домен
    (3 места в закомментированном блоке 443 внизу файла).
 4. Однократно выпусти сертификат:
    ```bash
    dc run --rm certbot certonly --webroot -w /var/www/certbot \
-     -d showtail.example --email admin@showtail.example --agree-tos
+     -d show-ring.example --email admin@show-ring.example --agree-tos
    ```
-5. Раскомментируй блок `server { listen 443 ssl; ... }` в `showtail.conf`, а в
+5. Раскомментируй блок `server { listen 443 ssl; ... }` в `show-ring.conf`, а в
    блоке `:80` замени `location /` на редирект `return 301 https://$host$request_uri;`.
 6. Перезапусти с авто-продлением сертификата:
    ```bash
@@ -338,7 +338,7 @@ curl -fsSL http://localhost/api/health
 
 ```bash
 dc exec api python -m scripts.bootstrap_admin \
-  --email admin@showtail.example --password 'СильныйПароль123!'
+  --email admin@show-ring.example --password 'СильныйПароль123!'
 ```
 Команду можно повторять безопасно — дубликат не создаст.
 
@@ -388,18 +388,122 @@ dc run --rm backup backup.sh
 
 ---
 
-## 14. Обновление кода
+## 14. Обновление кода — вручную
 
-После выхода нового кода:
+После выхода нового кода стек надо пересобрать. Тонкость: фронт собирается
+из **соседнего** репозитория, поэтому обновлять надо **оба** — иначе подхватится
+только часть изменений (шаг 14 раньше тянул лишь бэк — это была недоработка).
+Чтобы не делать руками, в репозитории есть скрипт `deploy/deploy.sh` — он
+тянет оба репо и пересобирает стек одной командой:
+
 ```bash
-git pull
-dc up -d --build      # --build ОБЯЗАТЕЛЬНО, иначе останется старый образ
+/opt/show-ring-backend/deploy/deploy.sh
 ```
-Миграции базы накатятся автоматически при запуске.
+
+Скрипт идемпотентен (можно гонять сколько угодно), а Docker кеширует слои —
+неизменившийся сервис пересборку пропустит. Миграции накатятся автоматически
+(контейнер `migrate`). Первый запуск: дай скрипту право на исполнение —
+`chmod +x deploy/deploy.sh`.
+
+> Рабочее дерево на сервере должно быть **чистым**: скрипт делает
+> `git pull --ff-only` и упадёт, если на сервере есть незакоммиченные правки
+> в отслеживаемых файлах. `.env` это не затрагивает (он в `.gitignore`).
+
+Чтобы обновление шло само на каждый `git push` — см. следующий шаг.
+
+### Особый случай: обновление сменило идентификаторы БД/хранилища
+
+Обычный `deploy.sh` (pull + rebuild) **недостаточен**, если в коде поменялись
+имена, под которые инициализированы тома: `POSTGRES_DB`/`POSTGRES_USER`,
+`RABBITMQ_USER`, `S3_BUCKET`. Том `postgres_data` создан под старого
+пользователя/БД, и контейнер на новых именах в старые данные **не пустит**.
+
+Так было при переименовании **ShowTail → Show Ring** (имена стали `show_ring`
+/ `show-ring-files`). Идентификаторы живут в `.env` (он `gitignored`, в git не
+приезжает) — значит после такого обновления `.env` правится вручную, а тома
+пересоздаются. Раз база ещё пустая (только сид) — проще всего сбросить:
+
+```bash
+git pull                                  # подтянуть переименование/новый код
+# 1. Привести .env к новым именам (или перелить из шаблона и вписать секреты):
+nano .env                                 # POSTGRES_DB, POSTGRES_USER, RABBITMQ_USER → show_ring
+                                          # S3_BUCKET → show-ring-files
+# 2. Стереть старые тома и подняться на новых именах:
+dc down -v                                # ⚠️ УДАЛЯЕТ данные БД/файлов/очередей
+dc up -d --build
+# 3. Заново засеять (см. шаги 11–12):
+dc exec api python -m scripts.bootstrap_admin --email admin@show-ring.example --password '...'
+dc exec api python -m scripts.seed_references
+```
+
+> Если БД **не пустая** и данные нужны — это уже миграция, а не `down -v`:
+> снять дамп (`dc run --rm backup backup.sh`), переименовать роль/БД в
+> PostgreSQL (`ALTER ROLE ... RENAME`, `ALTER DATABASE ... RENAME`) и
+> бакет MinIO (`mc mv`/пересоздание), и только потом менять `.env`.
+
+> Старые бэкап-дампы хранят прежний префикс имени (`<старое>-*.dump`).
+> Новый glob ротации их не подхватит — удалить вручную, если не нужны.
 
 ---
 
-## 15. Эксплуатация и неполадки
+## 15. Автодеплой на каждый push (self-hosted runner) — опционально
+
+Чтобы не запускать `deploy.sh` руками, повесь его на GitHub Actions. Так как
+сервер за NAT (без белого IP), вместо «GitHub заходит по SSH» используем
+**self-hosted runner**: агент GitHub живёт НА сервере, держит исходящее
+соединение к GitHub и на каждый push в `main` сам запускает `deploy.sh`
+локально. Наружу ничего открывать не нужно, секреты деплоя в GitHub класть
+не нужно.
+
+Workflow'ы уже в репозиториях (`.github/workflows/ci.yml`, job `deploy`,
+`runs-on: [self-hosted, show-ring]`). Остаётся зарегистрировать раннер. Раннер
+привязан к **одному** репозиторию, а репо у нас два — значит ставим **два**
+раннера на этом же сервере (в разных папках), оба с меткой `show-ring`.
+
+### Установка раннера (повторить для каждого репо)
+
+На GitHub: **репозиторий → Settings → Actions → Runners → New self-hosted
+runner → Linux**. GitHub покажет команды с одноразовым токеном — выполни их
+на сервере. Схема (подставь ССЫЛКУ и ТОКЕН с той страницы):
+
+```bash
+# Раннер для бэкенда
+mkdir -p ~/actions-runner-backend && cd ~/actions-runner-backend
+curl -o actions-runner.tar.gz -L <ССЫЛКА_СО_СТРАНИЦЫ_GITHUB>
+tar xzf actions-runner.tar.gz
+./config.sh --url https://github.com/dmsk01/show-ring-backend \
+  --token <ТОКЕН_СО_СТРАНИЦЫ> --labels show-ring --unattended
+sudo ./svc.sh install     # как systemd-сервис (автозапуск после ребута)
+sudo ./svc.sh start
+```
+
+Повтори в `~/actions-runner-frontend` с URL/токеном репозитория
+`show-ring-frontend` (метка та же — `show-ring`).
+
+> `--labels show-ring` обязателен: workflow ищет раннер именно по этой метке.
+> Раннер работает под твоим пользователем — у него уже есть доступ к Docker
+> (шаг 4) и к каталогам в `/opt`.
+
+### Как теперь выглядит обновление
+
+```bash
+git push        # со своей машины, в любой из двух репо
+```
+
+GitHub прогонит lint/test (в облаке), и если зелено — раннер на сервере сам
+выполнит `deploy.sh`. Прогресс виден во вкладке **Actions** репозитория.
+Параллельные деплои сериализуются (в `deploy.sh` стоит `flock`).
+
+### Если раннер отвалился
+```bash
+cd ~/actions-runner-backend && sudo ./svc.sh status   # статус сервиса
+sudo ./svc.sh start                                    # поднять заново
+```
+Ручной `deploy.sh` (шаг 14) работает всегда, независимо от раннера.
+
+---
+
+## 16. Эксплуатация и неполадки
 
 ```bash
 dc ps                          # статусы всех сервисов
@@ -435,10 +539,10 @@ sudo ufw allow OpenSSH && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp && sud
 
 # Код (HTTPS-вариант для публичных репозиториев)
 cd /opt
-sudo git clone https://github.com/dmsk01/show-ring-backend.git showtail
+sudo git clone https://github.com/dmsk01/show-ring-backend.git
 sudo git clone https://github.com/dmsk01/show-ring-frontend.git
-sudo chown -R $USER:$USER /opt/showtail /opt/show-ring-frontend
-cd /opt/showtail
+sudo chown -R $USER:$USER /opt/show-ring-backend /opt/show-ring-frontend
+cd /opt/show-ring-backend
 
 # Секреты
 cp .env.prod.example .env && chmod 600 .env
@@ -448,7 +552,7 @@ cp .env.prod.example .env && chmod 600 .env
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build
 
 # Админ + справочники + проверка
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m scripts.bootstrap_admin --email admin@showtail.example --password '...'
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m scripts.bootstrap_admin --email admin@show-ring.example --password '...'
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m scripts.seed_references
 curl -fsSL http://localhost/api/health
 ```
@@ -523,8 +627,8 @@ ngrok **терминируют TLS на своём edge** — браузер о�
 |---|---|---|
 | `DEBUG` | `false` | Secure-куки по HTTPS-туннелю работают (см. выше). |
 | `SECRET_KEY` | реальный, `openssl rand -hex 32` | `DEBUG=false` включает строгую проверку. |
-| `ALLOWED_HOSTS` | `["showtail.example.com"]` | Хостнейм туннеля. `TrustedHostMiddleware` (`app/main.py`) отбивает Host-инъекции; пустой = пускает любой Host. |
-| `FRONTEND_BASE_URL` | `https://showtail.example.com` | На него строятся ссылки в письмах (`app/services/auth.py`). Важно, если шлёшь письма. |
+| `ALLOWED_HOSTS` | `["show-ring.example.com"]` | Хостнейм туннеля. `TrustedHostMiddleware` (`app/main.py`) отбивает Host-инъекции; пустой = пускает любой Host. |
+| `FRONTEND_BASE_URL` | `https://show-ring.example.com` | На него строятся ссылки в письмах (`app/services/auth.py`). Важно, если шлёшь письма. |
 
 После правок `.env` перезапусти api: `dc up -d api`.
 
@@ -539,21 +643,21 @@ sudo apt-get update && sudo apt-get install -y cloudflared
 **2. Логин и создание туннеля (один раз):**
 ```bash
 cloudflared tunnel login                 # откроет браузер, выбери свой домен
-cloudflared tunnel create showtail
+cloudflared tunnel create show-ring
 ```
 **3. Конфиг `~/.cloudflared/config.yml`:**
 ```yaml
-tunnel: showtail
+tunnel: show-ring
 credentials-file: /home/<user>/.cloudflared/<TUNNEL-UUID>.json
 ingress:
-  - hostname: showtail.example.com
+  - hostname: show-ring.example.com
     service: http://localhost:80
   - service: http_status:404
 ```
 **4. Привязать DNS и запустить:**
 ```bash
-cloudflared tunnel route dns showtail showtail.example.com
-cloudflared tunnel run showtail
+cloudflared tunnel route dns show-ring show-ring.example.com
+cloudflared tunnel run show-ring
 ```
 **5. Автозапуск как сервис (чтобы жил после закрытия SSH):**
 ```bash
