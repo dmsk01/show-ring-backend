@@ -88,9 +88,13 @@ EXPOSE 8000
 
 # Healthcheck для api-роли. Worker эту проверку не использует
 # (compose-команда переопределяет healthcheck'и в worker-сервисе).
-# /health должен возвращать 200 и не блокировать долго.
+# Бьём в /health/ready (а НЕ /health): это бинарный readiness-probe —
+# 200 если PG жив, 503 если БД down (app/routers/health.py). /health
+# всегда отдаёт 200 (детальный отчёт для дашборда) и вдобавок 307-редиректит
+# /health → /health/, из-за чего `curl -f` «проходил» на редиректе, не
+# проверяя живость. /health/ready — точный путь, без редиректа.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+    CMD curl -fsS http://localhost:8000/health/ready || exit 1
 
 # CMD по умолчанию — uvicorn. docker-compose.yml переопределяет на
 # alembic upgrade для migrate-контейнера и на python -m worker.main
