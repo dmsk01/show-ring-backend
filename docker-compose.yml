@@ -168,6 +168,10 @@ services:
       # сид-юзеров в Playwright global setup не ловила экспоненциальный бан.
       AUTH_LOGIN_RATE_LIMIT: ${AUTH_LOGIN_RATE_LIMIT:-5}
       AUTH_LOGIN_RATE_WINDOW_SECONDS: ${AUTH_LOGIN_RATE_WINDOW_SECONDS:-60}
+      # Rate-limit регистрации. Дефолт 3/3600 — прод-безопасно; dev/e2e-стек
+      # поднимает AUTH_REGISTER_RATE_LIMIT (все запросы с одного IP шлюза).
+      AUTH_REGISTER_RATE_LIMIT: ${AUTH_REGISTER_RATE_LIMIT:-3}
+      AUTH_REGISTER_RATE_WINDOW_SECONDS: ${AUTH_REGISTER_RATE_WINDOW_SECONDS:-3600}
     depends_on:
       migrate:
         condition: service_completed_successfully

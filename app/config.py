@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # продолжает ловить 429.
     auth_login_rate_limit: int = 5
     auth_login_rate_window_seconds: int = 60
+    # Rate-limit регистрации (/auth/register). Дефолт = прод-значение 3/3600
+    # (анти-спам регистраций). На dev все запросы идут через Next-прокси с
+    # одного IP docker-шлюза, а e2e (auth.spec) регистрирует юзера на каждом
+    # прогоне — поэтому dev/e2e-стек поднимает AUTH_REGISTER_RATE_LIMIT.
+    auth_register_rate_limit: int = 3
+    auth_register_rate_window_seconds: int = 3600
     # ИСПРАВЛЕНО: добавлен явный флаг debug — заменяет хардкод echo=True
     # и используется для отключения dev-эндпоинтов в проде.
     debug: bool = False

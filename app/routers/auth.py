@@ -139,8 +139,8 @@ async def register(
     # комментария, чтобы не зашумлять файл.
     await check_rate_limit(
         request,
-        limit=3,
-        window=3600,
+        limit=settings.auth_register_rate_limit,
+        window=settings.auth_register_rate_window_seconds,
         redis=redis,
         fail_closed=True,
     )

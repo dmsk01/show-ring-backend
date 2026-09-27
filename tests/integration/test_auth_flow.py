@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import uuid
 
+from app.config import settings
+
 PASSWORD = "secret123"  # 8–128 символов (validate_password)
 
 
@@ -68,9 +70,13 @@ async def test_register_login_me_and_refresh_rotation(client):
     assert r.status_code == 401  # reuse отозванного refresh
 
 
-async def test_login_is_rate_limited(client):
+async def test_login_is_rate_limited(client, monkeypatch):
     # /auth/login: limit=5 / 60s. Redis flushed на старте теста, так что
     # счётчик чистый. После исчерпания лимита — 429 с Retry-After.
+    # Лимит пиним явно: settings читает .env, а dev-.env поднимает
+    # AUTH_LOGIN_RATE_LIMIT для e2e — тест проверяет механизм, не окружение.
+    monkeypatch.setattr(settings, "auth_login_rate_limit", 5)
+    monkeypatch.setattr(settings, "auth_login_rate_window_seconds", 60)
     email = _email()
     statuses = []
     for _ in range(8):
@@ -82,6 +88,24 @@ async def test_login_is_rate_limited(client):
             assert "Retry-After" in r.headers
             break
     assert 429 in statuses, f"ожидали 429 в пределах 8 попыток, получили {statuses}"
+
+
+async def test_register_is_rate_limited(client, monkeypatch):
+    # /auth/register: лимит из settings (прод-дефолт 3 / 3600s). Пиним явно
+    # по той же причине, что и в test_login_is_rate_limited.
+    monkeypatch.setattr(settings, "auth_register_rate_limit", 3)
+    monkeypatch.setattr(settings, "auth_register_rate_window_seconds", 3600)
+    statuses = []
+    for _ in range(5):
+        r = await client.post(
+            "/auth/register", json={"email": _email(), "password": PASSWORD}
+        )
+        statuses.append(r.status_code)
+        if r.status_code == 429:
+            assert "Retry-After" in r.headers
+            break
+    assert statuses[:3] == [200, 200, 200], statuses
+    assert statuses[-1] == 429, f"ожидали 429 на 4-й регистрации, получили {statuses}"
 
 
 async def test_register_user_enumeration_safe(client):
