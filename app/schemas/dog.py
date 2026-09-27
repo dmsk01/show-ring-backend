@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -113,6 +114,42 @@ class DogShort(BaseModel):
     date_of_birth: date | None
     breed_id: uuid.UUID
     rkf_number: str | None
+
+
+class DogRelative(BaseModel):
+    """
+    Родственник в списках «Потомки»/«Сибсы». Родство не хранится отдельно —
+    выводится из father_id/mother_id, поэтому всегда согласовано с родословной.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    sex: SexEnum
+    date_of_birth: date | None = None
+    breed_id: uuid.UUID
+    rkf_number: str | None = None
+    owner_id: uuid.UUID | None = None
+    avatar_file_id: uuid.UUID | None = None
+
+
+class DogDescendant(DogRelative):
+    # Второй родитель потомка (для «от кого»): мать, если собака — отец, и
+    # наоборот. None — второй родитель неизвестен.
+    other_parent: DogRef | None = None
+
+
+class DogSibling(DogRelative):
+    # full — оба родителя общие; half — только один (shared_parent говорит какой).
+    kind: Literal["full", "half"]
+    shared_parent: Literal["father", "mother", "both"]
+
+
+class DescendantLink(BaseModel):
+    """POST /dogs/{id}/descendants — сделать существующую собаку потомком."""
+
+    child_id: uuid.UUID
 
 
 class PedigreeNode(BaseModel):

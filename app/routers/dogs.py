@@ -17,11 +17,14 @@ from app.models.user import User
 from app.repositories import dog as repo
 from app.repositories import result as result_repo
 from app.schemas.dog import (
+    DescendantLink,
     DogCreate,
+    DogDescendant,
     DogImageCreate,
     DogPage,
     DogResponse,
     DogUpdate,
+    DogSibling,
     PedigreeNode,
 )
 from app.schemas.result import DogTitleResponse
@@ -47,12 +50,13 @@ def _raise_for_error(err: ValueError) -> NoReturn:
         raise HTTPException(404, code)
     if code == "forbidden":
         raise HTTPException(403, code)
-    if code in ("duplicate_unique_field",):
+    if code in ("duplicate_unique_field", "parent_already_set"):
         raise HTTPException(409, code)
     if code in (
         "father_must_be_male",
         "mother_must_be_female",
         "self_parent_forbidden",
+        "pedigree_cycle",
     ):
         raise HTTPException(422, code)
     raise HTTPException(400, code)
@@ -256,6 +260,92 @@ async def get_pedigree(
     if node is None:
         raise HTTPException(404, "Собака не найдена")
     return node
+
+
+@router.get(
+    "/{dog_id}/descendants",
+    response_model=list[DogDescendant],
+    summary="Потомки собаки (одно поколение)",
+    description=(
+        "Собаки, у которых эта собака указана отцом или матерью. Выводится "
+        "из родословной (father_id/mother_id), отдельно не хранится."
+    ),
+)
+async def list_descendants(dog_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    try:
+        return await svc.list_descendants(db, dog_id)
+    except ValueError as e:
+        _raise_for_error(e)
+
+
+@router.post(
+    "/{dog_id}/descendants",
+    response_model=DogDescendant,
+    status_code=status.HTTP_201_CREATED,
+    summary="Добавить потомка",
+    description=(
+        "Проставляет эту собаку отцом (кобель) или матерью (сука) собаке "
+        "child_id. Право — на управление потомком. 409 parent_already_set, "
+        "если у потомка уже другой родитель этого пола; 422 pedigree_cycle, "
+        "если потомок — предок этой собаки. Повторная привязка идемпотентна."
+    ),
+)
+async def add_descendant(
+    dog_id: uuid.UUID,
+    body: DescendantLink,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        return await svc.add_descendant(
+            db,
+            parent_id=dog_id,
+            child_id=body.child_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
+@router.delete(
+    "/{dog_id}/descendants/{child_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Убрать потомка",
+    description="Очищает у потомка ссылку на эту собаку (отца/мать). Сам потомок не удаляется.",
+)
+async def remove_descendant(
+    dog_id: uuid.UUID,
+    child_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.remove_descendant(
+            db,
+            parent_id=dog_id,
+            child_id=child_id,
+            requester_id=user.id,
+            is_admin=_is_admin(user),
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+
+
+@router.get(
+    "/{dog_id}/siblings",
+    response_model=list[DogSibling],
+    summary="Сибсы собаки",
+    description=(
+        "Собаки с общим известным родителем: kind=full — оба родителя общие, "
+        "half — один (shared_parent). Только чтение: меняются через родителей."
+    ),
+)
+async def list_siblings(dog_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    try:
+        return await svc.list_siblings(db, dog_id)
+    except ValueError as e:
+        _raise_for_error(e)
 
 
 @router.get(

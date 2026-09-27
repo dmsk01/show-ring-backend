@@ -155,6 +155,73 @@ PEDIGREE_CTE = text(
 )
 
 
+async def is_ancestor(
+    db: AsyncSession, candidate_id: uuid.UUID, dog_id: uuid.UUID
+) -> bool:
+    """
+    True, если candidate_id — предок dog_id (на любой глубине). Тот же
+    рекурсивный подъём по father_id/mother_id, что и в PEDIGREE_CTE, но
+    без лимита поколений: нужен для защиты от цикла при привязке потомка
+    (потомок не может оказаться предком своего родителя).
+    """
+    stmt = text(
+        """
+        WITH RECURSIVE ancestors AS (
+            SELECT father_id, mother_id, ARRAY[id] AS path
+            FROM dogs WHERE id = :dog_id
+            UNION ALL
+            SELECT d.father_id, d.mother_id, a.path || d.id
+            FROM dogs d
+            JOIN ancestors a ON d.id IN (a.father_id, a.mother_id)
+            WHERE NOT d.id = ANY(a.path)
+        )
+        SELECT EXISTS (
+            SELECT 1 FROM ancestors
+            WHERE :candidate_id IN (father_id, mother_id)
+        )
+        """
+    )
+    result = await db.execute(
+        stmt, {"dog_id": dog_id, "candidate_id": candidate_id}
+    )
+    return bool(result.scalar_one())
+
+
+# --- Родственники: потомки и сибсы (выводятся из father_id/mother_id) ---
+
+
+async def list_children(db: AsyncSession, parent_id: uuid.UUID) -> Sequence[Dog]:
+    """Прямые потомки: собаки, у которых parent_id — отец или мать."""
+    stmt = (
+        select(Dog)
+        .where((Dog.father_id == parent_id) | (Dog.mother_id == parent_id))
+        .order_by(Dog.date_of_birth.desc().nulls_last(), Dog.name)
+    )
+    return (await db.execute(stmt)).scalars().all()
+
+
+async def list_siblings(db: AsyncSession, dog: Dog) -> Sequence[Dog]:
+    """
+    Сибсы: собаки с хотя бы одним общим ИЗВЕСТНЫМ родителем (NULL = NULL
+    в SQL не совпадает, так что «оба родителя неизвестны» сибсами не
+    считаются). Полно-/полукровность определяет сервис.
+    """
+    conds = []
+    if dog.father_id is not None:
+        conds.append(Dog.father_id == dog.father_id)
+    if dog.mother_id is not None:
+        conds.append(Dog.mother_id == dog.mother_id)
+    if not conds:
+        return []
+    cond = conds[0] if len(conds) == 1 else (conds[0] | conds[1])
+    stmt = (
+        select(Dog)
+        .where(cond, Dog.id != dog.id)
+        .order_by(Dog.date_of_birth.desc().nulls_last(), Dog.name)
+    )
+    return (await db.execute(stmt)).scalars().all()
+
+
 async def load_pedigree_flat(
     db: AsyncSession, root_id: uuid.UUID, max_generations: int = 3
 ) -> list[dict]:
