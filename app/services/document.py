@@ -126,6 +126,8 @@ def _user_display(user: User | None) -> str | None:
     """
     if user is None:
         return None
+    # Телефон НЕ подставляем: документы публичные, а номер — логин для
+    # SMS-входа. У телефонного юзера без ФИО/email — None («—» в шаблоне).
     return user.email
 
 

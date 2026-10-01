@@ -27,6 +27,8 @@ def full_name(user: Any | None) -> str:
         joined = " ".join(p.strip() for p in parts if p and p.strip())
         if joined:
             return joined
+    # Телефон сюда НЕ подставляем: имя попадает в публичные документы
+    # (каталоги, дипломы) и авторов блога, а номер — логин для SMS-входа.
     return getattr(user, "email", "") or ""
 
 

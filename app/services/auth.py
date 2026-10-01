@@ -305,6 +305,11 @@ async def request_email_change(
     # 3. pending_email + одноразовый токен (TTL 24ч) в общей таблице
     #    email_verification_tokens.
     user.pending_email = new_email
+    # Ссылки прошлых запросов смены больше не действуют: confirm применяет
+    # текущий pending_email, а не адрес, на который ушла старая ссылка.
+    await user_repo.invalidate_email_tokens(
+        db, user.id, EmailVerificationToken.PURPOSE_EMAIL_CHANGE
+    )
     raw_token, token_hash = generate_verification_token()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     await user_repo.create_email_verification_token(
@@ -330,13 +335,16 @@ async def request_email_change(
     # письмо на новый адрес владельцу-жертве ничего не скажет (а отзыв
     # refresh-токенов при confirm ему не мешает: пароль у него есть).
     # Стандартная практика: «если это были не вы — смените пароль».
-    await enqueue_transactional_email(
-        db,
-        user_id=user.id,
-        to_email=user.email,
-        template_name="email_change_notice",
-        context={"new_email": new_email},
-    )
+    # Старого адреса может не быть (телефонный пользователь с паролем,
+    # не подтвердивший почту) — тогда уведомлять некого.
+    if user.email:
+        await enqueue_transactional_email(
+            db,
+            user_id=user.id,
+            to_email=user.email,
+            template_name="email_change_notice",
+            context={"new_email": new_email},
+        )
     await audit_repo.record_security_event(
         db,
         user_id=user.id,
@@ -442,13 +450,16 @@ async def change_password(
 
     user.hashed_password = hash_password(new_password)
     await user_repo.revoke_all_refresh_tokens_for_user(db, user.id)
-    await enqueue_transactional_email(
-        db,
-        user_id=user.id,
-        to_email=user.email,
-        template_name="password_changed",
-        context={},
-    )
+    # У телефонного пользователя, чья почта ещё не подтверждена, адреса
+    # нет — письмо-уведомление некуда слать.
+    if user.email:
+        await enqueue_transactional_email(
+            db,
+            user_id=user.id,
+            to_email=user.email,
+            template_name="password_changed",
+            context={},
+        )
     await audit_repo.record_security_event(
         db,
         user_id=user.id,

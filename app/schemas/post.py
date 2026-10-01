@@ -102,7 +102,9 @@ def build_author(user: Any | None) -> Author:
     if user is None:
         return Author(name="", avatar_url="")
     avatar = f"/files/{user.avatar_file_id}" if user.avatar_file_id else ""
-    return Author(name=full_name(user) or user.email, avatar_url=avatar)
+    # full_name уже падает на email; у телефонного юзера без ФИО и почты —
+    # пустая строка (name: str), номер публично не показываем.
+    return Author(name=full_name(user), avatar_url=avatar)
 
 
 def to_card(post: Post) -> PostCard:
