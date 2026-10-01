@@ -330,13 +330,16 @@ async def request_email_change(
     # письмо на новый адрес владельцу-жертве ничего не скажет (а отзыв
     # refresh-токенов при confirm ему не мешает: пароль у него есть).
     # Стандартная практика: «если это были не вы — смените пароль».
-    await enqueue_transactional_email(
-        db,
-        user_id=user.id,
-        to_email=user.email,
-        template_name="email_change_notice",
-        context={"new_email": new_email},
-    )
+    # Старого адреса может не быть (телефонный пользователь с паролем,
+    # не подтвердивший почту) — тогда уведомлять некого.
+    if user.email:
+        await enqueue_transactional_email(
+            db,
+            user_id=user.id,
+            to_email=user.email,
+            template_name="email_change_notice",
+            context={"new_email": new_email},
+        )
     await audit_repo.record_security_event(
         db,
         user_id=user.id,
@@ -442,13 +445,16 @@ async def change_password(
 
     user.hashed_password = hash_password(new_password)
     await user_repo.revoke_all_refresh_tokens_for_user(db, user.id)
-    await enqueue_transactional_email(
-        db,
-        user_id=user.id,
-        to_email=user.email,
-        template_name="password_changed",
-        context={},
-    )
+    # У телефонного пользователя, чья почта ещё не подтверждена, адреса
+    # нет — письмо-уведомление некуда слать.
+    if user.email:
+        await enqueue_transactional_email(
+            db,
+            user_id=user.id,
+            to_email=user.email,
+            template_name="password_changed",
+            context={},
+        )
     await audit_repo.record_security_event(
         db,
         user_id=user.id,

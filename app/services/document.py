@@ -126,7 +126,8 @@ def _user_display(user: User | None) -> str | None:
     """
     if user is None:
         return None
-    return user.email
+    # Телефонный пользователь живёт без email — fallback на номер.
+    return user.email or user.phone
 
 
 # ---------------------------------------------------------------------

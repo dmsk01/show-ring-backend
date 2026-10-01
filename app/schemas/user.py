@@ -73,6 +73,10 @@ class UserResponse(BaseModel):
     is_active: bool
     is_email_verified: bool
     is_phone_verified: bool
+    # Есть ли пароль (вход по почте подключён). Сам хеш наружу не отдаём.
+    has_password: bool
+    # Адрес, ожидающий подтверждения по ссылке (смена или подключение почты).
+    pending_email: str | None = None
     roles: list[RoleResponse]
     created_at: datetime
 
@@ -131,6 +135,10 @@ class TokenResponse(BaseModel):
     access_token: str | None = None
     refresh_token: str | None = None
     token_type: str
+    # True, если аккаунт создан этим входом (phone-OTP find-or-create).
+    # Клиент ведёт нового пользователя дозаполнить профиль. Владение
+    # номером к этому моменту доказано — это не user enumeration.
+    is_new_user: bool = False
 
 
 class RefreshRequest(BaseModel):
@@ -146,6 +154,34 @@ class PhoneVerifyCodeRequest(BaseModel):
     phone: E164Phone
     # Только цифры; длина с запасом под настройку otp_code_length (4–8).
     code: str = Field(pattern=r"^\d{4,8}$")
+
+
+class EmailLoginCreate(BaseModel):
+    # Подключение входа по почте к телефонному аккаунту. Вместо текущего
+    # пароля (его нет) — свежий OTP-код на номер аккаунта (re-auth).
+    email: EmailStr
+    password: str
+    code: str = Field(pattern=r"^\d{4,8}$")
+
+    @field_validator("password")
+    @classmethod
+    def validate_pwd(cls, v: str) -> str:
+        validate_password(v)
+        return v
+
+
+class AuthMethodItem(BaseModel):
+    id: str
+    sign_in: bool
+    sign_up: bool
+
+
+class AuthMethodsResponse(BaseModel):
+    # Метод по умолчанию на экранах входа/регистрации.
+    primary: str
+    # Каждый аккаунт должен иметь подтверждённый телефон.
+    phone_required: bool
+    methods: list[AuthMethodItem]
 
 
 class UserProfileResponse(BaseModel):

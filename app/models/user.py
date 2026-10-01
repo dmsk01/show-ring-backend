@@ -97,6 +97,12 @@ class User(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def has_password(self) -> bool:
+        # Телефонный пользователь живёт без пароля, пока не подключит
+        # вход по почте. Читается UserResponse (from_attributes).
+        return self.hashed_password is not None
+
 
 class UserRole(Base):
     __tablename__ = "user_roles"

@@ -17,7 +17,10 @@ from app.repositories.user import (
 )
 from app.schemas.dog import DogPage, DogResponse
 from app.schemas.user import (
+    EmailLoginCreate,
     PasswordChange,
+    PhoneSendCodeRequest,
+    PhoneVerifyCodeRequest,
     PublicUserResponse,
     UserProfileResponse,
     UserProfileUpdate,
@@ -26,7 +29,15 @@ from app.schemas.user import (
     UserSocialsUpdate,
     UserUpdate,
 )
+from app.services.account_security import (
+    request_email_login,
+    send_link_phone_code,
+    send_reauth_code,
+    verify_link_phone,
+)
 from app.services.auth import change_password, request_email_change
+from app.services.otp_auth import OTPRateLimitedError
+from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
 
 # Отдельный логгер security-событий, чтобы можно было направлять в SIEM
 # на этапе 14 (см. app/services/auth.py — тот же канал).
@@ -118,6 +129,138 @@ async def change_user_password(
         user_agent=user_agent,
     )
     return {"message": "Пароль изменён"}
+
+
+# ---------------------------------------------------------------------
+# Способы входа: привязка телефона, подключение входа по почте.
+# OTP-ошибки кода — 400 (не 401), см. services/account_security.py.
+# ---------------------------------------------------------------------
+
+_CODE_SENT_RESPONSE = {"message": "Код отправлен"}
+
+
+async def _send_otp_or_http(coro) -> dict:
+    # Маппинг ошибок отправки — как у /auth/send-code.
+    try:
+        await coro
+    except OTPRateLimitedError:
+        raise HTTPException(status_code=429, detail="too_many_requests")
+    except SMSDeliveryError:
+        raise HTTPException(status_code=502, detail="sms_delivery_failed")
+    return _CODE_SENT_RESPONSE
+
+
+@router.post(
+    "/me/phone/send-code",
+    summary="Код для привязки телефона",
+    description=(
+        "Отправляет SMS-код на новый номер (E.164) для привязки к аккаунту. "
+        "409 phone_already_set — у аккаунта уже есть подтверждённый номер; "
+        "409 phone_taken — номер принадлежит другому аккаунту."
+    ),
+)
+async def send_link_phone_code_endpoint(
+    request: Request,
+    body: PhoneSendCodeRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    sms: SMSProvider = Depends(get_sms_provider),
+    current_user: User = Depends(get_current_user),
+):
+    await check_rate_limit(
+        request, limit=5, window=60, redis=redis, fail_closed=True
+    )
+    return await _send_otp_or_http(
+        send_link_phone_code(db, redis, sms, current_user, body.phone)
+    )
+
+
+@router.post(
+    "/me/phone/verify",
+    summary="Подтвердить привязку телефона",
+    description=(
+        "Проверяет код и записывает номер как подтверждённый. "
+        "400 code_expired / invalid_code; 409 phone_taken / phone_already_set."
+    ),
+)
+async def verify_link_phone_endpoint(
+    request: Request,
+    body: PhoneVerifyCodeRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    current_user: User = Depends(get_current_user),
+) -> UserResponse:
+    await check_rate_limit(
+        request, limit=10, window=60, redis=redis, fail_closed=True
+    )
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    user = await verify_link_phone(
+        db,
+        redis,
+        current_user,
+        body.phone,
+        body.code,
+        ip=ip,
+        user_agent=user_agent,
+    )
+    return UserResponse.model_validate(user)
+
+
+@router.post(
+    "/me/reauth/send-code",
+    summary="Код подтверждения действия",
+    description=(
+        "Отправляет SMS-код на подтверждённый номер аккаунта. Нужен для "
+        "действий, которые иначе требуют текущий пароль (подключение входа "
+        "по почте). 409 phone_not_set — номера нет."
+    ),
+)
+async def send_reauth_code_endpoint(
+    request: Request,
+    redis: Redis = Depends(get_redis),
+    sms: SMSProvider = Depends(get_sms_provider),
+    current_user: User = Depends(get_current_user),
+):
+    await check_rate_limit(
+        request, limit=5, window=60, redis=redis, fail_closed=True
+    )
+    return await _send_otp_or_http(send_reauth_code(redis, sms, current_user))
+
+
+@router.post(
+    "/me/email-login",
+    summary="Подключить вход по почте",
+    description=(
+        "Для аккаунта без email: задаёт пароль и отправляет ссылку "
+        "подтверждения на адрес. Требует код из /users/me/reauth/send-code. "
+        "Вход по почте работает после POST /auth/confirm-email-change. "
+        "409 email_already_set / email_taken; 400 code_expired / invalid_code."
+    ),
+)
+async def request_email_login_endpoint(
+    request: Request,
+    body: EmailLoginCreate,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    current_user: User = Depends(get_current_user),
+):
+    await check_rate_limit(
+        request, limit=5, window=3600, redis=redis, fail_closed=True
+    )
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    await request_email_login(
+        db,
+        redis,
+        current_user,
+        body.email,
+        body.password,
+        body.code,
+        ip=ip,
+        user_agent=user_agent,
+    )
+    return {"message": "Проверьте почту для подтверждения"}
 
 
 # УДАЛЕНО (bug_009 ultrareview): эндпоинт /users/admin/list

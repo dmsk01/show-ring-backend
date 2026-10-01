@@ -49,6 +49,18 @@ def _test_redis_url() -> str:
     return url.rstrip("/") + "/15"
 
 
+@pytest.fixture(autouse=True)
+def _email_registration_enabled(monkeypatch):
+    """Включить регистрацию по email для интеграционных тестов.
+
+    В проде она выключена (регистрация — только по телефону), но
+    большинство тестов создаёт пользователей через /auth/register как
+    самый короткий путь к аккаунту. Тест закрытого флага выключает его
+    сам (test_phone_primary_auth.py).
+    """
+    monkeypatch.setattr(settings, "auth_email_registration_enabled", True)
+
+
 @pytest_asyncio.fixture
 async def test_redis():
     client = Redis.from_url(_test_redis_url(), decode_responses=True)

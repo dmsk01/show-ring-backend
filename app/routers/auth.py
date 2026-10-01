@@ -24,7 +24,10 @@ from app.services.otp_auth import (
     verify_otp_code,
 )
 from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
+from app.services.auth_methods import enabled_auth_methods, primary_auth_method
 from app.schemas.user import (
+    AuthMethodItem,
+    AuthMethodsResponse,
     EmailChangeConfirm,
     PhoneSendCodeRequest,
     PhoneVerifyCodeRequest,
@@ -109,6 +112,12 @@ def _deliver_tokens(
     return tokens
 
 
+def _ensure_email_login_enabled() -> None:
+    # Email — дополнительный способ входа, может быть выключен флагом.
+    if not settings.auth_email_login_enabled:
+        raise HTTPException(status_code=403, detail="login_method_disabled")
+
+
 def _extract_refresh(request: Request, body: RefreshRequest) -> str:
     # Тело (мобильный клиент) → кука (веб). Кука читается всегда:
     # cookie-режим — дефолт, глобального флага больше нет.
@@ -118,10 +127,35 @@ def _extract_refresh(request: Request, body: RefreshRequest) -> str:
     return raw
 
 
+@router.get(
+    "/methods",
+    summary="Доступные способы входа и регистрации",
+    description=(
+        "Реестр способов аутентификации: клиент рисует экраны входа и "
+        "регистрации по нему. primary — способ по умолчанию; "
+        "phone_required — каждый аккаунт должен иметь подтверждённый телефон."
+    ),
+)
+async def auth_methods() -> AuthMethodsResponse:
+    return AuthMethodsResponse(
+        primary=primary_auth_method(),
+        phone_required=settings.auth_phone_required,
+        methods=[
+            AuthMethodItem(id=m.id, sign_in=m.sign_in, sign_up=m.sign_up)
+            for m in enabled_auth_methods()
+        ],
+    )
+
+
 @router.post(
     "/register",
-    summary="Регистрация пользователя",
-    description="Создаёт аккаунт и отправляет письмо с ссылкой для подтверждения email.",
+    summary="Регистрация по email (по умолчанию выключена)",
+    description=(
+        "Создаёт аккаунт и отправляет письмо с ссылкой для подтверждения "
+        "email. Основной способ регистрации — по телефону "
+        "(/auth/send-code + /auth/verify-code); регистрация по email "
+        "включается флагом AUTH_EMAIL_REGISTRATION_ENABLED, иначе 403."
+    ),
 )
 async def register(
     request: Request,
@@ -144,6 +178,12 @@ async def register(
         redis=redis,
         fail_closed=True,
     )
+    # Регистрация — только по телефону. Флаг проверяется ПОСЛЕ rate-limit:
+    # закрытый эндпоинт не должен становиться бесплатным для долбёжки.
+    if not settings.auth_email_registration_enabled:
+        raise HTTPException(
+            status_code=403, detail="registration_method_disabled"
+        )
     # ИСПРАВЛЕНО: ответ одинаков и для нового, и для уже существующего
     # email — это защита от перечисления учётных записей. Сервис
     # возвращает None в случае коллизии, мы это не светим наружу.
@@ -247,6 +287,7 @@ async def login(
         redis=redis,
         fail_closed=True,  # bug_247: см. /register
     )
+    _ensure_email_login_enabled()
     try:
         return _deliver_tokens(
             request, response, await login_user(db, body.email, body.password)
@@ -282,6 +323,7 @@ async def login_form(
         redis=redis,
         fail_closed=True,
     )
+    _ensure_email_login_enabled()
     try:
         # OAuth2 спецификация требует поле username — мапим его на email.
         return _deliver_tokens(
@@ -392,8 +434,8 @@ async def send_code(
         "Проверяет код из SMS (максимум 3 попытки, затем код сжигается). "
         "При первом входе создаёт пользователя по номеру. Возвращает "
         "access + refresh (по умолчанию — в httpOnly-куках; с заголовком "
-        "X-Token-Delivery: body — в теле). 400 — неверный код, 401 — код "
-        "истёк/исчерпан."
+        "X-Token-Delivery: body — в теле). is_new_user=true — аккаунт "
+        "создан этим входом. 400 — неверный код, 401 — код истёк/исчерпан."
     ),
 )
 async def verify_code(
@@ -407,7 +449,7 @@ async def verify_code(
         request, limit=10, window=60, redis=redis, fail_closed=True
     )
     try:
-        tokens = await verify_otp_code(db, redis, body.phone, body.code)
+        tokens, _ = await verify_otp_code(db, redis, body.phone, body.code)
     except OTPExpiredError:
         raise HTTPException(status_code=401, detail="code_expired")
     except OTPUserBlockedError:

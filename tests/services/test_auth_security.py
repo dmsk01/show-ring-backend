@@ -290,3 +290,31 @@ async def test_change_password_phone_only_user_403(monkeypatch):
             user_agent=None,
         )
     assert exc.value.status_code == 403
+
+
+async def test_change_password_without_email_skips_notice(monkeypatch):
+    """Телефонный пользователь с паролем, но без подтверждённой почты:
+    письмо-уведомление некуда слать — смена пароля не должна падать."""
+    user = _fake_user()
+    user.email = None
+    monkeypatch.setattr(
+        user_repo, "revoke_all_refresh_tokens_for_user", AsyncMock()
+    )
+    from app.repositories import security_audit as audit_repo
+
+    monkeypatch.setattr(audit_repo, "record_security_event", AsyncMock())
+    enqueue = AsyncMock()
+    monkeypatch.setattr(auth_service, "enqueue_transactional_email", enqueue)
+    session = _fake_session()
+
+    await auth_service.change_password(
+        session,
+        user,
+        "CorrectPass1",
+        "NewPass12345",
+        ip=None,
+        user_agent=None,
+    )
+
+    enqueue.assert_not_called()
+    session.commit.assert_awaited_once()

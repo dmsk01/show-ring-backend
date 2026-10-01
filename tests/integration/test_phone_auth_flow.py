@@ -95,7 +95,7 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     assert r1.status_code == 200
 
     # Снимаем cooldown (как будто прошла минута) и входим повторно.
-    await test_redis.delete(f"otp:cooldown:{phone}")
+    await test_redis.delete(f"otp:login:cooldown:{phone}")
     await client.post("/auth/send-code", json={"phone": phone})
     code2 = sms_capture.last_code()
     r2 = await client.post(

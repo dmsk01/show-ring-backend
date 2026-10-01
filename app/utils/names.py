@@ -27,7 +27,8 @@ def full_name(user: Any | None) -> str:
         joined = " ".join(p.strip() for p in parts if p and p.strip())
         if joined:
             return joined
-    return getattr(user, "email", "") or ""
+    # Телефонный пользователь живёт без email — тогда показываем номер.
+    return getattr(user, "email", None) or getattr(user, "phone", None) or ""
 
 
 def judge_display(user: Any | None) -> str:

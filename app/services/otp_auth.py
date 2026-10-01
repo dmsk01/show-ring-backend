@@ -1,13 +1,23 @@
 """
-Бизнес-логика входа по телефону с OTP-кодом.
+Бизнес-логика OTP-кодов по SMS: вход/регистрация по телефону, а также
+подтверждение чувствительных действий и привязка номера.
 
-Состояние OTP живёт в Redis (TTL делает коды самоистекающими):
-  otp:cooldown:{phone} — маркер «SMS уже отправлено» (SET NX EX, атомарно)
-  otp:code:{phone}     — SHA-256 кода (не сам код), TTL = otp_code_ttl_seconds
-  otp:attempts:{phone} — счётчик попыток ввода (INCR атомарен)
-  otp:daily:{phone}    — суточный счётчик отправок (анти SMS-pumping)
+Код выдаётся под конкретную цель (OTPPurpose) и субъект — код одной цели
+не принимается в другой. Субъект — то, к чему привязан код:
+  login      → номер телефона (вход/регистрация);
+  reauth     → user_id (код на номер аккаунта, замена текущего пароля);
+  link_phone → "{user_id}:{phone}" (код подходит только этому юзеру и
+               только к номеру, на который отправлен).
+
+Состояние живёт в Redis (TTL делает коды самоистекающими):
+  otp:{purpose}:cooldown:{phone}   — маркер «SMS уже отправлено» (SET NX EX)
+  otp:{purpose}:code:{subject}     — SHA-256 кода, TTL = otp_code_ttl_seconds
+  otp:{purpose}:attempts:{subject} — счётчик попыток ввода (INCR атомарен)
+  otp:daily:{phone}                — суточный счётчик отправок на номер,
+                                     ОБЩИЙ для всех целей (анти SMS-pumping)
 """
 
+import enum
 import logging
 import secrets
 
@@ -26,6 +36,19 @@ logger = logging.getLogger(__name__)
 security_logger = logging.getLogger("app.security")
 
 
+class OTPPurpose(str, enum.Enum):
+    login = "login"
+    reauth = "reauth"
+    link_phone = "link_phone"
+
+
+_SMS_TEXT = {
+    OTPPurpose.login: "Ваш код входа: {code}",
+    OTPPurpose.reauth: "Код подтверждения: {code}",
+    OTPPurpose.link_phone: "Код для привязки номера: {code}",
+}
+
+
 class OTPRateLimitedError(Exception):
     """Повторная отправка раньше cooldown / суточный потолок. → 429"""
 
@@ -42,16 +65,18 @@ class OTPUserBlockedError(Exception):
     """Код верный, но пользователь заблокирован (is_active=False). → 401"""
 
 
-def _cooldown_key(phone: str) -> str:
-    return f"otp:cooldown:{phone}"
+def _cooldown_key(purpose: OTPPurpose, phone: str) -> str:
+    # Cooldown на (цель, номер): только что вошедший по SMS пользователь
+    # может сразу запросить код подтверждения действия, не ловя 429.
+    return f"otp:{purpose.value}:cooldown:{phone}"
 
 
-def _code_key(phone: str) -> str:
-    return f"otp:code:{phone}"
+def _code_key(purpose: OTPPurpose, subject: str) -> str:
+    return f"otp:{purpose.value}:code:{subject}"
 
 
-def _attempts_key(phone: str) -> str:
-    return f"otp:attempts:{phone}"
+def _attempts_key(purpose: OTPPurpose, subject: str) -> str:
+    return f"otp:{purpose.value}:attempts:{subject}"
 
 
 def _daily_key(phone: str) -> str:
@@ -65,21 +90,36 @@ def _generate_code() -> str:
     return f"{secrets.randbelow(10 ** n):0{n}d}"
 
 
-async def send_otp_code(redis: Redis, sms: SMSProvider, phone: str) -> None:
+async def send_otp_code(
+    redis: Redis,
+    sms: SMSProvider,
+    phone: str,
+    *,
+    purpose: OTPPurpose = OTPPurpose.login,
+    subject: str | None = None,
+) -> None:
+    """Сгенерировать код цели purpose для subject и отправить SMS на phone.
+
+    subject по умолчанию — сам номер (цель login).
+    """
+    subject = subject or phone
+
     # 1. Cooldown: SET NX EX атомарен — из двух параллельных запросов
     #    SMS отправит ровно один.
     ok = await redis.set(
-        _cooldown_key(phone),
+        _cooldown_key(purpose, phone),
         "1",
         nx=True,
         ex=settings.otp_send_cooldown_seconds,
     )
     if not ok:
-        security_logger.info("otp_send_cooldown phone=%s", phone)
+        security_logger.info(
+            "otp_send_cooldown purpose=%s phone=%s", purpose.value, phone
+        )
         raise OTPRateLimitedError
 
-    # 2. Суточный потолок на номер. INCR атомарен; expire ставим только
-    #    первому инкременту — окно скользит от первой отправки.
+    # 2. Суточный потолок на номер (все цели). INCR атомарен; expire ставим
+    #    только первому инкременту — окно скользит от первой отправки.
     daily = await redis.incr(_daily_key(phone))
     if daily == 1:
         await redis.expire(_daily_key(phone), 86400)
@@ -91,68 +131,99 @@ async def send_otp_code(redis: Redis, sms: SMSProvider, phone: str) -> None:
     #    счётчик попыток обнуляется.
     code = _generate_code()
     await redis.set(
-        _code_key(phone), hash_token(code), ex=settings.otp_code_ttl_seconds
+        _code_key(purpose, subject),
+        hash_token(code),
+        ex=settings.otp_code_ttl_seconds,
     )
-    await redis.delete(_attempts_key(phone))
+    await redis.delete(_attempts_key(purpose, subject))
 
     # 4. Отправка. Сбой провайдера пробрасывается (роутер → 502);
     #    cooldown при этом остаётся — клиент не должен долбить ретраями.
-    await sms.send(phone, f"Ваш код входа: {code}")
+    await sms.send(phone, _SMS_TEXT[purpose].format(code=code))
 
     if settings.debug:
         # Dev-flow без SMS-шлюза: код в логе. В проде — никогда.
-        logger.info("[DEV] OTP for %s: %s", phone, code)
+        logger.info("[DEV] OTP %s for %s: %s", purpose.value, phone, code)
     else:
-        security_logger.info("otp_sent phone=%s", phone)
+        security_logger.info(
+            "otp_sent purpose=%s phone=%s", purpose.value, phone
+        )
 
 
-async def verify_otp_code(
-    db: AsyncSession, redis: Redis, phone: str, code: str
-) -> TokenResponse:
-    stored_hash = await redis.get(_code_key(phone))
+async def consume_otp_code(
+    redis: Redis, code: str, *, purpose: OTPPurpose, subject: str
+) -> None:
+    """Проверить код и сжечь его (одноразовый). Бросает OTPExpiredError /
+    OTPInvalidError. БД не трогает и ничего не коммитит."""
+    code_key = _code_key(purpose, subject)
+    attempts_key = _attempts_key(purpose, subject)
+
+    stored_hash = await redis.get(code_key)
     if stored_hash is None:
-        security_logger.info("otp_verify_no_code phone=%s", phone)
+        security_logger.info(
+            "otp_verify_no_code purpose=%s subject=%s", purpose.value, subject
+        )
         raise OTPExpiredError
 
     # Попытка регистрируется ДО сравнения: INCR атомарен, параллельные
     # запросы не получают «бесплатных» попыток.
-    attempts = await redis.incr(_attempts_key(phone))
+    attempts = await redis.incr(attempts_key)
     if attempts == 1:
         # Счётчик живёт не дольше кода — иначе «висячие» попытки
         # блокировали бы СЛЕДУЮЩИЙ код (его счётчик чистит send).
-        await redis.expire(_attempts_key(phone), settings.otp_code_ttl_seconds)
+        await redis.expire(attempts_key, settings.otp_code_ttl_seconds)
     if attempts > settings.otp_max_attempts:
-        await redis.delete(_code_key(phone), _attempts_key(phone))
-        security_logger.warning("otp_brute_force phone=%s", phone)
+        await redis.delete(code_key, attempts_key)
+        security_logger.warning(
+            "otp_brute_force purpose=%s subject=%s", purpose.value, subject
+        )
         raise OTPExpiredError
 
     # compare_digest: сравнение за константное время (timing attack).
     if not secrets.compare_digest(hash_token(code), stored_hash):
         if attempts >= settings.otp_max_attempts:
             # Последняя попытка истрачена — сжигаем код сразу.
-            await redis.delete(_code_key(phone), _attempts_key(phone))
-            security_logger.warning("otp_attempts_exhausted phone=%s", phone)
+            await redis.delete(code_key, attempts_key)
+            security_logger.warning(
+                "otp_attempts_exhausted purpose=%s subject=%s",
+                purpose.value,
+                subject,
+            )
         else:
             security_logger.info(
-                "otp_wrong_code phone=%s attempt=%s", phone, attempts
+                "otp_wrong_code purpose=%s subject=%s attempt=%s",
+                purpose.value,
+                subject,
+                attempts,
             )
         raise OTPInvalidError
 
     # Успех: код строго одноразовый. DEL атомарен и возвращает число
     # удалённых ключей — из двух параллельных верных запросов код
-    # «съест» ровно один, второй получит 401.
-    consumed = await redis.delete(_code_key(phone))
-    await redis.delete(_attempts_key(phone))
+    # «съест» ровно один, второй получит OTPExpiredError.
+    consumed = await redis.delete(code_key)
+    await redis.delete(attempts_key)
     if consumed == 0:
-        security_logger.warning("otp_verify_race phone=%s", phone)
+        security_logger.warning(
+            "otp_verify_race purpose=%s subject=%s", purpose.value, subject
+        )
         raise OTPExpiredError
+
+
+async def verify_otp_code(
+    db: AsyncSession, redis: Redis, phone: str, code: str
+) -> tuple[TokenResponse, bool]:
+    """Вход/регистрация по коду цели login. Возвращает (токены, is_new_user)."""
+    await consume_otp_code(redis, code, purpose=OTPPurpose.login, subject=phone)
 
     # Find-or-create: подтверждённый номер = аутентифицированный
     # пользователь; отдельного шага «регистрация» нет.
+    is_new_user = False
     user = await user_repo.get_user_by_phone(db, phone)
     if user is None:
         try:
             user = await user_repo.create_user_by_phone(db, phone)
+            is_new_user = True
             security_logger.info("otp_user_created user_id=%s", user.id)
         except IntegrityError:
             # Race двух параллельных verify: UNIQUE(phone) пропустил
@@ -172,4 +243,6 @@ async def verify_otp_code(
         user.is_phone_verified = True
 
     security_logger.info("otp_login_success user_id=%s", user.id)
-    return await issue_token_pair(db, user)
+    tokens = await issue_token_pair(db, user)
+    tokens.is_new_user = is_new_user
+    return tokens, is_new_user

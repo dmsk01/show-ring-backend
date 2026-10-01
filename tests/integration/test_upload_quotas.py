@@ -58,7 +58,7 @@ async def test_otp_sets_is_phone_verified(db_session, test_redis):
     """Успешный verify_otp_code выставляет is_phone_verified=True."""
     phone = f"+79{uuid.uuid4().int % 10**9:09d}"
     code = "123456"
-    await test_redis.set(f"otp:code:{phone}", hash_token(code))
+    await test_redis.set(f"otp:login:code:{phone}", hash_token(code))
 
     await otp_auth.verify_otp_code(db_session, test_redis, phone, code)
 

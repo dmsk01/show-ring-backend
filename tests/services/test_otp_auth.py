@@ -11,6 +11,7 @@ import pytest
 
 from app.config import settings
 from app.repositories import user as user_repo
+from app.schemas.user import TokenResponse
 from app.services import otp_auth
 from app.utils.security import hash_token
 
@@ -53,7 +54,7 @@ async def test_send_stores_hash_and_sends_sms():
     )
     stored = [
         c for c in redis.set.await_args_list
-        if c.args[0] == f"otp:code:{PHONE}"
+        if c.args[0] == f"otp:login:code:{PHONE}"
     ]
     assert stored[0].args[1] == hash_token(code)
     assert stored[0].kwargs["ex"] == settings.otp_code_ttl_seconds
@@ -96,6 +97,10 @@ def _db():
     return db
 
 
+def _tokens():
+    return TokenResponse(access_token="A", refresh_token="R", token_type="bearer")
+
+
 def _redis_with_code(attempts: int = 1):
     return _redis(
         get=AsyncMock(return_value=hash_token(CODE)),
@@ -127,7 +132,7 @@ async def test_verify_third_wrong_attempt_burns_code():
     with pytest.raises(otp_auth.OTPInvalidError):
         await otp_auth.verify_otp_code(_db(), redis, PHONE, "000000")
     redis.delete.assert_awaited_once_with(
-        f"otp:code:{PHONE}", f"otp:attempts:{PHONE}"
+        f"otp:login:code:{PHONE}", f"otp:login:attempts:{PHONE}"
     )
 
 
@@ -145,12 +150,16 @@ async def test_verify_success_existing_user(monkeypatch):
     monkeypatch.setattr(
         user_repo, "get_user_by_phone", AsyncMock(return_value=user)
     )
-    issue = AsyncMock(return_value="TOKENS")
+    issue = AsyncMock(return_value=_tokens())
     monkeypatch.setattr(otp_auth, "issue_token_pair", issue)
 
-    result = await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+    tokens, is_new_user = await otp_auth.verify_otp_code(
+        _db(), redis, PHONE, CODE
+    )
 
-    assert result == "TOKENS"
+    assert tokens.access_token == "A"
+    assert is_new_user is False
+    assert tokens.is_new_user is False
     issue.assert_awaited_once()
     redis.delete.assert_awaited()  # код одноразовый
 
@@ -164,12 +173,15 @@ async def test_verify_success_creates_missing_user(monkeypatch):
     create = AsyncMock(return_value=new_user)
     monkeypatch.setattr(user_repo, "create_user_by_phone", create)
     monkeypatch.setattr(
-        otp_auth, "issue_token_pair", AsyncMock(return_value="TOKENS")
+        otp_auth, "issue_token_pair", AsyncMock(return_value=_tokens())
     )
 
-    result = await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+    tokens, is_new_user = await otp_auth.verify_otp_code(
+        _db(), redis, PHONE, CODE
+    )
 
-    assert result == "TOKENS"
+    assert is_new_user is True
+    assert tokens.is_new_user is True
     create.assert_awaited_once()
 
 
@@ -193,3 +205,55 @@ async def test_verify_race_condition_raises_expired(monkeypatch):
 
     with pytest.raises(otp_auth.OTPExpiredError):
         await otp_auth.verify_otp_code(_db(), redis, PHONE, CODE)
+
+
+# ---------- цели OTP (purpose) ----------
+
+
+def _stored_code_keys(redis):
+    return [
+        c.args[0]
+        for c in redis.set.await_args_list
+        if ":code:" in c.args[0]
+    ]
+
+
+async def test_send_reauth_uses_purpose_and_subject_keys():
+    redis, sms = _redis(), _sms()
+    user_id = str(uuid4())
+
+    await otp_auth.send_otp_code(
+        redis, sms, PHONE, purpose=otp_auth.OTPPurpose.reauth, subject=user_id
+    )
+
+    # Код привязан к субъекту (user_id), cooldown — к (цели, номеру),
+    # суточный лимит — общий на номер.
+    assert _stored_code_keys(redis) == [f"otp:reauth:code:{user_id}"]
+    cooldown_key = redis.set.await_args_list[0].args[0]
+    assert cooldown_key == f"otp:reauth:cooldown:{PHONE}"
+    redis.incr.assert_awaited_once_with(f"otp:daily:{PHONE}")
+    # SMS уходит на номер, текст — под цель.
+    sent_phone, message = sms.send.await_args.args
+    assert sent_phone == PHONE
+    assert message.startswith("Код подтверждения:")
+
+
+async def test_consume_reads_only_its_purpose():
+    # Код цели login не принимается как reauth: читается ключ своей цели.
+    redis = _redis(get=AsyncMock(return_value=None))
+
+    with pytest.raises(otp_auth.OTPExpiredError):
+        await otp_auth.consume_otp_code(
+            redis, CODE, purpose=otp_auth.OTPPurpose.reauth, subject="u1"
+        )
+    redis.get.assert_awaited_once_with("otp:reauth:code:u1")
+
+
+async def test_consume_success_burns_code():
+    redis = _redis_with_code()
+
+    await otp_auth.consume_otp_code(
+        redis, CODE, purpose=otp_auth.OTPPurpose.link_phone, subject="u1:+7"
+    )
+
+    redis.delete.assert_any_await("otp:link_phone:code:u1:+7")
