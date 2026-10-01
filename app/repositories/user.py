@@ -147,6 +147,26 @@ async def get_email_verification_token_by_hash(
     return result.scalar_one_or_none()
 
 
+async def invalidate_email_tokens(
+    db: AsyncSession, user_id: UUID, purpose: str
+) -> int:
+    # Гасит все ещё не использованные токены цели purpose. Нужен при
+    # повторном запросе смены/подключения email: confirm применяет ТЕКУЩИЙ
+    # pending_email, и старая ссылка (на прежний, возможно ошибочный адрес)
+    # иначе подтвердила бы новый адрес без участия его владельца.
+    stmt = (
+        update(EmailVerificationToken)
+        .where(
+            EmailVerificationToken.user_id == user_id,
+            EmailVerificationToken.purpose == purpose,
+            EmailVerificationToken.used_at.is_(None),
+        )
+        .values(used_at=datetime.now(timezone.utc))
+    )
+    result = cast("CursorResult[Any]", await db.execute(stmt))
+    return result.rowcount or 0
+
+
 async def mark_email_token_used(db: AsyncSession, token_hash: str) -> int:
     # ИСПРАВЛЕНО: атомарный update с условием used_at IS NULL —
     # одновременные запросы не могут оба пройти. rowcount=0 значит

@@ -28,9 +28,10 @@ def test_full_name_falls_back_to_email_when_no_profile():
     assert full_name(_user("a@b.c", None)) == "a@b.c"
 
 
-def test_full_name_falls_back_to_phone_for_phone_only_user():
+def test_full_name_never_exposes_phone():
+    # Имя уходит в публичные документы — номер (логин SMS-входа) не светим.
     u = SimpleNamespace(email=None, phone="+79991234567", profile=None)
-    assert full_name(u) == "+79991234567"
+    assert full_name(u) == ""
 
 
 def test_full_name_falls_back_when_profile_empty():

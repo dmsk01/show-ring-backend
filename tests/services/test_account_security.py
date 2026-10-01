@@ -53,10 +53,14 @@ def side_effects(monkeypatch):
     audit = AsyncMock()
     email = AsyncMock()
     token = AsyncMock()
+    invalidate = AsyncMock(return_value=0)
     monkeypatch.setattr(audit_repo, "record_security_event", audit)
     monkeypatch.setattr(svc, "enqueue_transactional_email", email)
     monkeypatch.setattr(user_repo, "create_email_verification_token", token)
-    return MagicMock(audit=audit, email=email, token=token)
+    monkeypatch.setattr(user_repo, "invalidate_email_tokens", invalidate)
+    # По умолчанию адрес свободен; тесты занятости переопределяют.
+    monkeypatch.setattr(user_repo, "get_user_by_email", AsyncMock(return_value=None))
+    return MagicMock(audit=audit, email=email, token=token, invalidate=invalidate)
 
 
 # ---------- привязка телефона: отправка ----------
@@ -129,6 +133,20 @@ async def test_link_verify_success_sets_verified_phone(otp, side_effects):
     side_effects.audit.assert_awaited_once()
     assert side_effects.audit.await_args.kwargs["action"] == "phone_linked"
     db.commit.assert_awaited_once()
+
+
+async def test_link_verify_unique_race_on_flush_409(otp, side_effects):
+    # UPDATE users уходит на flush внутри записи аудита — UNIQUE срабатывает
+    # там, а не на commit. Должно быть 409, а не 500.
+    side_effects.audit.side_effect = IntegrityError("x", "y", Exception("dup"))
+    db = _db()
+
+    with pytest.raises(HTTPException) as exc:
+        await svc.verify_link_phone(db, "R", _user(), PHONE, CODE, ip=None, user_agent=None)
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "phone_taken"
+    db.rollback.assert_awaited_once()
 
 
 async def test_link_verify_unique_race_409(otp, side_effects):
@@ -204,6 +222,22 @@ async def test_email_login_taken_409(otp, side_effects, monkeypatch):
         )
 
     assert exc.value.detail == "email_taken"
+    otp.consume.assert_not_called()  # опечатка в адресе не сжигает код
+
+
+async def test_email_login_disabled_method_403(otp, side_effects, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "auth_email_login_enabled", False)
+
+    with pytest.raises(HTTPException) as exc:
+        await svc.request_email_login(
+            _db(), "R", _user(phone=PHONE, phone_verified=True),
+            "new@b.c", "Password123", CODE, ip=None, user_agent=None,
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "login_method_disabled"
 
 
 async def test_email_login_success_sets_password_and_pending(otp, side_effects, monkeypatch):
@@ -224,4 +258,6 @@ async def test_email_login_success_sets_password_and_pending(otp, side_effects, 
     # Ссылка уходит на НОВЫЙ адрес, токен — цели смены email.
     assert side_effects.email.await_args.kwargs["to_email"] == "new@b.c"
     assert side_effects.token.await_args.kwargs["purpose"] == "email_change"
+    # Старые ссылки (адрес с опечаткой) погашены — иначе подтвердили бы новый адрес.
+    side_effects.invalidate.assert_awaited_once_with(db, user.id, "email_change")
     db.commit.assert_awaited_once()

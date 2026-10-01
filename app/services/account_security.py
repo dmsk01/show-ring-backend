@@ -115,15 +115,17 @@ async def verify_link_phone(
 
     user.phone = phone
     user.is_phone_verified = True
-    await audit_repo.record_security_event(
-        db,
-        user_id=user.id,
-        action="phone_linked",
-        ip=ip,
-        user_agent=user_agent,
-        extra={"phone": phone},
-    )
+    # UPDATE users уходит в БД уже на flush внутри record_security_event —
+    # UNIQUE(phone) может сработать там, а не на commit. Ловим оба.
     try:
+        await audit_repo.record_security_event(
+            db,
+            user_id=user.id,
+            action="phone_linked",
+            ip=ip,
+            user_agent=user_agent,
+            extra={"phone": phone},
+        )
         await db.commit()
     except IntegrityError:
         # Номер заняли между отправкой кода и подтверждением (UNIQUE).
@@ -173,9 +175,20 @@ async def request_email_login(
     перезаписывает пароль и pending_email — так исправляется опечатка.
     Коммитит сам.
     """
+    if not settings.auth_email_login_enabled:
+        # Не даём настроить способ входа, которым потом нельзя войти.
+        raise HTTPException(status_code=403, detail="login_method_disabled")
     if user.email:
         # Почта уже есть — для смены есть PUT /users/me (с паролем).
         raise HTTPException(status_code=409, detail="email_already_set")
+
+    # Занятость — ДО сжигания кода: иначе опечатка в адресе стоила бы кода
+    # и минуты cooldown. 409 раскрывает занятость адреса так же, как
+    # PUT /users/me; перебор ограничен авторизацией, подтверждённым
+    # телефоном и rate-limit 5/час.
+    existing = await user_repo.get_user_by_email(db, email)
+    if existing is not None and existing.id != user.id:
+        raise HTTPException(status_code=409, detail="email_taken")
 
     # Re-auth свежим кодом: украденная access-кука без телефона не позволит
     # повесить на аккаунт чужую почту и пароль.
@@ -183,12 +196,13 @@ async def request_email_login(
         redis, code, purpose=OTPPurpose.reauth, subject=str(user.id)
     )
 
-    existing = await user_repo.get_user_by_email(db, email)
-    if existing is not None and existing.id != user.id:
-        raise HTTPException(status_code=409, detail="email_taken")
-
     user.hashed_password = hash_password(password)
     user.pending_email = email
+    # Ссылка прошлого запроса (возможно, на адрес с опечаткой) больше не
+    # действует: confirm применил бы НОВЫЙ pending_email по старой ссылке.
+    await user_repo.invalidate_email_tokens(
+        db, user.id, EmailVerificationToken.PURPOSE_EMAIL_CHANGE
+    )
     raw_token, token_hash = generate_verification_token()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     await user_repo.create_email_verification_token(
