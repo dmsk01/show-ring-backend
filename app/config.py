@@ -1,6 +1,6 @@
 import logging
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Аудит C1: заведомо небезопасные значения SECRET_KEY (пустой/дефолтные
@@ -186,6 +186,23 @@ class Settings(BaseSettings):
     # (debug=True) — громкий warning, но поднимаемся, чтобы не ломать
     # локальный стек. model_validator (а не field_validator), т.к. нужен
     # доступ к debug, объявленному после secret_key.
+    # docker-compose передаёт незаданные переменные пустой строкой
+    # (${SMTP_USERNAME:-}). Для опциональных секретов "" должно значить
+    # «не задано»: иначе aiosmtplib пытается AUTH с пустым логином, а
+    # get_sms_provider принимает пустой ключ за настоящий.
+    @field_validator(
+        "smtp_username",
+        "smtp_password",
+        "sms_api_key",
+        "internal_api_key",
+        mode="before",
+    )
+    @classmethod
+    def _empty_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @model_validator(mode="after")
     def _validate_secret_key(self) -> "Settings":
         key = self.secret_key.strip()

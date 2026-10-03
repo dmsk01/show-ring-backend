@@ -1,4 +1,5 @@
 import json
+from email.message import Message
 from typing import Any
 import bleach
 from fastapi import Request
@@ -32,6 +33,24 @@ SENSITIVE_FIELDS = frozenset(
 # passthrough привязан к маршруту (write-ручки блога, _is_raw_html_route):
 # вне него content чистится как обычный текст.
 RAW_HTML_FIELDS = frozenset({"content"})
+
+
+def _is_json_content_type(content_type: str) -> bool:
+    """Тот же разбор, что у FastAPI при чтении JSON-тела.
+
+    ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #10): раньше проверяли
+    startswith("application/json"), а FastAPI разбирает как JSON ещё и
+    "application/<что угодно>+json" и заголовок в любом регистре. Такой
+    запрос проходил мимо санитизации, и в БД попадал сырой HTML.
+    """
+    if not content_type:
+        return False
+    message = Message()
+    message["content-type"] = content_type
+    if message.get_content_maintype() != "application":
+        return False
+    subtype = message.get_content_subtype()
+    return subtype == "json" or subtype.endswith("+json")
 
 
 def _is_raw_html_route(request: Request) -> bool:
@@ -71,7 +90,7 @@ def _sanitize(
 class SanitizationMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         content_type = request.headers.get("content-type", "")
-        if not content_type.startswith("application/json"):
+        if not _is_json_content_type(content_type):
             return await call_next(request)
 
         body = await request.body()

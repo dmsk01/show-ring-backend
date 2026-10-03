@@ -183,8 +183,11 @@ async def send_email(
         username=settings.smtp_username,
         password=settings.smtp_password,
         use_tls=settings.smtp_use_tls,
-        # start_tls — отдельный механизм (STARTTLS), нужен для портов
-        # 587. На MailPit не нужно.
-        start_tls=False,
+        # use_tls — неявный TLS с первого байта (порт 465). Без него —
+        # STARTTLS-режим (порт 587): None = апгрейд до TLS, если сервер
+        # его объявляет (MailPit не объявляет — остаёмся на plaintext).
+        # ИСПРАВЛЕНО (ревью 2026-10-03): было жёсткое start_tls=False —
+        # на 587 пароль SMTP и письма шли бы открытым текстом.
+        start_tls=False if settings.smtp_use_tls else None,
     )
     logger.info("Email sent to %s: %s", to_email, subject)
