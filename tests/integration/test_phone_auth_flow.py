@@ -53,7 +53,7 @@ async def test_full_flow_creates_user_and_logs_in(client, sms_capture):
     # X-Token-Delivery: body — «мобильный» режим: токены в теле ответа.
     r = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": code},
+        json={"phone": phone, "code": code, "accept_terms": True, "personal_data_consent": True},
         headers={"X-Token-Delivery": "body"},
     )
     assert r.status_code == 200, r.text
@@ -89,7 +89,7 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     code = sms_capture.last_code()
     r1 = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": code},
+        json={"phone": phone, "code": code, "accept_terms": True, "personal_data_consent": True},
         headers={"X-Token-Delivery": "body"},
     )
     assert r1.status_code == 200
@@ -100,7 +100,7 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     code2 = sms_capture.last_code()
     r2 = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": code2},
+        json={"phone": phone, "code": code2, "accept_terms": True, "personal_data_consent": True},
         headers={"X-Token-Delivery": "body"},
     )
     assert r2.status_code == 200

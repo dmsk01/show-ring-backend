@@ -49,6 +49,11 @@ SocialURL = Annotated[str | None, AfterValidator(_validate_social_url)]
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
+    # Как у PhoneVerifyCodeRequest. Не обязательны: регистрация по email в
+    # проде выключена и служит тестам; недостающие согласия интерфейс
+    # запросит после входа (GET /users/me/consents → missing).
+    accept_terms: bool = False
+    personal_data_consent: bool = False
 
     @field_validator("password")
     @classmethod
@@ -154,6 +159,19 @@ class PhoneVerifyCodeRequest(BaseModel):
     phone: E164Phone
     # Только цифры; длина с запасом под настройку otp_code_length (4–8).
     code: str = Field(pattern=r"^\d{4,8}$")
+    # Две отдельные отметки: согласие на обработку ПДн оформляется отдельно
+    # от принятия Соглашения (ч. 1 ст. 9 152-ФЗ в ред. 156-ФЗ). Для нового
+    # номера обе обязательны (иначе 400 consent_required); для существующего
+    # аккаунта — записываются, если переданы.
+    accept_terms: bool = False
+    personal_data_consent: bool = False
+
+
+class AccountDeleteRequest(BaseModel):
+    # Подтверждение личности: код из /users/me/reauth/send-code, если у
+    # аккаунта подтверждён телефон; иначе текущий пароль.
+    code: str | None = Field(None, pattern=r"^\d{4,8}$")
+    password: str | None = None
 
 
 class EmailLoginCreate(BaseModel):

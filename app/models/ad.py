@@ -112,6 +112,16 @@ class AdCampaign(Base, TimestampMixin):
         index=True,
     )
 
+    # Сведения о рекламодателе для пометки на баннере (ст. 18.1 Закона
+    # «О рекламе»). Не равно advertiser_id: пользователь-агентство может
+    # вести кампанию от имени конечного рекламодателя.
+    advertiser_name: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    advertiser_inn: Mapped[str | None] = mapped_column(
+        String(12), nullable=True
+    )
+
     banners: Mapped[list["AdBanner"]] = relationship(
         back_populates="campaign",
         cascade="all, delete-orphan",
@@ -170,6 +180,9 @@ class AdBanner(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true"
     )
+    # Идентификатор рекламы (erid) из ОРД — ст. 18.1 Закона «О рекламе».
+    # Без него баннер не показывается (repositories/ad.pick_banner).
+    erid: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     # Денормализованные счётчики ради скорости дашборда. Source of truth
     # — таблица ad_events.

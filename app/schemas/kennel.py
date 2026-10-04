@@ -27,6 +27,9 @@ class KennelBase(BaseModel):
     # — конкретный тип, который asyncpg не умеет биндить в VARCHAR.
     # Простая строка с regex-валидацией покрывает наши требования.
     website: str | None = Field(None, max_length=255, pattern=r"^https?://.+")
+    # Согласие на распространение контактов (ст. 10.1 152-ФЗ). Без него
+    # contact_*/website видны только владельцу и админу.
+    contacts_public: bool = False
 
 
 class KennelCreate(KennelBase):
@@ -48,6 +51,7 @@ class KennelUpdate(BaseModel):
     # Простая строка с regex-валидацией покрывает наши требования.
     website: str | None = Field(None, max_length=255, pattern=r"^https?://.+")
     avatar_file_id: uuid.UUID | None = None
+    contacts_public: bool | None = None
 
 
 class KennelResponse(KennelBase):

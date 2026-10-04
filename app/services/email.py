@@ -27,6 +27,15 @@ from jinja2 import Environment, FileSystemLoader, TemplateNotFound, select_autoe
 from markupsafe import escape as _html_escape
 
 from app.config import settings
+from app.models.notification import EventType
+
+# Письма, которые человек получает по СВОЕЙ подписке, — в них обязательна
+# ссылка на отписку. Транзакционные (коды, смена пароля/email) — без неё.
+_SUBSCRIPTION_TEMPLATES = frozenset(e.value for e in EventType)
+
+
+def _unsubscribe_url() -> str:
+    return f"{settings.frontend_base_url.rstrip('/')}/dashboard/notifications"
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +131,16 @@ def render_email(
     # Это не идеальный конвертер, но лучше, чем пустой text/plain.
     if not text_body and html_body:
         text_body = _strip_html(html_body)
+
+    if template_name in _SUBSCRIPTION_TEMPLATES:
+        url = _unsubscribe_url()
+        html_body += (
+            '\n<p style="color:#888;font-size:12px">'
+            "Вы получили это письмо, потому что подписались на уведомления "
+            f'Show Ring. <a href="{_html_escape(url)}">Отписаться или '
+            "изменить подписки</a>.</p>"
+        )
+        text_body += f"\n\nОтписаться или изменить подписки: {url}"
 
     # module не используется напрямую, но make_module мог обновить
     # переменные globals — оставляем переменную чтобы линтер не ругался.

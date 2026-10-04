@@ -35,6 +35,7 @@ from app.models.user import RefreshToken
 from app.repositories import outbox as outbox_repo
 from app.schemas.task import TaskMessage
 from app.services import checkin_reminders
+from app.services.retention import purge_expired_personal_data
 from app.services.task_queues import QUEUE_FOR_TASK_TYPE as _QUEUE_FOR_TASK_TYPE
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,14 @@ async def start_scheduler() -> None:
         remind_missing_documents,
         CronTrigger(hour=10, minute=0),
         id="remind_missing_documents",
+        replace_existing=True,
+    )
+
+    # Ежедневно в 03:30 — сроки хранения ПДн из Политики конфиденциальности.
+    sched.add_job(
+        enforce_data_retention,
+        CronTrigger(hour=3, minute=30),
+        id="enforce_data_retention",
         replace_existing=True,
     )
 
@@ -359,3 +368,18 @@ async def remind_missing_documents() -> None:
             logger.info("Documents reminders sent: %d", sent)
         except Exception:  # noqa: BLE001 — cron не должен ронять шедулер
             logger.exception("remind_missing_documents failed")
+
+
+async def enforce_data_retention() -> None:
+    """Удаление/обезличивание ПДн с истёкшим сроком хранения (152-ФЗ)."""
+    async with _scheduler_lock("enforce_data_retention") as acquired:
+        if not acquired:
+            return
+        try:
+            async with async_session_factory() as db:
+                stats = await purge_expired_personal_data(
+                    db, now=datetime.now(timezone.utc)
+                )
+            logger.info("enforce_data_retention: %s", stats)
+        except Exception:  # noqa: BLE001 — cron не должен ронять шедулер
+            logger.exception("enforce_data_retention failed")

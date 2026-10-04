@@ -23,6 +23,8 @@ from app.services.otp_auth import (
     send_otp_code,
     verify_otp_code,
 )
+from app.services.consent import ConsentKind, ConsentRequiredError
+from app.services.consent import grant as consent_grant
 from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
 from app.services.auth_methods import enabled_auth_methods, primary_auth_method
 from app.schemas.user import (
@@ -190,7 +192,21 @@ async def register(
     # ИСПРАВЛЕНО: ответ одинаков и для нового, и для уже существующего
     # email — это защита от перечисления учётных записей. Сервис
     # возвращает None в случае коллизии, мы это не светим наружу.
-    await register_user(db, body.email, body.password)
+    user = await register_user(db, body.email, body.password)
+    if user is not None:
+        for kind, given in (
+            (ConsentKind.terms, body.accept_terms),
+            (ConsentKind.personal_data, body.personal_data_consent),
+        ):
+            if given:
+                await consent_grant(
+                    db,
+                    user.id,
+                    kind,
+                    ip=request.client.host if request.client else None,
+                    user_agent=request.headers.get("user-agent"),
+                )
+        await db.commit()
     return _REGISTER_RESPONSE
 
 
@@ -457,8 +473,26 @@ async def verify_code(
     await check_rate_limit(
         request, limit=10, window=60, redis=redis, fail_closed=True
     )
+    consents = tuple(
+        kind
+        for kind, given in (
+            (ConsentKind.terms, body.accept_terms),
+            (ConsentKind.personal_data, body.personal_data_consent),
+        )
+        if given
+    )
     try:
-        tokens, _ = await verify_otp_code(db, redis, body.phone, body.code)
+        tokens, _ = await verify_otp_code(
+            db,
+            redis,
+            body.phone,
+            body.code,
+            consents=consents,
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except ConsentRequiredError:
+        raise HTTPException(status_code=400, detail="consent_required")
     except OTPExpiredError:
         raise HTTPException(status_code=401, detail="code_expired")
     except OTPUserBlockedError:

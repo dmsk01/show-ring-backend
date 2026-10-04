@@ -50,7 +50,11 @@ async def _phone_login(client, sms, phone: str) -> tuple[dict, dict]:
     assert r.status_code == 200, r.text
     r = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": sms.last_code()},
+        json={
+            "phone": phone,
+            "code": sms.last_code(),
+            "accept_terms": True, "personal_data_consent": True,
+        },
         headers=BODY,
     )
     assert r.status_code == 200, r.text

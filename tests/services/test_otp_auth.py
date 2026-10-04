@@ -12,6 +12,7 @@ import pytest
 from app.config import settings
 from app.repositories import user as user_repo
 from app.schemas.user import TokenResponse
+from app.services import consent as consent_svc
 from app.services import otp_auth
 from app.utils.security import hash_token
 
@@ -175,14 +176,32 @@ async def test_verify_success_creates_missing_user(monkeypatch):
     monkeypatch.setattr(
         otp_auth, "issue_token_pair", AsyncMock(return_value=_tokens())
     )
+    grant = AsyncMock()
+    monkeypatch.setattr(consent_svc, "grant", grant)
 
     tokens, is_new_user = await otp_auth.verify_otp_code(
-        _db(), redis, PHONE, CODE
+        _db(), redis, PHONE, CODE, consents=consent_svc.ACCOUNT_KINDS
     )
 
     assert is_new_user is True
     assert tokens.is_new_user is True
     create.assert_awaited_once()
+    assert grant.await_count == len(consent_svc.ACCOUNT_KINDS)
+
+
+async def test_verify_new_user_without_consents_not_created(monkeypatch):
+    redis = _redis_with_code()
+    monkeypatch.setattr(
+        user_repo, "get_user_by_phone", AsyncMock(return_value=None)
+    )
+    create = AsyncMock()
+    monkeypatch.setattr(user_repo, "create_user_by_phone", create)
+
+    with pytest.raises(consent_svc.ConsentRequiredError):
+        await otp_auth.verify_otp_code(
+            _db(), redis, PHONE, CODE, consents=(consent_svc.ConsentKind.terms,)
+        )
+    create.assert_not_awaited()
 
 
 async def test_verify_blocked_user_rejected(monkeypatch):

@@ -99,6 +99,8 @@ class ClassifiedBase(BaseModel):
     city: str | None = Field(None, max_length=128)
     contact_phone: str | None = Field(None, max_length=32)
     contact_email: EmailStr | None = None
+    # Согласие на распространение контактов (ст. 10.1 152-ФЗ).
+    contacts_public: bool = False
 
     @model_validator(mode="after")
     def _check_price_kind(self) -> "ClassifiedBase":
@@ -133,6 +135,7 @@ class ClassifiedUpdate(BaseModel):
     city: str | None = Field(None, max_length=128)
     contact_phone: str | None = Field(None, max_length=32)
     contact_email: EmailStr | None = None
+    contacts_public: bool | None = None
     # Смена статуса — это явное действие "закрыть" / "переоткрыть",
     # сервис сам валидирует переходы.
     status: ClassifiedStatus | None = None

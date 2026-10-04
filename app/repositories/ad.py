@@ -104,7 +104,7 @@ async def find_banner_for_serve(
     - кампания active
     - spent < budget (бюджет не исчерпан)
     - дата сегодня в [date_start, date_end]
-    - баннер is_active=True
+    - баннер is_active=True и промаркирован (erid задан)
 
     Выбор случайного: ORDER BY random() LIMIT 1 — на dev-объёмах
     нормально. На проде с тысячами баннеров переходим на weighted
@@ -116,6 +116,8 @@ async def find_banner_for_serve(
         .where(
             AdBanner.placement == placement,
             AdBanner.is_active.is_(True),
+            # Немаркированную рекламу не показываем (ст. 18.1 Закона о рекламе).
+            AdBanner.erid.is_not(None),
             AdCampaign.status == CampaignStatus.active,
             AdCampaign.spent < AdCampaign.budget,
             AdCampaign.date_start <= today,

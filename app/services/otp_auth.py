@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.repositories import user as user_repo
 from app.schemas.user import TokenResponse
+from app.services import consent as consent_svc
 from app.services.auth import issue_token_pair
 from app.services.sms import SMSProvider
 from app.utils.security import hash_token
@@ -215,15 +216,32 @@ async def consume_otp_code(
 
 
 async def verify_otp_code(
-    db: AsyncSession, redis: Redis, phone: str, code: str
+    db: AsyncSession,
+    redis: Redis,
+    phone: str,
+    code: str,
+    *,
+    consents: tuple[consent_svc.ConsentKind, ...] = (),
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> tuple[TokenResponse, bool]:
-    """Вход/регистрация по коду цели login. Возвращает (токены, is_new_user)."""
+    """
+    Вход/регистрация по коду цели login. Возвращает (токены, is_new_user).
+
+    consents — отметки, поставленные в форме входа. Новый аккаунт создаётся
+    только со всеми обязательными (ConsentRequiredError). Проверка — ПОСЛЕ
+    сжигания кода: иначе по ответу без кода можно было бы узнать, занят ли
+    номер (enumeration). Фронт не даёт отправить форму без отметок, так что
+    код сгорает только у нестандартного клиента.
+    """
     await consume_otp_code(redis, code, purpose=OTPPurpose.login, subject=phone)
 
     # Find-or-create: подтверждённый номер = аутентифицированный
     # пользователь; отдельного шага «регистрация» нет.
     is_new_user = False
     user = await user_repo.get_user_by_phone(db, phone)
+    if user is None and not set(consent_svc.ACCOUNT_KINDS) <= set(consents):
+        raise consent_svc.ConsentRequiredError
     if user is None:
         try:
             user = await user_repo.create_user_by_phone(db, phone)
@@ -245,6 +263,9 @@ async def verify_otp_code(
     # Идемпотентно: повторный вход не плодит лишних UPDATE.
     if not user.is_phone_verified:
         user.is_phone_verified = True
+
+    for kind in consents:
+        await consent_svc.grant(db, user.id, kind, ip=ip, user_agent=user_agent)
 
     security_logger.info("otp_login_success user_id=%s", user.id)
     tokens = await issue_token_pair(db, user)

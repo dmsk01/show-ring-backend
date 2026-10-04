@@ -247,12 +247,18 @@ async def serve_banner(
     )
     if banner is None:
         return None
+    # pick_banner отбирает только промаркированные баннеры (erid задан).
+    assert banner.erid is not None
+    campaign = await banner.awaitable_attrs.campaign
     return ServeResponse(
         banner_id=banner.id,
         image_file_id=banner.image_file_id,
         target_url=banner.target_url,
         title=banner.title,
         placement=banner.placement,
+        erid=banner.erid,
+        advertiser_name=campaign.advertiser_name,
+        advertiser_inn=campaign.advertiser_inn,
     )
 
 

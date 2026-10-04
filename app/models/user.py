@@ -64,6 +64,11 @@ class User(Base, TimestampMixin):
         String(255), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(default=True)
+    # Момент удаления аккаунта самим пользователем (services/account_deletion).
+    # Строка остаётся (на неё ссылаются выставки и записи), но обезличена.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_email_verified: Mapped[bool] = mapped_column(default=False)
     # Телефон подтверждён вводом OTP-кода (основной способ верификации,
     # см. otp_auth.verify_otp_code). Вместе с is_email_verified образует

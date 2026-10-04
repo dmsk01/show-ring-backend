@@ -7,11 +7,11 @@ from __future__ import annotations
 import uuid
 from typing import Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_user_optional
 from app.models.kennel import Kennel
 from app.models.user import User
 from app.repositories import kennel as repo
@@ -21,7 +21,9 @@ from app.schemas.kennel import (
     KennelResponse,
     KennelUpdate,
 )
+from app.services import consent as consent_svc
 from app.services import kennel as svc
+from app.utils.public_contacts import CONTACT_FIELDS, hide_private_contacts
 
 router = APIRouter(prefix="/kennels", tags=["kennels"])
 
@@ -31,13 +33,40 @@ def _is_admin(user: User) -> bool:
 
 
 def _kennel_response(
-    kennel: Kennel, dogs_count: int, litters_count: int
+    kennel: Kennel,
+    dogs_count: int,
+    litters_count: int,
+    viewer: User | None,
 ) -> KennelResponse:
     """KennelResponse + агрегаты (is_verified тянется из ORM автоматически)."""
     resp = KennelResponse.model_validate(kennel)
     resp.dogs_count = dogs_count
     resp.litters_count = litters_count
-    return resp
+    # Сайт питомника тоже может указывать на человека — скрываем вместе
+    # с остальными контактами (ст. 10.1 152-ФЗ).
+    return hide_private_contacts(
+        resp,
+        owner_id=kennel.owner_id,
+        contacts_public=kennel.contacts_public,
+        viewer=viewer,
+        fields=(*CONTACT_FIELDS, "website"),
+    )
+
+
+async def _sync_contacts_consent(
+    db: AsyncSession, request: Request, kennel: Kennel, owner: User
+) -> None:
+    """Журнал согласия на распространение — по фактическому флагу."""
+    await consent_svc.set_publication_consent(
+        db,
+        kennel.owner_id,
+        consent_svc.ConsentKind.public_kennel_contacts,
+        kennel.id,
+        kennel.contacts_public,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    await db.commit()
 
 
 def _raise_for_error(err: ValueError) -> NoReturn:
@@ -58,6 +87,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
     summary="Создать питомник",
 )
 async def create_kennel(
+    request: Request,
     body: KennelCreate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -67,8 +97,10 @@ async def create_kennel(
         kennel = await svc.create_kennel(db, owner_id=user.id, **body.model_dump())
     except ValueError as e:
         _raise_for_error(e)
+    if kennel.contacts_public:
+        await _sync_contacts_consent(db, request, kennel, user)
     # Новый питомник — счётчики нулевые.
-    return _kennel_response(kennel, 0, 0)
+    return _kennel_response(kennel, 0, 0, user)
 
 
 @router.get(
@@ -84,6 +116,7 @@ async def list_kennels(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
     items = await repo.list_kennels(
         db, city=city, search=search, sort_by=sort_by, order=order,
@@ -94,7 +127,8 @@ async def list_kennels(
     counts = await repo.counts_by_kennels(db, [k.id for k in items])
     return KennelPage(
         items=[
-            _kennel_response(k, *counts.get(k.id, (0, 0))) for k in items
+            _kennel_response(k, *counts.get(k.id, (0, 0)), viewer)
+            for k in items
         ],
         total=total,
         page=page,
@@ -107,12 +141,16 @@ async def list_kennels(
     response_model=KennelResponse,
     summary="Страница питомника",
 )
-async def get_kennel(kennel_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_kennel(
+    kennel_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
+):
     obj = await repo.get_kennel(db, kennel_id)
     if obj is None:
         raise HTTPException(404, "Питомник не найден")
     counts = await repo.counts_by_kennels(db, [obj.id])
-    return _kennel_response(obj, *counts.get(obj.id, (0, 0)))
+    return _kennel_response(obj, *counts.get(obj.id, (0, 0)), viewer)
 
 
 @router.put(
@@ -121,23 +159,36 @@ async def get_kennel(kennel_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     summary="Обновить питомник",
 )
 async def update_kennel(
+    request: Request,
     kennel_id: uuid.UUID,
     body: KennelUpdate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    fields = body.model_dump(exclude_unset=True)
+    # Явный null не снимает флаг (колонка NOT NULL) — просто игнорируем.
+    if fields.get("contacts_public", False) is None:
+        fields.pop("contacts_public")
+    if fields.get("contacts_public") is True:
+        # Согласие на распространение даёт только сам субъект: админ может
+        # скрыть контакты, но не опубликовать их за владельца.
+        current = await repo.get_kennel(db, kennel_id)
+        if current is not None and current.owner_id != user.id:
+            raise HTTPException(403, "consent_owner_only")
     try:
         kennel = await svc.update_kennel(
             db,
             kennel_id=kennel_id,
             requester_id=user.id,
             is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
+            fields=fields,
         )
     except ValueError as e:
         _raise_for_error(e)
+    if "contacts_public" in fields:
+        await _sync_contacts_consent(db, request, kennel, user)
     counts = await repo.counts_by_kennels(db, [kennel.id])
-    return _kennel_response(kennel, *counts.get(kennel.id, (0, 0)))
+    return _kennel_response(kennel, *counts.get(kennel.id, (0, 0)), user)
 
 
 @router.delete(

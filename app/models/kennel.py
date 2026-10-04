@@ -63,6 +63,11 @@ class Kennel(Base, TimestampMixin):
     is_verified: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false"
     )
+    # Согласие владельца на распространение контактов (ст. 10.1 152-ФЗ).
+    # False → contact_* не отдаются посторонним (см. utils/public_contacts).
+    contacts_public: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
 
     # У Dog два FK на kennels (kennel_id — текущий питомник, breeder_kennel_id
     # — питомник-заводчик). Явно указываем foreign_keys, иначе SQLAlchemy не
