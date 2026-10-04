@@ -43,7 +43,7 @@ class ShowStaffAdd(BaseModel):
     phone: E164Phone | None = None
 
     @model_validator(mode="after")
-    def _exactly_one(self) -> "ShowStaffAdd":
+    def _exactly_one(self) -> ShowStaffAdd:
         if (self.email is None) == (self.phone is None):
             raise ValueError("Укажите email или телефон (ровно одно)")
         return self
@@ -65,7 +65,7 @@ class EntryCheckCreate(BaseModel):
     document_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
-    def _comment_on_failure(self) -> "EntryCheckCreate":
+    def _comment_on_failure(self) -> EntryCheckCreate:
         if self.result == EntryCheckResult.failed and not (self.comment or "").strip():
             raise ValueError("Для отметки «не пройдено» нужен комментарий")
         return self

@@ -27,7 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import redis as redis_state
 from app.config import settings
 from app.models.dog import Dog
-from app.models.notification import Notification, NotificationChannel, NotificationStatus
+from app.models.notification import (
+    Notification,
+    NotificationChannel,
+    NotificationStatus,
+)
 from app.models.reference import ShowClass
 from app.models.show import Show, ShowEntry, ShowStatus
 from app.models.user import User

@@ -7,17 +7,16 @@ Create Date: 2026-10-04 12:00:00.000000
 Регистрация прибытия (чек-ин): документы собак, персонал выставки,
 журнал отметок, флаг выставки и статус явки записи.
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
 
-
 revision: str = "f4a5b6c7d8e9"
-down_revision: Union[str, Sequence[str], None] = "e3c4d5e6f7a8"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = "e3c4d5e6f7a8"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 _ATTENDANCE = postgresql.ENUM(
     "registered", "arrived", "admitted", "rejected", "absent",

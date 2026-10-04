@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date
 from typing import NoReturn
@@ -25,6 +26,8 @@ from app.repositories import checkin as checkin_repo
 from app.schemas.checkin import DogDocumentResponse
 from app.services import dog_document as svc
 from app.services import file_storage, upload_quota
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dogs", tags=["dog-documents"])
 
@@ -118,8 +121,8 @@ async def delete_document(
     await db.commit()
     try:
         await file_storage.delete_file(s3_key)
-    except Exception:  # noqa: BLE001 — сирота в MinIO не повод отдавать 500
-        pass
+    except Exception:
+        logger.warning("Failed to delete document blob %s", s3_key, exc_info=True)
 
 
 @router.get(

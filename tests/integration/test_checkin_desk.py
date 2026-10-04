@@ -51,7 +51,7 @@ async def _add_doc(db_session, w, kind, valid_until=None):
 
 
 async def test_ticket_and_scan(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, own_t, reg_t = await _setup(client, db_session)
     await add_entry(db_session, w, owner=w.owner, name="Вторая")
 
     r = await client.get(f"/shows/{w.show.id}/my-ticket", headers=auth(own_t))
@@ -72,7 +72,7 @@ async def test_ticket_and_scan(client, db_session):
 
 
 async def test_scan_errors(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, _own_t, reg_t = await _setup(client, db_session)
     other = await make_world(db_session)
     r = await client.post(f"/shows/{w.show.id}/checkin/scan", json={"token": "garbage"}, headers=auth(reg_t))
     assert r.status_code == 400 and r.json()["detail"] == "invalid_token"
@@ -89,7 +89,7 @@ async def test_scan_errors(client, db_session):
 
 
 async def test_foreign_registrar_forbidden(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, _own_t, reg_t = await _setup(client, db_session)
     # Вторая выставка — напрямую в БД: лимит /auth/register — 3 на IP в час.
     other = await make_world(db_session)
     # reg_t — регистратор выставки w, но не other.
@@ -104,7 +104,7 @@ async def test_foreign_registrar_forbidden(client, db_session):
 
 
 async def test_admit_in_one_request_and_history(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, _own_t, reg_t = await _setup(client, db_session)
     r = await client.post(f"/shows/{w.show.id}/entries/{w.entry.id}/checks", json=ADMIT, headers=auth(reg_t))
     assert r.status_code == 200, r.text
     assert r.json()["attendance_status"] == "admitted"
@@ -113,7 +113,7 @@ async def test_admit_in_one_request_and_history(client, db_session):
 
 
 async def test_correction_flips_rejected_to_admitted(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, _own_t, reg_t = await _setup(client, db_session)
     reject = {"checks": [
         {"kind": "arrival", "result": "passed"},
         {"kind": "vet", "result": "failed", "comment": "нет прививки"},
@@ -127,7 +127,7 @@ async def test_correction_flips_rejected_to_admitted(client, db_session):
 
 
 async def test_failed_without_comment_and_atomicity(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, _own_t, reg_t = await _setup(client, db_session)
     other = await make_world(db_session)
     doc = await _add_doc(db_session, other, DogDocumentKind.vet_passport)
     r = await client.post(
@@ -150,7 +150,7 @@ async def test_failed_without_comment_and_atomicity(client, db_session):
 
 
 async def test_status_windows(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session, status=ShowStatus.registration_open)
+    w, org_t, _own_t, reg_t = await _setup(client, db_session, status=ShowStatus.registration_open)
     r = await client.post(f"/shows/{w.show.id}/entries/{w.entry.id}/checks", json=ADMIT, headers=auth(reg_t))
     assert r.status_code == 409 and r.json()["detail"] == "invalid_show_status"
     pre = {"checks": [{"kind": "docs_precheck", "result": "passed"}]}
@@ -163,7 +163,7 @@ async def test_status_windows(client, db_session):
 
 
 async def test_scan_after_checks_shows_latest_state(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, own_t, reg_t = await _setup(client, db_session)
     await _add_doc(db_session, w, DogDocumentKind.vet_passport, date.today() + timedelta(days=30))
     await client.post(f"/shows/{w.show.id}/entries/{w.entry.id}/checks", json=ADMIT, headers=auth(reg_t))
     token = (await client.get(f"/shows/{w.show.id}/my-ticket", headers=auth(own_t))).json()["token"]
@@ -176,7 +176,7 @@ async def test_scan_after_checks_shows_latest_state(client, db_session):
 
 
 async def test_search_and_summary(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session)
+    w, _org_t, _own_t, reg_t = await _setup(client, db_session)
     for q in (str(w.entry.catalog_number), w.dog.microchip, w.dog.name[:4]):
         r = await client.get(f"/shows/{w.show.id}/checkin/search", params={"q": q}, headers=auth(reg_t))
         assert r.status_code == 200, (q, r.text)
@@ -187,7 +187,7 @@ async def test_search_and_summary(client, db_session):
 
 
 async def test_precheck_queue(client, db_session):
-    w, org_t, own_t, reg_t = await _setup(client, db_session, status=ShowStatus.registration_open)
+    w, org_t, _own_t, _reg_t = await _setup(client, db_session, status=ShowStatus.registration_open)
     r = await client.get(f"/shows/{w.show.id}/checkin/precheck-queue", headers=auth(org_t))
     assert r.json() == []  # без документов в очереди нечего смотреть
     await _add_doc(db_session, w, DogDocumentKind.pedigree)

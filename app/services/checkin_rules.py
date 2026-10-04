@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import date, datetime
-from typing import Protocol, TypeVar
+from datetime import date
 
-from app.models.dog import DogDocumentKind
+from app.models.dog import DogDocument, DogDocumentKind
 from app.models.show import (
     AttendanceStatus,
     EntryCheckKind,
@@ -41,13 +40,6 @@ PROBLEM_LABELS: dict[str, str] = {
 }
 
 
-class _Doc(Protocol):
-    kind: DogDocumentKind
-    valid_until: date | None
-    created_at: datetime
-
-
-D = TypeVar("D", bound=_Doc)
 
 
 def reference_date(date_start: date, date_end: date | None) -> date:
@@ -61,9 +53,9 @@ def allowed_statuses_for(kind: EntryCheckKind) -> frozenset[ShowStatus]:
     return ONSITE_STATUSES
 
 
-def current_documents(docs: Iterable[D]) -> dict[DogDocumentKind, D]:
+def current_documents(docs: Iterable[DogDocument]) -> dict[DogDocumentKind, DogDocument]:
     """Действующий документ каждого вида — последний загруженный."""
-    result: dict[DogDocumentKind, D] = {}
+    result: dict[DogDocumentKind, DogDocument] = {}
     for doc in docs:
         cur = result.get(doc.kind)
         if cur is None or doc.created_at > cur.created_at:
@@ -71,7 +63,7 @@ def current_documents(docs: Iterable[D]) -> dict[DogDocumentKind, D]:
     return result
 
 
-def rabies_valid_for(current: Mapping[DogDocumentKind, _Doc], ref_date: date) -> bool | None:
+def rabies_valid_for(current: Mapping[DogDocumentKind, DogDocument], ref_date: date) -> bool | None:
     """None — оценить нельзя (нет ветпаспорта или даты)."""
     vp = current.get(DogDocumentKind.vet_passport)
     if vp is None or vp.valid_until is None:
@@ -80,7 +72,7 @@ def rabies_valid_for(current: Mapping[DogDocumentKind, _Doc], ref_date: date) ->
 
 
 def document_problems(
-    current: Mapping[DogDocumentKind, _Doc], ref_date: date, class_code: str | None
+    current: Mapping[DogDocumentKind, DogDocument], ref_date: date, class_code: str | None
 ) -> list[str]:
     problems: list[str] = []
     vp = current.get(DogDocumentKind.vet_passport)

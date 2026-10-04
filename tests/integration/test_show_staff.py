@@ -5,7 +5,12 @@ from __future__ import annotations
 
 from app.models.show import ShowStatus
 from app.models.user import User
-from tests.integration.checkin_helpers import auth, make_api_user, make_db_user, make_world
+from tests.integration.checkin_helpers import (
+    auth,
+    make_api_user,
+    make_db_user,
+    make_world,
+)
 
 
 async def _world_with_api_organizer(client, db_session, **kw):

@@ -275,4 +275,4 @@ async def mark_registered_absent(db: AsyncSession, show_id: uuid.UUID) -> int:
             attendance_changed_at=datetime.now(timezone.utc),
         )
     )
-    return res.rowcount or 0
+    return getattr(res, "rowcount", 0) or 0
