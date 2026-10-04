@@ -78,6 +78,8 @@ class ShowResponse(ShowBase):
     status: ShowStatus
     created_at: datetime
     updated_at: datetime
+    # Включена ли регистрация прибытия (чек-ин) — см. routers/checkin.py.
+    checkin_enabled: bool = False
 
 
 class ShowPage(BaseModel):

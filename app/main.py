@@ -19,6 +19,7 @@ from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.routers import (
     ads,
     auth,
+    checkin,
     classifieds,
     documents,
     dog_documents,
@@ -182,6 +183,7 @@ app.include_router(litters.router)
 app.include_router(classifieds.router)
 # Этап 6: выставки (создание, судьи, ринги, записи).
 app.include_router(shows.router)
+app.include_router(checkin.router)
 # Этап 7: результаты, титулы, публикация.
 app.include_router(results.router)
 app.include_router(results.publish_router)

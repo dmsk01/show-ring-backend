@@ -5,12 +5,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.dog import DogDocument
 from app.models.file import UploadedFile
 from app.models.show import Show, ShowEntry, ShowStaff, ShowStatus
+from app.models.user import User
 
 # Документы доступны персоналу, пока выставка «живая».
 _ACTIVE_SHOW_STATUSES = (
@@ -64,3 +66,48 @@ async def user_has_show_access_to_dog(
         .limit(1)
     )
     return (await db.execute(stmt)).first() is not None
+
+
+async def is_staff(db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    stmt = select(ShowStaff.id).where(
+        ShowStaff.show_id == show_id, ShowStaff.user_id == user_id
+    )
+    return (await db.execute(stmt)).first() is not None
+
+
+async def list_staff(db: AsyncSession, show_id: uuid.UUID) -> list[tuple[ShowStaff, User]]:
+    stmt = (
+        select(ShowStaff, User)
+        .join(User, User.id == ShowStaff.user_id)
+        .options(selectinload(User.profile))
+        .where(ShowStaff.show_id == show_id)
+        .order_by(ShowStaff.created_at)
+    )
+    return [(s, u) for s, u in (await db.execute(stmt)).all()]
+
+
+async def delete_staff(db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID) -> int:
+    res = await db.execute(
+        delete(ShowStaff).where(ShowStaff.show_id == show_id, ShowStaff.user_id == user_id)
+    )
+    return getattr(res, "rowcount", 0) or 0
+
+
+async def list_staffed_shows(db: AsyncSession, user_id: uuid.UUID) -> list[Show]:
+    stmt = (
+        select(Show)
+        .join(ShowStaff, ShowStaff.show_id == Show.id)
+        .where(ShowStaff.user_id == user_id, Show.status != ShowStatus.cancelled)
+        .order_by(Show.date_start.desc())
+    )
+    return list((await db.execute(stmt)).scalars().unique())
+
+
+async def get_user_by_email_ci(db: AsyncSession, email: str) -> User | None:
+    """
+    Поиск по email без учёта регистра: организатор вводит адрес регистратора
+    вручную, а при регистрации email не нормализуется (users.email хранится
+    как ввели).
+    """
+    stmt = select(User).where(func.lower(User.email) == email.strip().lower()).limit(1)
+    return (await db.execute(stmt)).scalar_one_or_none()
