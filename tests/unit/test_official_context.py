@@ -1,11 +1,21 @@
 # tests/unit/test_official_context.py
 import datetime as dt
-from types import SimpleNamespace
 
 from app.services.document_official import (
-    _shape_diploma_context,
+    CatalogEntryInput,
+    CatalogMeta,
+    CertificateInput,
     DiplomaInput,
+    _entry_issues,
+    EntryCheck,
+    _fmt_date_long,
+    RingSheetInput,
+    _shape_catalog,
+    _shape_certificate,
+    _shape_diploma_context,
+    _shape_ring_sheet,
 )
+
 
 
 def test_shape_diploma_full():
@@ -78,11 +88,6 @@ def test_shape_diploma_empty_fields_become_blank_strings():
     assert ctx["judge"] == ""
 
 
-from app.services.document_official import (
-    _shape_ring_sheet,
-    _fmt_date_long,
-    RingSheetInput,
-)
 
 
 def test_fmt_date_long_russian_month():
@@ -114,11 +119,6 @@ def test_shape_ring_sheet_per_breed_blank():
     assert sheet["numbers_str"] == "20, 68"
 
 
-from app.services.document_official import (
-    _shape_catalog,
-    CatalogMeta,
-    CatalogEntryInput,
-)
 
 
 def test_shape_catalog_groups_sorts_and_formats():
@@ -168,7 +168,6 @@ def test_shape_catalog_groups_sorts_and_formats():
     assert ctx["total_entries"] == 2
 
 
-from app.services.document_official import _shape_certificate, CertificateInput
 
 
 def test_shape_certificate_builds_breed_line():
@@ -204,7 +203,6 @@ def test_shape_certificate_no_fci_and_empty_fields():
     assert cert["judge"] == ""
 
 
-from app.services.document_official import _entry_issues, EntryCheck
 
 
 def test_entry_issues_flags_missing():

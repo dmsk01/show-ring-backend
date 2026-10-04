@@ -23,7 +23,6 @@ import json
 import logging
 import uuid
 from collections import defaultdict
-from typing import Iterable
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession

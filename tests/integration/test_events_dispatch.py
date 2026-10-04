@@ -85,3 +85,37 @@ async def test_in_app_decoupled_from_email_subscriptions(db_session, monkeypatch
     # email-подписчик получил ТОЛЬКО email; in_app-подписчик — ТОЛЬКО in_app.
     assert await _channels(db_session, u_email.id) == {NotificationChannel.email}
     assert await _channels(db_session, u_inapp.id) == {NotificationChannel.in_app}
+
+
+async def test_email_channel_skips_phone_only_subscriber(db_session, monkeypatch):
+    """Пользователь без email (вход по телефону) с email-подпиской не должен
+    ронять рассылку: раньше EmailTaskMessage(to_email=None) падал на
+    валидации, и остальные подписчики события письма не получали."""
+    monkeypatch.setattr(
+        eh, "render_email", lambda *a, **k: ("subj", "<p>h</p>", "t")
+    )
+
+    phone_only = User(
+        email=None, phone=f"+7999{uuid.uuid4().int % 10**7:07d}",
+        hashed_password="x",
+    )
+    db_session.add(phone_only)
+    u_email = await _user(db_session)
+    db_session.add_all(
+        [
+            Subscription(
+                user_id=phone_only.id, event_type=EVENT_TYPE,
+                channel=NotificationChannel.email, is_active=True,
+            ),
+            Subscription(
+                user_id=u_email.id, event_type=EVENT_TYPE,
+                channel=NotificationChannel.email, is_active=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await eh.process_event(db_session, MagicMock(), _event_body())
+
+    assert await _channels(db_session, phone_only.id) == set()
+    assert await _channels(db_session, u_email.id) == {NotificationChannel.email}

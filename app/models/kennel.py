@@ -10,12 +10,16 @@
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.dog import Dog
 
 
 class Kennel(Base, TimestampMixin):
@@ -63,7 +67,7 @@ class Kennel(Base, TimestampMixin):
     # У Dog два FK на kennels (kennel_id — текущий питомник, breeder_kennel_id
     # — питомник-заводчик). Явно указываем foreign_keys, иначе SQLAlchemy не
     # может выбрать путь связи (AmbiguousForeignKeysError при конфигурации).
-    dogs: Mapped[list["Dog"]] = relationship(  # noqa: F821
+    dogs: Mapped[list["Dog"]] = relationship(
         back_populates="kennel",
         cascade="save-update",
         foreign_keys="Dog.kennel_id",

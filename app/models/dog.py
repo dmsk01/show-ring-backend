@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import enum
 import uuid
+from typing import TYPE_CHECKING
 from datetime import date, datetime
 
 from sqlalchemy import (
@@ -37,6 +38,9 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.kennel import Kennel
 
 
 class SexEnum(str, enum.Enum):
@@ -137,8 +141,8 @@ class Dog(Base, TimestampMixin):
 
     kennel: Mapped["Kennel | None"] = relationship(
         back_populates="dogs", foreign_keys=[kennel_id]
-    )  # noqa: F821
-    breeder_kennel: Mapped["Kennel | None"] = relationship(  # noqa: F821
+    )
+    breeder_kennel: Mapped["Kennel | None"] = relationship(
         foreign_keys=[breeder_kennel_id]
     )
     # Используем remote_side для self-ref relationship — иначе SQLAlchemy

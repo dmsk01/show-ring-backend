@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 
 from app.exceptions import TaskNotFoundError
@@ -10,7 +11,7 @@ class InMemoryTaskStorage():
 
     def create_task(self, task_id: str) -> TaskStatusResponse:
         task = TaskStatusResponse(
-            task_id=task_id,
+            task_id=uuid.UUID(task_id),
             status=TaskStatus.PENDING,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),

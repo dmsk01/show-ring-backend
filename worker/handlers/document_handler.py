@@ -20,7 +20,6 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.file import UploadedFile
-from app.models.task import TaskStatusEnum
 from app.repositories import task as task_repo
 from app.schemas.task import DocumentKind
 from app.services import document, document_official, file_storage

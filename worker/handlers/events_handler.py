@@ -227,6 +227,10 @@ async def process_event(
     dispatched = 0
     skipped_duplicate = 0
     for _sub, user in email_subs:
+        # find_subscribers уже отсекает пользователей без email; проверка —
+        # страховка и сужение типа для EmailTaskMessage.to_email.
+        if user.email is None:
+            continue
         msg_id = _recipient_message_id(event.event_id, user.id)
 
         # Per-subscriber commit. Если краш между двумя подписчиками,

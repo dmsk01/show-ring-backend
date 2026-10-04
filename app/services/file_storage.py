@@ -25,7 +25,7 @@ import logging
 import uuid
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Any, BinaryIO, cast
+from typing import Any, cast
 
 import aioboto3
 from botocore.exceptions import ClientError

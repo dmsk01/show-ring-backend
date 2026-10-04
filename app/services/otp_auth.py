@@ -179,6 +179,10 @@ async def consume_otp_code(
         )
         raise OTPExpiredError
 
+    # Клиент Redis может вернуть bytes (без decode_responses) — compare_digest
+    # не сравнивает str с bytes и бросил бы TypeError.
+    if isinstance(stored_hash, bytes):
+        stored_hash = stored_hash.decode()
     # compare_digest: сравнение за константное время (timing attack).
     if not secrets.compare_digest(hash_token(code), stored_hash):
         if attempts >= settings.otp_max_attempts:

@@ -34,10 +34,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_factory, engine
 # Регистрируем все модели в Base.metadata (ленивые FK).
-from app.models import (  # noqa: F401
-    ad, audit, classified, dog, file, kennel, litter,
-    notification, outbox, reference, result, show, support, task,
-)
+import app.models.ad  # noqa: F401
+import app.models.audit  # noqa: F401
+import app.models.classified  # noqa: F401
+import app.models.dog  # noqa: F401
+import app.models.file  # noqa: F401
+import app.models.kennel  # noqa: F401
+import app.models.litter  # noqa: F401
+import app.models.notification  # noqa: F401
+import app.models.outbox  # noqa: F401
+import app.models.reference  # noqa: F401
+import app.models.result  # noqa: F401
+import app.models.show  # noqa: F401
+import app.models.support  # noqa: F401
+import app.models.task  # noqa: F401
 from app.models.dog import Dog, SexEnum
 from app.models.kennel import Kennel
 from app.models.reference import Breed, BreedGroup, Grade, ShowClass, ShowRank

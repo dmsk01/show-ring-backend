@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 
 from app.models.file import FileVariant, UploadedFile
 

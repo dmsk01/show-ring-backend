@@ -6,7 +6,8 @@ JSON-логи в проде, если кто-то случайно запуст�
 import asyncio
 import logging
 
-from aio_pika import connect_robust, IncomingMessage
+from aio_pika import connect_robust
+from aio_pika.abc import AbstractIncomingMessage
 
 from app.services.rabbit_dlx import declare_workflow_queue
 
@@ -14,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-async def process_message(message: IncomingMessage):
+async def process_message(message: AbstractIncomingMessage):
     async with message.process():
         body = message.body.decode()
         logger.info("Received message: %s", body)
