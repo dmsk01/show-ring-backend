@@ -1,0 +1,24 @@
+{% block subject %}Проверьте документы к выставке «{{ show_name }}»{% endblock %}
+
+{% block html %}
+<p>Здравствуйте!</p>
+<p>До выставки <strong>{{ show_name }}</strong> ({{ date_start }}) осталось 3 дня.
+  Для быстрой регистрации на месте загрузите документы собак:</p>
+<ul>
+{% for dog in dogs %}
+  <li><strong>{{ dog.name }}</strong>
+    <ul>{% for p in dog.problems %}<li>{{ p }}</li>{% endfor %}</ul>
+  </li>
+{% endfor %}
+</ul>
+<p><a href="{{ ticket_url }}">Открыть мой билет</a> — там же QR-код для стойки регистрации.</p>
+{% endblock %}
+
+{% block text %}
+До выставки «{{ show_name }}» ({{ date_start }}) осталось 3 дня.
+Для быстрой регистрации на месте загрузите документы собак:
+{% for dog in dogs %}
+- {{ dog.name }}: {{ dog.problems | join("; ") }}
+{% endfor %}
+Мой билет: {{ ticket_url }}
+{% endblock %}

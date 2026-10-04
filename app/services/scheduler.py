@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -34,6 +34,7 @@ from app.models.task import Task, TaskStatusEnum
 from app.models.user import RefreshToken
 from app.repositories import outbox as outbox_repo
 from app.schemas.task import TaskMessage
+from app.services import checkin_reminders
 from app.services.task_queues import QUEUE_FOR_TASK_TYPE as _QUEUE_FOR_TASK_TYPE
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,15 @@ async def start_scheduler() -> None:
         requeue_stuck_tasks,
         CronTrigger(minute="*/10"),
         id="requeue_stuck_tasks",
+        replace_existing=True,
+    )
+
+    # Ежедневно в 10:00 — напоминание о документах за 3 дня до выставки.
+    # Днём, а не ночью: письмо приходит, когда человек может его прочитать.
+    sched.add_job(
+        remind_missing_documents,
+        CronTrigger(hour=10, minute=0),
+        id="remind_missing_documents",
         replace_existing=True,
     )
 
@@ -336,3 +346,16 @@ async def archive_old_classifieds() -> None:
             await db.commit()
             archived = getattr(result, "rowcount", 0)
             logger.info("archive_classifieds: archived %s rows", archived)
+
+
+async def remind_missing_documents() -> None:
+    """Напоминание о недостающих документах (чек-ин выставок)."""
+    async with _scheduler_lock("remind_missing_documents") as acquired:
+        if not acquired:
+            return
+        try:
+            async with async_session_factory() as db:
+                sent = await checkin_reminders.send_document_reminders(db, date.today())
+            logger.info("Documents reminders sent: %d", sent)
+        except Exception:  # noqa: BLE001 — cron не должен ронять шедулер
+            logger.exception("remind_missing_documents failed")
