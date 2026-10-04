@@ -298,11 +298,13 @@ curl -fsSL http://localhost/api/health
 
 Снаружи приложение уже доступно по `http://<IP-сервера>/` (пока по HTTP, без домена).
 
-> **Email-воркеры** (`worker-events`, `worker-email`, `worker-outbox`) по умолчанию
-> не стартуют. Без них письма (верификация, уведомления) копятся в базе и не
-> отправляются. Чтобы поднять весь почтовый конвейер, добавь профиль `events`:
+> **Email-воркеры** (`worker-events`, `worker-email`, `worker-outbox`) живут в
+> профиле compose `events`. Без них письма (верификация, «пароль изменён»,
+> уведомления) копятся в базе и не отправляются. `deploy/deploy.sh` включает
+> профиль сам, а для ручных команд в `.env` должна быть строка
+> `COMPOSE_PROFILES=events` (есть в `.env.prod.example`). Проверка:
 > ```bash
-> dc --profile events up -d
+> dc ps worker-outbox worker-email worker-events
 > ```
 
 ---

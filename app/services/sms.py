@@ -96,10 +96,14 @@ def get_sms_provider() -> SMSProvider:
             _provider = SmsRuProvider(settings.sms_api_key)
         else:
             if not settings.debug:
-                # Mock в проде = коды уходят только в лог, вход по
-                # телефону фактически не работает. Громко предупреждаем.
-                logger.warning(
-                    "SMS_PROVIDER=mock при DEBUG=False — SMS не отправляются"
+                # ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #2): раньше
+                # здесь был warning. Mock пишет текст SMS с кодом в лог —
+                # в проде любой с доступом к логам вошёл бы под чужим
+                # номером. Отказываем: send-code вернёт 500, а не тихо
+                # «отправит» код в лог.
+                raise RuntimeError(
+                    "SMS_PROVIDER=mock запрещён при DEBUG=False: "
+                    "задайте SMS_PROVIDER=smsru и SMS_API_KEY"
                 )
             _provider = MockSMSProvider()
     return _provider

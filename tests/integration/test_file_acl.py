@@ -107,3 +107,34 @@ async def test_task_download_idor_cross_user_forbidden(client, db_session):
     # Без токена → 401.
     r = await client.get(f"/tasks/{task.id}/download")
     assert r.status_code == 401
+
+
+async def test_task_status_requires_owner(client, db_session):
+    # GET /tasks/{id} раньше был публичным и отдавал payload/result/created_by
+    # любому, кто знает UUID. Теперь — как у /download: автор или admin.
+    owner_id, owner_token = await _make_user(client)
+    _other_id, other_token = await _make_user(client)
+
+    task = Task(
+        type="generate_catalog",
+        status=TaskStatusEnum.done,
+        payload={"show_id": str(uuid.uuid4())},
+        result={"file_id": str(uuid.uuid4())},
+        created_by=owner_id,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    r = await client.get(f"/tasks/{task.id}")
+    assert r.status_code == 401
+
+    r = await client.get(
+        f"/tasks/{task.id}", headers={"Authorization": f"Bearer {other_token}"}
+    )
+    assert r.status_code == 403
+
+    r = await client.get(
+        f"/tasks/{task.id}", headers={"Authorization": f"Bearer {owner_token}"}
+    )
+    assert r.status_code == 200
+    assert r.json()["id"] == str(task.id)

@@ -28,8 +28,38 @@ BACKEND_DIR="$(dirname "$SCRIPT_DIR")"
 FRONTEND_DIR="${SHOW_RING_FRONTEND_DIR:-$(dirname "$BACKEND_DIR")/show-ring-frontend}"
 
 # Прод-связка compose-файлов + .env (с секретами) лежит в бэкенд-каталоге.
+# --profile events: worker-outbox/-email/-events. Без них transactional
+# outbox не доставляет НИЧЕГО — ни подтверждение email, ни уведомления
+# «пароль изменён» (ревью безопасности 2026-10-03, #6).
 compose() {
-    docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env "$@"
+    docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+        --profile events "$@"
+}
+
+# Отказ деплоить с пустыми/дефолтными секретами. В docker-compose.yml у
+# паролей есть dev-дефолты (${POSTGRES_PASSWORD:-show_ring} и т.п.) —
+# забытая или опечатанная переменная в прод-.env подняла бы стек со
+# словарными паролями молча (ревью 2026-10-03, #7).
+check_env() {
+    local env_file="$BACKEND_DIR/.env" var val failed=0
+    if [ ! -f "$env_file" ]; then
+        echo "!! Нет $env_file — скопируй .env.prod.example и заполни" >&2
+        exit 1
+    fi
+    for var in SECRET_KEY POSTGRES_PASSWORD RABBITMQ_PASSWORD S3_SECRET_KEY; do
+        # Последнее присваивание в файле (как у compose); кавычки срезаем.
+        val="$(grep -E "^${var}=" "$env_file" | tail -n 1 | cut -d= -f2- \
+               | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
+        case "$val" in
+            ""|guest|show_ring|show_ring_minio|change-me*)
+                echo "!! $var в .env пустой или небезопасный дефолт" >&2
+                failed=1 ;;
+        esac
+    done
+    if [ "$failed" -ne 0 ]; then
+        echo "!! Деплой остановлен: заполни переменные выше (см. .env.prod.example)" >&2
+        exit 1
+    fi
 }
 
 echo "==> [1/4] Обновляю репозитории (ff-only; рабочее дерево на сервере должно быть чистым)"
@@ -37,6 +67,7 @@ git -C "$FRONTEND_DIR" pull --ff-only
 git -C "$BACKEND_DIR" pull --ff-only
 
 cd "$BACKEND_DIR"
+check_env
 
 echo "==> [2/4] Пересобираю образы и поднимаю стек (миграции накатит контейнер migrate)"
 compose up -d --build

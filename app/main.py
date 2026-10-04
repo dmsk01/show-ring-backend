@@ -94,7 +94,25 @@ async def lifespan(app: FastAPI):
         logger.warning("Scheduler stop failed: %s", e)
 
 
-app = FastAPI(lifespan=lifespan)
+def _docs_settings(debug: bool) -> dict[str, str | None]:
+    """URL-ы Swagger/ReDoc/OpenAPI: только в DEBUG.
+
+    ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #8): в проде /api/docs и
+    /api/openapi.json отдавали анониму полную карту API, включая admin- и
+    внутренние ручки. Схема по-прежнему доступна в коде через app.openapi().
+    """
+    if debug:
+        return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
+_docs = _docs_settings(settings.debug)
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=_docs["docs_url"],
+    redoc_url=_docs["redoc_url"],
+    openapi_url=_docs["openapi_url"],
+)
 # ИСПРАВЛЕНО (review 2026-05-28): обработка ошибок вынесена в
 # FastAPI exception handlers (см. app/middleware/error_handler.py).
 # Раньше это был BaseHTTPMiddleware, добавлявшийся 2-м — Starlette

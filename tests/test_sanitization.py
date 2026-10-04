@@ -87,3 +87,22 @@ def test_raw_html_route_only_blog_writes():
     assert not _is_raw_html_route(_FakeRequest("GET", "/posts"))
     assert not _is_raw_html_route(_FakeRequest("POST", "/classifieds"))
     assert not _is_raw_html_route(_FakeRequest("POST", "/posts-other"))
+
+
+def test_json_content_type_detection_matches_fastapi():
+    """Middleware должен чистить всё, что FastAPI разберёт как JSON.
+
+    Раньше проверка была startswith("application/json"), а FastAPI парсит
+    ещё и "+json"-подтипы и заголовок в любом регистре — такие запросы
+    проходили мимо санитизации.
+    """
+    from app.middleware.sanitization import _is_json_content_type
+
+    assert _is_json_content_type("application/json")
+    assert _is_json_content_type("application/json; charset=utf-8")
+    assert _is_json_content_type("Application/JSON")
+    assert _is_json_content_type("application/merge-patch+json")
+    assert _is_json_content_type("application/vnd.api+json")
+    assert not _is_json_content_type("")
+    assert not _is_json_content_type("multipart/form-data; boundary=x")
+    assert not _is_json_content_type("text/plain")

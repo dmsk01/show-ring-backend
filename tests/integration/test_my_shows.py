@@ -199,9 +199,11 @@ async def test_update_entry_locked_when_registration_closed(db_session):
 
 
 async def test_my_shows_route_registered_in_openapi(client):
-    r = await client.get("/openapi.json")
-    assert r.status_code == 200
-    paths = r.json()["paths"]
+    # Схему берём у объекта app: HTTP-ручка /openapi.json в проде
+    # (DEBUG=false) отключена — см. app.main._docs_settings.
+    from app.main import app
+
+    paths = app.openapi()["paths"]
     assert "/shows/entries/my" in paths
     assert "get" in paths["/shows/entries/my"]
     assert "patch" in paths["/shows/{show_id}/entries/{entry_id}"]
