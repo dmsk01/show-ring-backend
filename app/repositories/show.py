@@ -378,7 +378,7 @@ async def get_show_with_relations(
 
 async def list_user_entries_for_show_enriched(
     db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID
-) -> Sequence[Row[tuple[ShowEntry, str, str, str]]]:
+) -> Sequence[Row[ShowEntry, str, str, str]]:
     """Записи пользователя на выставку с именами собаки и класса.
 
     Возвращает список кортежей (ShowEntry, dog_name, class_code, class_name).
@@ -401,7 +401,7 @@ async def list_user_entries_for_show_enriched(
 
 async def get_entry_enriched(
     db: AsyncSession, entry_id: uuid.UUID
-) -> Row[tuple[ShowEntry, str, str, str]] | None:
+) -> Row[ShowEntry, str, str, str] | None:
     """Одна запись + имена (для ответа PATCH). None, если не найдена.
 
     Авторизация (проверка владельца/прав) — ответственность вызывающего
@@ -445,7 +445,7 @@ async def list_my_shows(
     *,
     page: int = 1,
     per_page: int = 12,
-) -> Sequence[Row[tuple[Show, int]]]:
+) -> Sequence[Row[Show, int]]:
     """Выставки, где у пользователя есть запись, + число его записей.
 
     Возвращает список кортежей (Show, my_entries_count), пагинация по выставкам.

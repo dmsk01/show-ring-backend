@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from app.models.user import RoleEnum, User, UserRole
-from app.services.upload_quota import UploadTier, resolve_upload_tier
+from app.services.upload_quota import UploadTier, _cooldown, resolve_upload_tier
 
 
 def _user(*, email_verified=False, phone_verified=False, roles=()):
@@ -39,9 +41,7 @@ def test_kennel_owner_is_breeder_even_if_only_email_verified():
     assert resolve_upload_tier(u, owns_kennel=True) is UploadTier.breeder
 
 
-from datetime import datetime, timedelta, timezone
 
-from app.services.upload_quota import _cooldown
 
 
 def test_cooldown_from_oldest_upload():

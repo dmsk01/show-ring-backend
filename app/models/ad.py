@@ -36,7 +36,6 @@ from sqlalchemy import (
     Enum as SAEnum,
     ForeignKey,
     Index,
-    Integer,
     Numeric,
     String,
     Text,

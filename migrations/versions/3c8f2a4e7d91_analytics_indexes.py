@@ -22,7 +22,6 @@ bug_229 audit 2026-05-28: композитный индекс на show_results
 from typing import Sequence, Union
 
 from alembic import op
-import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.

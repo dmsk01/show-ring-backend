@@ -39,8 +39,8 @@ async def _build_litters(
     parent_ids = {
         pid for lt in litters for pid in (lt.father_id, lt.mother_id) if pid
     }
-    dogs_map = await dog_repo.dogs_by_ids(db, parent_ids)
-    photos = await dog_repo.photos_by_dogs(db, parent_ids)
+    dogs_map = await dog_repo.dogs_by_ids(db, list(parent_ids))
+    photos = await dog_repo.photos_by_dogs(db, list(parent_ids))
 
     def _ref(pid: uuid.UUID | None) -> DogRef | None:
         if pid is None:

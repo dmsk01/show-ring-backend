@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import enum
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Enum as SAEnum,
@@ -36,6 +37,9 @@ from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class PostPublish(str, enum.Enum):
@@ -100,4 +104,4 @@ class Post(Base, TimestampMixin):
     # Одностороннее отношение к автору (у User нет обратного posts — блог
     # вторичен к модели пользователя). Грузим только через selectinload в
     # репозитории (вместе с author.profile для ФИО), чтобы не словить N+1.
-    author: Mapped["User | None"] = relationship("User")  # noqa: F821
+    author: Mapped["User | None"] = relationship("User")

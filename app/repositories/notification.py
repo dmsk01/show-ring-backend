@@ -97,6 +97,11 @@ async def find_subscribers(
             User.is_active.is_(True),
         )
     )
+    # Email-канал — только пользователям с адресом. Аккаунт, созданный по
+    # телефону, может иметь email-подписку без email: EmailTaskMessage с
+    # to_email=None падал на валидации и обрывал рассылку остальным.
+    if channel == NotificationChannel.email:
+        stmt = stmt.where(User.email.is_not(None))
 
     # Фильтр по породе: либо подписка без породы (любая), либо точное
     # совпадение с приходящим event'ом. В SQL это OR с NULL-check'ом.

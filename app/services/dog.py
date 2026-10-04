@@ -299,7 +299,7 @@ async def list_descendants(
     other_ids = [
         c.mother_id if c.father_id == dog_id else c.father_id for c in children
     ]
-    others = await repo.dogs_by_ids(db, other_ids)
+    others = await repo.dogs_by_ids(db, [i for i in other_ids if i is not None])
     result = []
     for child, other_id in zip(children, other_ids):
         item = DogDescendant.model_validate(child)

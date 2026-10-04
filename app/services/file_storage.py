@@ -25,10 +25,10 @@ import logging
 import uuid
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Any, BinaryIO, cast
+from typing import Any, cast
 
 import aioboto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import HTTPException, UploadFile, status
 
 from app.config import settings
@@ -199,6 +199,14 @@ async def _upload_to_s3(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Файловое хранилище недоступно",
         )
+    except BotoCoreError as e:
+        # Хранилище недоступно (нет соединения, таймаут) — это не ответ S3,
+        # а BotoCoreError: без отдельного перехвата он превращался в 500.
+        logger.error("S3 %s unreachable: %s", "upload", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Файловое хранилище недоступно",
+        )
 
     return s3_key, detected.content_type, upload.filename or "file", total
 
@@ -233,6 +241,9 @@ async def upload_bytes(
     except ClientError as e:
         logger.error("S3 upload (bytes) failed: %s", e)
         raise
+    except BotoCoreError as e:
+        logger.error("S3 upload (bytes) unreachable: %s", e)
+        raise
     return s3_key, len(content)
 
 
@@ -260,6 +271,14 @@ async def get_file_stream(s3_key: str):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Файловое хранилище недоступно",
         )
+    except BotoCoreError as e:
+        # Хранилище недоступно (нет соединения, таймаут) — это не ответ S3,
+        # а BotoCoreError: без отдельного перехвата он превращался в 500.
+        logger.error("S3 %s unreachable: %s", "download", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Файловое хранилище недоступно",
+        )
 
 
 async def stat_file(s3_key: str) -> None:
@@ -282,6 +301,14 @@ async def stat_file(s3_key: str) -> None:
         ):
             raise HTTPException(status_code=404, detail="Файл не найден")
         logger.error("S3 head failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Файловое хранилище недоступно",
+        )
+    except BotoCoreError as e:
+        # Хранилище недоступно (нет соединения, таймаут) — это не ответ S3,
+        # а BotoCoreError: без отдельного перехвата он превращался в 500.
+        logger.error("S3 %s unreachable: %s", "head", e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Файловое хранилище недоступно",
@@ -315,4 +342,6 @@ async def delete_file(s3_key: str) -> None:
         async with _s3_client() as s3:
             await s3.delete_object(Bucket=settings.s3_bucket, Key=s3_key)
     except ClientError as e:
+        logger.warning("S3 delete failed for %s: %s", s3_key, e)
+    except BotoCoreError as e:
         logger.warning("S3 delete failed for %s: %s", s3_key, e)

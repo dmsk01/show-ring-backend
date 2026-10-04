@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 
 from app.models.post import Post, PostPublish
 from app.models.user import RoleEnum, User, UserRole

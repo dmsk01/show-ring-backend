@@ -56,7 +56,7 @@ async def _file(db_session) -> uuid.UUID:
 
 
 async def test_get_classified_increments_views(client, db_session):
-    breed_id = await _breed_id(db_session)
+    await _breed_id(db_session)  # skip, если нет сидов пород
     owner_id = await _owner(db_session)
     c = Classified(
         author_id=owner_id,

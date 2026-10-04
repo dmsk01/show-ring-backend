@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Sequence
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import any_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,7 +39,7 @@ def _filter_stmt(publish: PostPublish | None, query: str | None):
                 Post.description.ilike(like),
                 # Поиск по тегу: query = ANY(tags). Точное совпадение тега,
                 # не подстрока — теги это метки, а не свободный текст.
-                Post.tags.any(query),
+                literal(query) == any_(Post.tags),
             )
         )
     return stmt
