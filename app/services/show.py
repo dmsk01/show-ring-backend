@@ -30,6 +30,7 @@ from app.models.show import (
     ShowRing,
     ShowStatus,
 )
+from app.repositories import checkin as checkin_repo
 from app.repositories import dog as dog_repo
 from app.repositories import kennel as kennel_repo
 from app.repositories import show as repo
@@ -149,6 +150,13 @@ async def change_status(
     # записям, у которых их ещё нет (порядок по created_at).
     if target == ShowStatus.registration_closed:
         await _assign_catalog_numbers(db, show_id)
+
+    # Чек-ин: при старте выставки все не отмеченные на стойке записи
+    # становятся «не явилась». Та же транзакция и тот же FOR UPDATE на
+    # выставку, что и смена статуса, — гонок с отметками нет. Опоздавшего
+    # регистратор отметит позже (absent → arrived).
+    if target == ShowStatus.in_progress and obj.checkin_enabled:
+        await checkin_repo.mark_registered_absent(db, show_id)
 
     obj.status = target
 

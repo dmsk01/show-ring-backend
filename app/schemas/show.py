@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.show import ShowStatus
+from app.models.show import AttendanceStatus, ShowStatus
 
 
 # ---------------------------------------------------------------------
@@ -203,6 +203,7 @@ class ShowEntryResponse(BaseModel):
     registered_by: uuid.UUID
     catalog_number: int | None
     notes: str | None
+    attendance_status: AttendanceStatus = AttendanceStatus.registered
     created_at: datetime
 
 

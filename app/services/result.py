@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reference import ShowClass, ShowRank
 from app.models.result import DogTitle, ShowResult
-from app.models.show import Show, ShowEntry, ShowStatus
+from app.models.show import AttendanceStatus, Show, ShowEntry, ShowStatus
 from app.repositories import result as repo
 from app.repositories import show as show_repo
 from app.services import show_rules
@@ -78,6 +78,13 @@ async def _ensure_can_edit(
         raise ValueError("show_not_in_progress")
     if not _can_modify_results(show, user_id, is_admin):
         raise ValueError("forbidden")
+    # Чек-ин: не явившимся и не допущенным результат не вносится.
+    # registered/arrived допустимы — опоздавших отмечают по ходу выставки.
+    if show.checkin_enabled and entry.attendance_status in (
+        AttendanceStatus.absent,
+        AttendanceStatus.rejected,
+    ):
+        raise ValueError("entry_not_admitted")
     return show, entry
 
 

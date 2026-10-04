@@ -61,6 +61,8 @@ def _raise_for_error(err: ValueError) -> NoReturn:
         "winner_must_be_big",
     ):
         raise HTTPException(422, code)
+    if code == "entry_not_admitted":
+        raise HTTPException(409, code)
     raise HTTPException(400, code)
 
 
