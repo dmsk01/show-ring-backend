@@ -474,6 +474,9 @@ class EntryCheck(Base):
     performed_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # clock_timestamp(), а не now(): now() — время начала ТРАНЗАКЦИИ, и
+    # строки одной транзакции получали бы одинаковый created_at, а по нему
+    # выбирается «последняя» (действующая) строка.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), server_default=func.clock_timestamp()
     )

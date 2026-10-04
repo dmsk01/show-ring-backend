@@ -64,7 +64,7 @@ def upgrade() -> None:
         ),
         sa.Column("valid_until", sa.Date(), nullable=True),
         sa.Column("uploaded_by", sa.UUID(), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.clock_timestamp(), nullable=False),
     )
     op.create_index("ix_dog_documents_dog_id", "dog_documents", ["dog_id"])
     op.create_index("ix_dog_documents_file_id", "dog_documents", ["file_id"])
@@ -95,7 +95,7 @@ def upgrade() -> None:
         sa.Column("document_id", sa.UUID(), sa.ForeignKey("dog_documents.id", ondelete="SET NULL"), nullable=True),
         sa.Column("comment", sa.Text(), nullable=True),
         sa.Column("performed_by", sa.UUID(), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.clock_timestamp(), nullable=False),
     )
     op.create_index("ix_entry_checks_entry_id", "entry_checks", ["entry_id"])
 

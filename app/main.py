@@ -21,6 +21,7 @@ from app.routers import (
     auth,
     classifieds,
     documents,
+    dog_documents,
     dogs,
     feature_flags,
     files,
@@ -174,6 +175,7 @@ app.include_router(admin_upload_quotas.router)
 # Этап 4: питомники, собаки, файлы (MinIO).
 app.include_router(kennels.router)
 app.include_router(dogs.router)
+app.include_router(dog_documents.router)
 app.include_router(files.router)
 # Этап 5: помёты и доска объявлений (полнотекстовый поиск).
 app.include_router(litters.router)
