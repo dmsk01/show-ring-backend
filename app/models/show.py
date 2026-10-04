@@ -40,12 +40,14 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import date, time
+from datetime import date, datetime, time
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
+    DateTime,
     Enum as SAEnum,
     ForeignKey,
     Integer,
@@ -54,6 +56,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -118,6 +121,13 @@ class Show(Base, TimestampMixin):
         SAEnum(ShowStatus, name="showstatus"),
         default=ShowStatus.draft,
         index=True,
+    )
+
+    # Регистрация прибытия (чек-ин). Выключено по умолчанию: выставки,
+    # которые не пользуются стойкой, не должны получать массовую «неявку»
+    # при старте и блокировку результатов.
+    checkin_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
 
     # Allow-list пород. Если пуст — выставка всепородная.
@@ -298,6 +308,14 @@ class ShowRing(Base):
     show: Mapped["Show"] = relationship(back_populates="rings")
 
 
+class AttendanceStatus(str, enum.Enum):
+    registered = "registered"  # записана, на стойке ещё не отмечена
+    arrived = "arrived"        # прибыла, проверки не завершены
+    admitted = "admitted"      # прибыла + ветконтроль + документы пройдены
+    rejected = "rejected"      # не допущена (ветконтроль или документы)
+    absent = "absent"          # не явилась к старту выставки
+
+
 class ShowEntry(Base, TimestampMixin):
     """
     Запись собаки на выставку.
@@ -358,5 +376,104 @@ class ShowEntry(Base, TimestampMixin):
     )
     catalog_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Статус явки/допуска. Вручную не ставится — пересчитывается сервисом
+    # чек-ина из журнала entry_checks (checkin_rules.compute_attendance_status).
+    attendance_status: Mapped[AttendanceStatus] = mapped_column(
+        SAEnum(AttendanceStatus, name="attendancestatus"),
+        default=AttendanceStatus.registered,
+        server_default=AttendanceStatus.registered.value,
+        index=True,
+    )
+    attendance_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     show: Mapped["Show"] = relationship(back_populates="entries")
+
+
+class ShowStaffRole(str, enum.Enum):
+    registrar = "registrar"
+
+
+class ShowStaff(Base):
+    """
+    Персонал конкретной выставки (регистраторы стойки).
+
+    Роль в рамках ОДНОЙ выставки, а не глобальная RoleEnum: волонтёру
+    стойки не нужны права организатора на всей платформе.
+    """
+
+    __tablename__ = "show_staff"
+    __table_args__ = (
+        UniqueConstraint("show_id", "user_id", "role", name="uq_show_staff"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    show_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("shows.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[ShowStaffRole] = mapped_column(
+        SAEnum(ShowStaffRole, name="showstaffrole"), default=ShowStaffRole.registrar
+    )
+    added_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class EntryCheckKind(str, enum.Enum):
+    docs_precheck = "docs_precheck"  # организатор до выставки, по сканам
+    arrival = "arrival"              # стойка: собака прибыла
+    vet = "vet"                      # стойка: ветконтроль
+    docs_onsite = "docs_onsite"      # стойка: сверка документов/чипа
+
+
+class EntryCheckResult(str, enum.Enum):
+    passed = "passed"
+    failed = "failed"
+
+
+class EntryCheck(Base):
+    """
+    Журнал отметок по записи (append-only).
+
+    Строки не обновляются: ошибка регистратора исправляется новой
+    отметкой того же вида, действующая — последняя по created_at.
+    Так история «кто и когда что отметил» и есть аудит.
+    """
+
+    __tablename__ = "entry_checks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("show_entries.id", ondelete="CASCADE"),
+        index=True,
+    )
+    kind: Mapped[EntryCheckKind] = mapped_column(
+        SAEnum(EntryCheckKind, name="entrycheckkind")
+    )
+    result: Mapped[EntryCheckResult] = mapped_column(
+        SAEnum(EntryCheckResult, name="entrycheckresult")
+    )
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("dog_documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    performed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

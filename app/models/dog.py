@@ -21,15 +21,17 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import (
     Date,
+    DateTime,
     Enum as SAEnum,
     ForeignKey,
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -190,3 +192,48 @@ class DogPhoto(Base):
     is_primary: Mapped[bool] = mapped_column(default=False)
 
     dog: Mapped["Dog"] = relationship(back_populates="photos")
+
+
+class DogDocumentKind(str, enum.Enum):
+    vet_passport = "vet_passport"                 # ветпаспорт (прививка от бешенства)
+    pedigree = "pedigree"                         # родословная
+    puppy_card = "puppy_card"                     # щенячья карточка / метрика
+    working_certificate = "working_certificate"   # рабочий сертификат (рабочий класс)
+    other = "other"
+
+
+class DogDocument(Base):
+    """
+    Документ собаки (скан) для допуска на выставки.
+
+    Документы принадлежат СОБАКЕ и переиспользуются между выставками;
+    решение о допуске — отметки на конкретной записи (entry_checks).
+    Одного вида может быть несколько (новый ветпаспорт после
+    ревакцинации) — действующий = последний по created_at.
+
+    valid_until — для vet_passport срок действия прививки от бешенства
+    (вводит владелец при загрузке); для остальных видов обычно NULL.
+    Файл (files.is_public=False) — ПДн и ветданные, публично не отдаётся.
+    """
+
+    __tablename__ = "dog_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    dog_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dogs.id", ondelete="CASCADE"), index=True
+    )
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("files.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[DogDocumentKind] = mapped_column(
+        SAEnum(DogDocumentKind, name="dogdocumentkind")
+    )
+    valid_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
