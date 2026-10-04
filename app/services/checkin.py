@@ -188,6 +188,12 @@ async def build_entry_cards(
         for c in checks:  # отсортированы по времени — последняя перезаписывает
             if c.entry_id == e.id:
                 latest[c.kind] = _check_response(c, performers)
+        # Предпроверка относится к сканам, загруженным ДО неё: после нового
+        # документа старая отметка (особенно «одобрено») вводила бы стойку
+        # в заблуждение.
+        precheck = latest.get(EntryCheckKind.docs_precheck)
+        if precheck and dog_rows and max(d.created_at for d, _ in dog_rows) > precheck.created_at:
+            del latest[EntryCheckKind.docs_precheck]
         participant = users.get(e.registered_by)
         vp = current.get(DogDocumentKind.vet_passport)
         cards.append(EntryCard(

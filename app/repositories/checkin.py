@@ -248,14 +248,25 @@ async def attendance_counts(db: AsyncSession, show_id: uuid.UUID) -> dict[Attend
 
 
 async def precheck_queue(db: AsyncSession, show_id: uuid.UUID, limit: int = 200) -> list[ShowEntry]:
-    """Записи, у собак которых есть документы, но нет отметки docs_precheck."""
+    """
+    Записи, у собак которых есть документы, но нет АКТУАЛЬНОЙ отметки
+    docs_precheck. Отметка устаревает, если после неё загружен новый
+    документ: владелец исправил скан после отказа — запись снова в очереди.
+    """
     has_docs = exists().where(DogDocument.dog_id == ShowEntry.dog_id)
-    has_precheck = exists().where(
-        EntryCheck.entry_id == ShowEntry.id, EntryCheck.kind == EntryCheckKind.docs_precheck
+    latest_doc_at = (
+        select(func.max(DogDocument.created_at))
+        .where(DogDocument.dog_id == ShowEntry.dog_id)
+        .scalar_subquery()
+    )
+    has_fresh_precheck = exists().where(
+        EntryCheck.entry_id == ShowEntry.id,
+        EntryCheck.kind == EntryCheckKind.docs_precheck,
+        EntryCheck.created_at >= latest_doc_at,
     )
     stmt = (
         select(ShowEntry)
-        .where(ShowEntry.show_id == show_id, has_docs, ~has_precheck)
+        .where(ShowEntry.show_id == show_id, has_docs, ~has_fresh_precheck)
         .order_by(ShowEntry.catalog_number.asc().nulls_last(), ShowEntry.created_at)
         .limit(limit)
     )

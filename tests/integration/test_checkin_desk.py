@@ -199,3 +199,23 @@ async def test_precheck_queue(client, db_session):
     )
     r = await client.get(f"/shows/{w.show.id}/checkin/precheck-queue", headers=auth(org_t))
     assert r.json() == []
+
+
+async def test_reupload_after_precheck_returns_to_queue(client, db_session):
+    """Новый скан после предпроверки делает её устаревшей: запись снова в
+    очереди, а стойка не показывает старую отметку."""
+    w, org_t, _own_t, _reg_t = await _setup(client, db_session, status=ShowStatus.registration_open)
+    await _add_doc(db_session, w, DogDocumentKind.pedigree)
+    await client.post(
+        f"/shows/{w.show.id}/entries/{w.entry.id}/checks",
+        json={"checks": [{"kind": "docs_precheck", "result": "failed", "comment": "нечитаемо"}]},
+        headers=auth(org_t),
+    )
+    r = await client.get(f"/shows/{w.show.id}/checkin/precheck-queue", headers=auth(org_t))
+    assert r.json() == []
+
+    await _add_doc(db_session, w, DogDocumentKind.pedigree)
+    r = await client.get(f"/shows/{w.show.id}/checkin/precheck-queue", headers=auth(org_t))
+    cards = r.json()
+    assert [c["entry_id"] for c in cards] == [str(w.entry.id)]
+    assert "docs_precheck" not in cards[0]["latest_checks"]
