@@ -26,7 +26,18 @@ async def test_mock_provider_logs_message(caplog):
 def test_get_sms_provider_defaults_to_mock(monkeypatch):
     monkeypatch.setattr(sms_module, "_provider", None)
     monkeypatch.setattr(settings, "sms_provider", "mock")
+    monkeypatch.setattr(settings, "debug", True)
     assert isinstance(get_sms_provider(), MockSMSProvider)
+
+
+def test_get_sms_provider_refuses_mock_in_prod(monkeypatch):
+    # Mock в проде пишет коды в лог — любой с доступом к логам войдёт
+    # под чужим номером. Лучше громкий отказ, чем тихая дыра.
+    monkeypatch.setattr(sms_module, "_provider", None)
+    monkeypatch.setattr(settings, "sms_provider", "mock")
+    monkeypatch.setattr(settings, "debug", False)
+    with pytest.raises(RuntimeError):
+        get_sms_provider()
 
 
 def test_get_sms_provider_smsru_requires_key(monkeypatch):

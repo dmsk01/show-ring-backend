@@ -90,6 +90,26 @@ async def test_login_is_rate_limited(client, monkeypatch):
     assert 429 in statuses, f"ожидали 429 в пределах 8 попыток, получили {statuses}"
 
 
+async def test_login_and_token_share_rate_limit(client, monkeypatch):
+    # /auth/token — тот же логин (form-data). Раньше ключ лимита включал
+    # путь, и чередование /auth/login и /auth/token удваивало число попыток.
+    monkeypatch.setattr(settings, "auth_login_rate_limit", 5)
+    monkeypatch.setattr(settings, "auth_login_rate_window_seconds", 60)
+    email = _email()
+    statuses = []
+    for i in range(8):
+        if i % 2:
+            r = await client.post(
+                "/auth/token", data={"username": email, "password": "nope1234"}
+            )
+        else:
+            r = await client.post(
+                "/auth/login", json={"email": email, "password": "nope1234"}
+            )
+        statuses.append(r.status_code)
+    assert statuses[5] == 429, statuses
+
+
 async def test_register_is_rate_limited(client, monkeypatch):
     # /auth/register: лимит из settings (прод-дефолт 3 / 3600s). Пиним явно
     # по той же причине, что и в test_login_is_rate_limited.

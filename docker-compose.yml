@@ -172,6 +172,24 @@ services:
       # поднимает AUTH_REGISTER_RATE_LIMIT (все запросы с одного IP шлюза).
       AUTH_REGISTER_RATE_LIMIT: ${AUTH_REGISTER_RATE_LIMIT:-3}
       AUTH_REGISTER_RATE_WINDOW_SECONDS: ${AUTH_REGISTER_RATE_WINDOW_SECONDS:-3600}
+      # Ревью безопасности 2026-10-03 (#2): эти настройки раньше НЕ доходили
+      # до контейнера (.env в образ не попадает, env_file не подключён) —
+      # в проде молча работали дефолты: SMS_PROVIDER=mock, без SMTP-логина,
+      # без HSTS. Дефолты ниже совпадают с app/config.py.
+      # SMS: при DEBUG=false mock запрещён (app/services/sms.py) — в проде
+      # обязательно SMS_PROVIDER=smsru + SMS_API_KEY.
+      SMS_PROVIDER: ${SMS_PROVIDER:-mock}
+      SMS_API_KEY: ${SMS_API_KEY:-}
+      AUTH_EMAIL_LOGIN_ENABLED: ${AUTH_EMAIL_LOGIN_ENABLED:-true}
+      AUTH_EMAIL_REGISTRATION_ENABLED: ${AUTH_EMAIL_REGISTRATION_ENABLED:-false}
+      AUTH_PHONE_REQUIRED: ${AUTH_PHONE_REQUIRED:-true}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # HSTS включать только когда сайт уже работает по HTTPS.
+      HSTS_ENABLED: ${HSTS_ENABLED:-false}
+      CSP_ENABLED: ${CSP_ENABLED:-false}
+      LOG_JSON: ${LOG_JSON:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -279,6 +297,11 @@ services:
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@show-ring.local}
+      # Письма шлёт именно этот воркер — без логина/TLS реальный SMTP
+      # (587/465) их не примет (ревью 2026-10-03, #2).
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SECRET_KEY: ${SECRET_KEY}
     depends_on:
       migrate:

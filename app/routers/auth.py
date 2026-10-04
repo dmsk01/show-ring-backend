@@ -54,6 +54,9 @@ _SEND_CODE_RESPONSE = {"message": "Код отправлен"}
 # оба токена в httpOnly-куках, в теле null (XSS-устойчиво для веба).
 _TOKEN_DELIVERY_HEADER = "X-Token-Delivery"
 
+# Общий ключ rate-limit'а для /auth/login и /auth/token (это один логин).
+_LOGIN_RATE_BUCKET = "/auth/login"
+
 
 def _access_cookie_path() -> str:
     # path должен совпадать с ПУБЛИЧНЫМ путём API (за nginx — /api/...),
@@ -286,6 +289,9 @@ async def login(
         window=settings.auth_login_rate_window_seconds,
         redis=redis,
         fail_closed=True,  # bug_247: см. /register
+        # Общий счётчик с /auth/token: раньше ключ включал путь, и
+        # чередование двух ручек удваивало число попыток подбора пароля.
+        bucket=_LOGIN_RATE_BUCKET,
     )
     _ensure_email_login_enabled()
     try:
@@ -322,6 +328,9 @@ async def login_form(
         window=settings.auth_login_rate_window_seconds,
         redis=redis,
         fail_closed=True,
+        # Общий счётчик с /auth/token: раньше ключ включал путь, и
+        # чередование двух ручек удваивало число попыток подбора пароля.
+        bucket=_LOGIN_RATE_BUCKET,
     )
     _ensure_email_login_enabled()
     try:

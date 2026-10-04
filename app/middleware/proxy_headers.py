@@ -58,6 +58,18 @@ def _is_trusted_peer(host: str | None) -> bool:
     return any(addr in net for net in _TRUSTED_NETS)
 
 
+def _rightmost_untrusted(xff: str) -> str:
+    """Самый правый адрес X-Forwarded-For, не принадлежащий нашим прокси.
+
+    Если вся цепочка — доверенные адреса, возвращаем самый левый из них.
+    """
+    hops = [h.strip() for h in xff.split(",") if h.strip()]
+    for hop in reversed(hops):
+        if not _is_trusted_peer(hop):
+            return hop
+    return hops[0] if hops else ""
+
+
 class ProxyHeadersMiddleware(BaseHTTPMiddleware):
     """
     Подменяет client IP из X-Forwarded-For, если peer в списке
@@ -70,9 +82,15 @@ class ProxyHeadersMiddleware(BaseHTTPMiddleware):
             if _is_trusted_peer(peer):
                 xff = request.headers.get("x-forwarded-for")
                 if xff:
-                    # X-Forwarded-For: "client, proxy1, proxy2".
-                    # Клиент — первый в списке (leftmost).
-                    real_ip = xff.split(",")[0].strip()
+                    # ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #1):
+                    # раньше брали самый ЛЕВЫЙ адрес. Но левую часть
+                    # присылает сам клиент, а прокси лишь дописывают
+                    # справа — "X-Forwarded-For: 1.2.3.4" от атакующего
+                    # становился его «IP» и обходил все rate-limit'ы.
+                    # Правильно: идти справа налево, пропуская наши
+                    # доверенные прокси; первый недоверенный адрес — и
+                    # есть клиент, каким его увидел крайний наш прокси.
+                    real_ip = _rightmost_untrusted(xff)
                     # ИСПРАВЛЕНО (bug_012 ultrareview): валидируем,
                     # что строка действительно IP. Без проверки:
                     # - empty XFF (nginx misconfig с пустым

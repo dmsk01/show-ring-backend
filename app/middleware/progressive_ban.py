@@ -70,6 +70,7 @@ async def check_rate_limit(
     redis: Redis,
     *,
     fail_closed: bool = False,
+    bucket: str | None = None,
 ) -> None:
     """
     Проверить rate limit для IP + endpoint.
@@ -97,7 +98,9 @@ async def check_rate_limit(
     endpoint'ов, сохраняя доступность остальных.
     """
     ip = request.client.host if request.client else "unknown"
-    endpoint = request.scope.get("path", request.url.path)
+    # bucket — общий счётчик для нескольких путей (например, /auth/login
+    # и /auth/token — один и тот же логин). По умолчанию — путь запроса.
+    endpoint = bucket or request.scope.get("path", request.url.path)
 
     rate_key = f"rate:{ip}:{endpoint}"  # sorted set запросов
     ban_key = f"ban:{ip}:{endpoint}"  # ключ активного бана

@@ -97,6 +97,7 @@ def update_task_status(task_id: str, request: StatusUpdateRequest):
 async def get_task_status(
     task_id: str,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> TaskResponse | TaskStatusResponse:
     # 1. БД-задачи (этап 8). UUID-проверка через try/except: если task_id
     # не UUID, это точно legacy-задача с произвольной строкой ID.
@@ -108,6 +109,11 @@ async def get_task_status(
     if uid is not None:
         db_task = await task_repo.get_task(db, uid)
         if db_task is not None:
+            # ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #14): ручка была
+            # публичной и отдавала payload/result/created_by любому, кто
+            # знает UUID задачи. ACL — как у /download: автор или admin.
+            if not is_admin(user) and db_task.created_by != user.id:
+                raise HTTPException(403, "forbidden")
             return TaskResponse.model_validate(db_task)
 
     # 2. Legacy in-memory.
