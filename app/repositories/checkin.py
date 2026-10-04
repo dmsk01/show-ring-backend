@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from datetime import datetime, timezone
 
-from sqlalchemy import delete, exists, func, or_, select
+from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.dog import DogDocument
+from app.models.dog import Dog, DogDocument, DogPhoto
 from app.models.file import UploadedFile
-from app.models.show import Show, ShowEntry, ShowStaff, ShowStatus
+from app.models.reference import ShowClass
+from app.models.show import (
+    AttendanceStatus,
+    EntryCheck,
+    EntryCheckKind,
+    Show,
+    ShowEntry,
+    ShowStaff,
+    ShowStatus,
+)
 from app.models.user import User
 
 # Документы доступны персоналу, пока выставка «живая».
@@ -111,3 +121,158 @@ async def get_user_by_email_ci(db: AsyncSession, email: str) -> User | None:
     """
     stmt = select(User).where(func.lower(User.email) == email.strip().lower()).limit(1)
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def list_participant_entries(
+    db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID
+) -> list[ShowEntry]:
+    """Записи, где человек — записавший, хендлер или владелец собаки."""
+    stmt = (
+        select(ShowEntry)
+        .join(Dog, Dog.id == ShowEntry.dog_id)
+        .where(
+            ShowEntry.show_id == show_id,
+            or_(
+                ShowEntry.registered_by == user_id,
+                ShowEntry.handler_id == user_id,
+                Dog.owner_id == user_id,
+            ),
+        )
+        .order_by(ShowEntry.catalog_number.asc().nulls_last(), ShowEntry.created_at)
+    )
+    return list((await db.execute(stmt)).scalars().unique())
+
+
+async def search_entries(
+    db: AsyncSession, show_id: uuid.UUID, q: str, limit: int = 20
+) -> list[ShowEntry]:
+    """
+    Поиск на стойке. Цифры (до 6) — номер каталога; «+…» — телефон
+    записавшего; иначе — точный чип/клеймо или подстрока клички.
+    """
+    q = q.strip()
+    stmt = (
+        select(ShowEntry)
+        .join(Dog, Dog.id == ShowEntry.dog_id)
+        .where(ShowEntry.show_id == show_id)
+    )
+    if q.isdigit() and len(q) <= 6:
+        stmt = stmt.where(
+            or_(ShowEntry.catalog_number == int(q), Dog.microchip == q, Dog.tattoo == q)
+        )
+    elif q.startswith("+"):
+        stmt = stmt.join(User, User.id == ShowEntry.registered_by).where(User.phone == q)
+    else:
+        lowered = q.lower()
+        stmt = stmt.where(
+            or_(
+                func.lower(Dog.microchip) == lowered,
+                func.lower(Dog.tattoo) == lowered,
+                Dog.name.ilike(f"%{q}%"),
+            )
+        )
+    stmt = stmt.order_by(ShowEntry.catalog_number.asc().nulls_last()).limit(limit)
+    return list((await db.execute(stmt)).scalars().unique())
+
+
+async def get_entry_for_update(
+    db: AsyncSession, show_id: uuid.UUID, entry_id: uuid.UUID
+) -> ShowEntry | None:
+    stmt = (
+        select(ShowEntry)
+        .where(ShowEntry.id == entry_id, ShowEntry.show_id == show_id)
+        .with_for_update()
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def list_checks(db: AsyncSession, entry_ids: Iterable[uuid.UUID]) -> list[EntryCheck]:
+    ids = list(entry_ids)
+    if not ids:
+        return []
+    stmt = (
+        select(EntryCheck)
+        .where(EntryCheck.entry_id.in_(ids))
+        .order_by(EntryCheck.created_at, EntryCheck.id)
+    )
+    return list((await db.execute(stmt)).scalars())
+
+
+async def load_card_context(db: AsyncSession, entries: list[ShowEntry]):
+    """Пакетная подгрузка всего, что нужно карточкам (без N+1)."""
+    dog_ids = {e.dog_id for e in entries}
+    class_ids = {e.show_class_id for e in entries}
+    user_ids = {e.registered_by for e in entries}
+    dogs = {d.id: d for d in (await db.execute(select(Dog).where(Dog.id.in_(dog_ids)))).scalars()}
+    classes = {
+        c.id: c for c in (await db.execute(select(ShowClass).where(ShowClass.id.in_(class_ids)))).scalars()
+    }
+    users = {
+        u.id: u
+        for u in (
+            await db.execute(
+                select(User).options(selectinload(User.profile)).where(User.id.in_(user_ids))
+            )
+        ).scalars()
+    }
+    photos = (
+        await db.execute(
+            select(DogPhoto)
+            .where(DogPhoto.dog_id.in_(dog_ids))
+            .order_by(DogPhoto.is_primary.desc(), DogPhoto.position)
+        )
+    ).scalars()
+    avatars: dict[uuid.UUID, uuid.UUID] = {}
+    for p in photos:
+        avatars.setdefault(p.dog_id, p.file_id)
+    docs = await list_dog_documents(db, dog_ids)
+    checks = await list_checks(db, [e.id for e in entries])
+    return dogs, classes, users, avatars, docs, checks
+
+
+async def load_users(db: AsyncSession, user_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, User]:
+    ids = [i for i in set(user_ids) if i is not None]
+    if not ids:
+        return {}
+    stmt = select(User).options(selectinload(User.profile)).where(User.id.in_(ids))
+    return {u.id: u for u in (await db.execute(stmt)).scalars()}
+
+
+async def attendance_counts(db: AsyncSession, show_id: uuid.UUID) -> dict[AttendanceStatus, int]:
+    stmt = (
+        select(ShowEntry.attendance_status, func.count())
+        .where(ShowEntry.show_id == show_id)
+        .group_by(ShowEntry.attendance_status)
+    )
+    return {status: count for status, count in (await db.execute(stmt)).all()}
+
+
+async def precheck_queue(db: AsyncSession, show_id: uuid.UUID, limit: int = 200) -> list[ShowEntry]:
+    """Записи, у собак которых есть документы, но нет отметки docs_precheck."""
+    has_docs = exists().where(DogDocument.dog_id == ShowEntry.dog_id)
+    has_precheck = exists().where(
+        EntryCheck.entry_id == ShowEntry.id, EntryCheck.kind == EntryCheckKind.docs_precheck
+    )
+    stmt = (
+        select(ShowEntry)
+        .where(ShowEntry.show_id == show_id, has_docs, ~has_precheck)
+        .order_by(ShowEntry.catalog_number.asc().nulls_last(), ShowEntry.created_at)
+        .limit(limit)
+    )
+    return list((await db.execute(stmt)).scalars())
+
+
+async def mark_registered_absent(db: AsyncSession, show_id: uuid.UUID) -> int:
+    """При старте выставки: все ещё не отмеченные записи → absent."""
+    res = await db.execute(
+        update(ShowEntry)
+        .where(
+            ShowEntry.show_id == show_id,
+            ShowEntry.attendance_status == AttendanceStatus.registered,
+        )
+        .values(
+            attendance_status=AttendanceStatus.absent,
+            attendance_changed_at=datetime.now(timezone.utc),
+        )
+    )
+    return res.rowcount or 0
