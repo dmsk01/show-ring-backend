@@ -124,6 +124,22 @@ class Settings(BaseSettings):
     # за общими адресами (CGNAT).
     otp_subnet_limit: int = 60
 
+    # --- Капча ALTCHA и защита входа (план защиты 2026-10-05, этап 2) ---
+    # Капча на /auth/send-code (всегда) и /auth/login (после неудач).
+    # Выключать только для тестов и локальной отладки.
+    captcha_enabled: bool = True
+    # Итераций PBKDF2 на одну попытку перебора. 5000 ≈ 0,5 с решения на
+    # устройстве пользователя; больше — дороже ботам, но медленнее людям.
+    captcha_cost: int = 5000
+    # Сколько живёт задача (и запись о её использовании в Redis).
+    captcha_ttl_seconds: int = 600
+    # Неудачных входов (с IP или для email), после которых нужна капча.
+    login_captcha_after_failures: int = 3
+    # Неудачных входов для email, после которых аккаунт закрыт для входа
+    # по паролю на login_lockout_seconds (это же окно подсчёта неудач).
+    login_lockout_failures: int = 10
+    login_lockout_seconds: int = 900
+
     # --- Способы входа (docs/superpowers/specs/2026-10-01-phone-primary-auth-design.md) ---
     # Телефон (OTP) — основной способ и не отключается. Email — дополнительный:
     # вход по почте можно выключить флагом; регистрация по почте по умолчанию

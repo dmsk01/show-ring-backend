@@ -26,6 +26,10 @@ from app.services.otp_auth import (
     verify_otp_code,
 )
 from app.utils.net import ip_subnet
+from app.services import login_guard
+from app.services.captcha import require_captcha
+from app.services.email_tasks import enqueue_transactional_email
+from app.repositories import user as user_repo
 from app.services.consent import ConsentKind, ConsentRequiredError
 from app.services.consent import grant as consent_grant
 from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
@@ -40,6 +44,7 @@ from app.schemas.user import (
     ResendVerification,
     TokenResponse,
     UserCreate,
+    UserLogin,
 )
 
 # Анти-enumeration: ответ одинаков, существует адрес или нет.
@@ -285,6 +290,45 @@ async def confirm_email_change_endpoint(
     return {"message": "Email изменён"}
 
 
+async def _guarded_login(
+    request: Request,
+    response: Response,
+    db: AsyncSession,
+    redis: Redis,
+    email: str,
+    password: str,
+    captcha: str | None,
+) -> TokenResponse:
+    """Вход по паролю под защитой login_guard: капча и блокировка аккаунта."""
+    ip = request.client.host if request.client else "unknown"
+    await login_guard.check_before_login(redis, email=email, ip=ip, captcha=captcha)
+    try:
+        tokens = await login_user(db, email, password)
+    except ValueError as e:
+        if str(e) == "invalid_credentials":
+            locked_now = await login_guard.record_failure(redis, email=email, ip=ip)
+            if locked_now:
+                await _notify_account_locked(db, email, ip)
+        raise HTTPException(status_code=401, detail=str(e))
+    await login_guard.record_success(redis, email=email)
+    return _deliver_tokens(request, response, tokens)
+
+
+async def _notify_account_locked(db: AsyncSession, email: str, ip: str) -> None:
+    """Письмо владельцу о блокировке (только если адрес принадлежит аккаунту)."""
+    user = await user_repo.get_user_by_email(db, email)
+    if user is None or not user.email:
+        return
+    await enqueue_transactional_email(
+        db,
+        user_id=user.id,
+        to_email=user.email,
+        template_name="account_locked",
+        context={"minutes": settings.login_lockout_seconds // 60, "ip": ip},
+    )
+    await db.commit()
+
+
 @router.post(
     "/login",
     summary="Вход в систему",
@@ -297,7 +341,7 @@ async def confirm_email_change_endpoint(
 )
 async def login(
     request: Request,
-    body: UserCreate,
+    body: UserLogin,
     response: Response,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
@@ -313,12 +357,9 @@ async def login(
         bucket=_LOGIN_RATE_BUCKET,
     )
     _ensure_email_login_enabled()
-    try:
-        return _deliver_tokens(
-            request, response, await login_user(db, body.email, body.password)
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    return await _guarded_login(
+        request, response, db, redis, body.email, body.password, body.captcha
+    )
 
 
 @router.post(
@@ -352,13 +393,12 @@ async def login_form(
         bucket=_LOGIN_RATE_BUCKET,
     )
     _ensure_email_login_enabled()
-    try:
-        # OAuth2 спецификация требует поле username — мапим его на email.
-        return _deliver_tokens(
-            request, response, await login_user(db, form.username, form.password)
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    # OAuth2 спецификация требует поле username — мапим его на email.
+    # Поля для капчи в форме нет: когда она станет нужна — 400
+    # captcha_required, вход через /auth/login.
+    return await _guarded_login(
+        request, response, db, redis, form.username, form.password, None
+    )
 
 
 @router.post(
@@ -457,6 +497,9 @@ async def send_code(
         bucket="send-code:subnet",
         client_key=ip_subnet(client_ip),
     )
+    # Капча — после дешёвых лимитов, но до любой работы с SMS: каждое SMS
+    # стоит денег, а решение задачи стоит боту CPU.
+    await require_captcha(redis, body.captcha)
     try:
         await send_otp_code(redis, sms, body.phone)
     except OTPCountryNotAllowedError:

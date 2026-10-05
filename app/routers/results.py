@@ -15,9 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_user_optional
 from app.models.show import ShowEntry
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE_LARGE, cap_per_page
 from app.repositories import result as repo
 from app.schemas.result import (
     BestInGroupRequest,
@@ -177,7 +178,9 @@ async def list_results(
     page: int = Query(1, ge=1),
     per_page: int = Query(200, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE_LARGE)
     items = await repo.list_results_for_show(
         db, show_id, page=page, per_page=per_page
     )

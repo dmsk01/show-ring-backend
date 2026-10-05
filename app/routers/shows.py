@@ -17,9 +17,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, is_admin, require_any_role
+from app.dependencies import get_current_user, is_admin, require_any_role, get_current_user_optional
 from app.models.show import ShowStatus
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE, ANON_MAX_PER_PAGE_LARGE, cap_per_page
 from app.repositories import show as repo
 from app.schemas.show import (
     AvailableClass,
@@ -131,7 +132,9 @@ async def list_shows(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     # Триммим на границе ввода: "пусто/одни пробелы" → None (без фильтра).
     search = search.strip() or None if search else None
     items = await repo.list_shows(
@@ -539,7 +542,9 @@ async def list_entries(
     page: int = Query(1, ge=1),
     per_page: int = Query(200, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE_LARGE)
     items = await repo.list_show_entries(
         db, show_id, page=page, per_page=per_page
     )

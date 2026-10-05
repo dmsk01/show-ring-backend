@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, user_rate_limit
 from app.models.user import User
 from app.repositories import show as show_repo
 from app.repositories import task as task_repo
@@ -36,6 +36,10 @@ from app.services.rabbit import rabbit_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/shows", tags=["documents"])
+
+# Генерация документов — тяжёлая задача в очереди (docx/pdf на тысячи
+# собак). Общий лимит на все виды документов (план защиты 2026-10-05).
+_DOCS_LIMIT = user_rate_limit("documents:generate", limit=10, window=3600)
 
 # Имя очереди задач генерации документов. Все типы задач этой подсистемы
 # идут в одну очередь — воркер диспатчит по полю type. Если бы для разных
@@ -110,6 +114,7 @@ async def _publish_task(
 
 @router.post(
     "/{show_id}/catalog/generate",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Запустить генерацию каталога выставки",
@@ -130,6 +135,7 @@ async def generate_catalog(
 
 @router.post(
     "/{show_id}/diplomas/generate",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Запустить генерацию пакета дипломов для всех участников",
@@ -150,6 +156,7 @@ async def generate_diplomas(
 
 @router.post(
     "/{show_id}/entries/{entry_id}/diploma",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Сгенерировать диплом для одного участника",
@@ -180,6 +187,7 @@ async def generate_diploma(
 
 @router.post(
     "/{show_id}/official/catalog",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Каталог выставки в формате РКФ (docx)",
@@ -201,6 +209,7 @@ async def generate_official_catalog(
 
 @router.post(
     "/{show_id}/official/diplomas",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Пакет дипломов в формате РКФ (docx)",
@@ -222,6 +231,7 @@ async def generate_official_diplomas(
 
 @router.post(
     "/{show_id}/entries/{entry_id}/official/diploma",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Диплом участника в формате РКФ (docx)",
@@ -244,6 +254,7 @@ async def generate_official_diploma(
 
 @router.post(
     "/{show_id}/official/ring-sheets",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Ринговые ведомости в формате РКФ (docx)",
@@ -268,6 +279,7 @@ async def generate_official_ring_sheets(
 
 @router.post(
     "/{show_id}/official/certificates",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Сертификаты титулов выставки в формате РКФ (docx)",
@@ -289,6 +301,7 @@ async def generate_official_certificates(
 
 @router.post(
     "/{show_id}/entries/{entry_id}/official/certificates",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Сертификаты титулов одной собаки в формате РКФ (docx)",

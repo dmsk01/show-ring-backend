@@ -11,9 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, is_admin
+from app.dependencies import get_current_user, is_admin, user_rate_limit, get_current_user_optional
 from app.models.dog import Dog, DogPhoto, SexEnum
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE, cap_per_page
 from app.repositories import dog as repo
 from app.repositories import result as result_repo
 from app.schemas.dog import (
@@ -65,6 +66,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
 @router.post(
     "",
     response_model=DogResponse,
+    dependencies=[Depends(user_rate_limit("create:dog", limit=20, window=3600))],
     status_code=status.HTTP_201_CREATED,
     summary="Добавить собаку",
 )
@@ -102,7 +104,9 @@ async def list_dogs(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     items = await repo.list_dogs(
         db,
         breed_id=breed_id,

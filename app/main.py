@@ -19,6 +19,7 @@ from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.routers import (
     ads,
     auth,
+    captcha,
     checkin,
     classifieds,
     documents,
@@ -183,6 +184,7 @@ if settings.cors_allow_origins:
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(captcha.router)
 # Feature flags: публичный GET для фронта + админ-переключатель. Гейтинг
 # роутов делает require_flag из app.services.feature_flags.
 app.include_router(feature_flags.router)

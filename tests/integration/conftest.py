@@ -61,6 +61,16 @@ def _email_registration_enabled(monkeypatch):
     monkeypatch.setattr(settings, "auth_email_registration_enabled", True)
 
 
+@pytest.fixture(autouse=True)
+def _captcha_disabled(monkeypatch):
+    """Капча выключена: тесты шлют /auth/send-code и /auth/login сотнями.
+
+    Саму капчу и защиту входа проверяет test_captcha.py — он включает её
+    своей фикстурой.
+    """
+    monkeypatch.setattr(settings, "captcha_enabled", False)
+
+
 @pytest_asyncio.fixture
 async def test_redis():
     client = Redis.from_url(_test_redis_url(), decode_responses=True)

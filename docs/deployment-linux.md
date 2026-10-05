@@ -136,6 +136,97 @@ sudo ufw status           # проверка: увидишь список раз
 
 ---
 
+## 5.1. Защитить сервер: SSH по ключу, fail2ban, автообновления
+
+Сервер с открытым SSH начинают перебирать боты в первые минуты после создания.
+Пароль root — главная мишень. Ниже — минимум, который закрывает типовые атаки
+(план защиты 2026-10-05).
+
+> ⚠️ **Порядок важен.** Пароли отключаем только после того, как убедились, что вход
+> по ключу работает **в новом окне терминала**. Старую SSH-сессию не закрывай, пока
+> всё не проверено — через неё можно откатить настройки.
+
+### Шаг 1. Отдельный пользователь вместо root
+
+```bash
+adduser deploy                         # спросит пароль — он нужен для sudo
+usermod -aG sudo,docker deploy         # права администратора и Docker
+```
+
+### Шаг 2. Ключ SSH (на **своём** компьютере, не на сервере)
+
+```bash
+ssh-keygen -t ed25519                  # Enter на все вопросы (или задай пароль ключа)
+ssh-copy-id deploy@123.45.67.89        # скопировать публичный ключ на сервер
+ssh deploy@123.45.67.89                # проверка: должен пустить без пароля сервера
+```
+
+На Windows без `ssh-copy-id` — содержимое `~/.ssh/id_ed25519.pub` вставь на сервере
+в `/home/deploy/.ssh/authorized_keys` (права: папка `700`, файл `600`, владелец `deploy`).
+
+### Шаг 3. Запретить вход по паролю и под root
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/99-hardening.conf <<'EOF'
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+MaxAuthTries 3
+EOF
+sudo sshd -t && sudo systemctl reload ssh   # проверка синтаксиса и применение
+```
+
+Открой **новое** окно и зайди `ssh deploy@123.45.67.89`. Если пускает — готово.
+Если нет — в старой сессии удали файл `99-hardening.conf` и снова `reload ssh`.
+
+### Шаг 4. fail2ban — бан IP после неудачных попыток входа
+
+```bash
+sudo apt install -y fail2ban
+sudo tee /etc/fail2ban/jail.local <<'EOF'
+[sshd]
+enabled  = true
+backend  = systemd
+maxretry = 5
+findtime = 10m
+bantime  = 1h
+EOF
+sudo systemctl enable --now fail2ban
+sudo fail2ban-client status sshd       # проверка: jail активен, видно число банов
+```
+
+### Шаг 5. Автоматические обновления безопасности
+
+```bash
+sudo apt install -y unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades   # ответь «Yes»
+cat /etc/apt/apt.conf.d/20auto-upgrades           # должно быть "1" в обеих строках
+```
+
+Обновления ставятся ночью сами. Ядро применяется после перезагрузки — раз в месяц
+стоит делать `sudo reboot` в спокойное время (стек поднимется сам: `restart: unless-stopped`).
+
+### Шаг 6. Лимит логов Docker
+
+В логах nginx и api есть IP посетителей, а по умолчанию Docker не ограничивает их
+размер. В `docker-compose.prod.yml` ротация уже задана для сервисов стека; эта
+настройка — подстраховка для всех остальных контейнеров:
+
+```bash
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "20m", "max-file": "5" }
+}
+EOF
+sudo systemctl restart docker          # действует на контейнеры, созданные после
+```
+
+> Перезапуск Docker на минуту останавливает работающий стек (он поднимется сам).
+> Делай это до первого запуска или в спокойное время.
+
+---
+
 ## 6. Настроить доступ к GitHub
 
 Код лежит в двух репозиториях на GitHub. Как их скачать — зависит от того, открытые

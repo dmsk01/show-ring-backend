@@ -62,6 +62,12 @@ class UserCreate(BaseModel):
         return v
 
 
+class UserLogin(UserCreate):
+    # Решение капчи ALTCHA — нужно после нескольких неудачных попыток
+    # входа (app/services/login_guard.py), иначе игнорируется.
+    captcha: str | None = Field(None, max_length=8192)
+
+
 class RoleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -153,6 +159,10 @@ class RefreshRequest(BaseModel):
 
 class PhoneSendCodeRequest(BaseModel):
     phone: E164Phone
+    # Решение капчи ALTCHA (base64). Обязательно для /auth/send-code при
+    # captcha_enabled; в /users/me/phone/send-code (уже вошедший
+    # пользователь) не используется.
+    captcha: str | None = Field(None, max_length=8192)
 
 
 class PhoneVerifyCodeRequest(BaseModel):

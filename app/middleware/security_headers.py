@@ -40,6 +40,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         h = response.headers
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
+        # Ответы API не индексируются поисковиками (план защиты 2026-10-05):
+        # robots.txt закрывает /api/ для добросовестных роботов, заголовок —
+        # на случай прямых ссылок на JSON.
+        h.setdefault("X-Robots-Tag", "noindex, nofollow")
         h.setdefault(
             "Referrer-Policy", "strict-origin-when-cross-origin"
         )

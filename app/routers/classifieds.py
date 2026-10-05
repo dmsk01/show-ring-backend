@@ -13,7 +13,12 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, get_current_user_optional, is_admin
+from app.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    is_admin,
+    user_rate_limit,
+)
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.classified import (
     AnimalAvailability,
@@ -23,6 +28,7 @@ from app.models.classified import (
 from app.models.classified import Classified
 from app.models.dog import SexEnum
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE, cap_per_page
 from app.redis import get_redis
 from app.repositories import classified as repo
 from app.schemas.classified import (
@@ -89,6 +95,7 @@ async def _sync_contacts_consent(
 @router.post(
     "",
     response_model=ClassifiedResponse,
+    dependencies=[Depends(user_rate_limit("create:classified", limit=20, window=3600))],
     status_code=status.HTTP_201_CREATED,
     summary="Создать объявление",
 )
@@ -130,6 +137,7 @@ async def search_classifieds(
     redis: Redis = Depends(get_redis),
     viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     # bug_213 audit 2026-05-28: FTS-запрос с 200-символьным q
     # запускает PostgreSQL to_tsquery + GIN-поиск — CPU-стоит. Для
     # анонимного эндпоинта это вектор DoS на каждый запрос.
@@ -177,6 +185,7 @@ async def list_classifieds(
     db: AsyncSession = Depends(get_db),
     viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     items = await repo.list_classifieds(
         db,
         category=category,

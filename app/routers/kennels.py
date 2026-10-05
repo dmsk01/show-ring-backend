@@ -11,9 +11,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, get_current_user_optional
+from app.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    user_rate_limit,
+)
 from app.models.kennel import Kennel
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE, cap_per_page
 from app.repositories import kennel as repo
 from app.schemas.kennel import (
     KennelCreate,
@@ -83,6 +88,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
 @router.post(
     "",
     response_model=KennelResponse,
+    dependencies=[Depends(user_rate_limit("create:kennel", limit=20, window=3600))],
     status_code=status.HTTP_201_CREATED,
     summary="Создать питомник",
 )
@@ -118,6 +124,7 @@ async def list_kennels(
     db: AsyncSession = Depends(get_db),
     viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     items = await repo.list_kennels(
         db, city=city, search=search, sort_by=sort_by, order=order,
         page=page, per_page=per_page,

@@ -2,11 +2,13 @@ import logging
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, WebSocket
+from redis.asyncio import Redis
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from jose import JWTError
 from app import redis as redis_state
 from app.database import get_db
+from app.redis import get_redis
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
 from app.repositories.user import get_user_by_id
@@ -202,3 +204,34 @@ def require_any_role(*roles: str):
 # появится super_admin), правка в одном месте.
 def is_admin(user: User) -> bool:
     return any(r.role.value == "admin" for r in user.roles)
+
+
+def user_rate_limit(bucket: str, *, limit: int, window: int):
+    """
+    Зависимость: лимит действия на ПОЛЬЗОВАТЕЛЯ (план защиты 2026-10-05).
+
+    Ключ — user_id, а не IP: смена адреса лимит не обходит, а соседи по
+    NAT друг другу не мешают. Тот же прогрессивный бан, что у
+    check_rate_limit. fail-open: при сбое Redis действие не блокируем —
+    это защита от злоупотреблений, а не от взлома.
+
+        @router.post("/tickets", dependencies=[Depends(
+            user_rate_limit("support:ticket", limit=5, window=3600))])
+    """
+
+    async def dependency(
+        request: Request,
+        user: User = Depends(get_current_user),
+        redis: Redis = Depends(get_redis),
+    ) -> None:
+        await check_rate_limit(
+            request,
+            limit,
+            window,
+            redis,
+            bucket=bucket,
+            client_key=f"user:{user.id}",
+        )
+
+    return dependency
+
