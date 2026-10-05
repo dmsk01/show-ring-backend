@@ -43,8 +43,10 @@ from app.routers.admin import references as admin_references
 from app.routers.admin import analytics as admin_analytics
 from app.routers.admin import moderation as admin_moderation
 from app.routers.admin import upload_quotas as admin_upload_quotas
+from app.routers.admin import security as admin_security
 from app.redis import init_redis, close_redis
 from app.services.rabbit import rabbit_service
+from app.middleware.metrics import MetricsMiddleware
 from app.services.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,8 @@ register_error_handlers(app)
 #                       прочитают.
 #   7. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
 app.add_middleware(RequestIdMiddleware)
+# Метрики 5xx и медленных запросов — до остальных, чтобы видеть итоговый статус.
+app.add_middleware(MetricsMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(SanitizationMiddleware)
 app.add_middleware(IdempotencyMiddleware)
@@ -220,6 +224,7 @@ app.include_router(ads.router)
 app.include_router(admin_analytics.router)
 app.include_router(admin_analytics.show_report_router)
 app.include_router(admin_moderation.router)
+app.include_router(admin_security.router)
 # Этап 11: онлайн-поддержка (тикеты + WebSocket чат).
 app.include_router(support.router)
 # Этап 17: блог (публичный read + write для admin/organizer).

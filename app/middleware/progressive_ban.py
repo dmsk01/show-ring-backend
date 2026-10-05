@@ -134,6 +134,11 @@ async def check_rate_limit(
         # Lua возвращает массив [banned, retry_after]
         banned, retry_after = int(result[0]), int(result[1])
         if banned:
+            # Импорт здесь: security_metrics → app.redis, а этот модуль
+            # грузится очень рано (dependencies) — избегаем циклов.
+            from app.services import security_metrics
+
+            await security_metrics.record(security_metrics.RATE_LIMITED, redis=redis)
             raise HTTPException(
                 status_code=429,
                 detail="Too many requests",

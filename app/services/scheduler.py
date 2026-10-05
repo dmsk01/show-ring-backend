@@ -35,6 +35,7 @@ from app.models.user import RefreshToken
 from app.repositories import outbox as outbox_repo
 from app.schemas.task import TaskMessage
 from app.services import checkin_reminders
+from app.services import alerts
 from app.services.retention import purge_expired_personal_data
 from app.services.task_queues import QUEUE_FOR_TASK_TYPE as _QUEUE_FOR_TASK_TYPE
 
@@ -192,6 +193,14 @@ async def start_scheduler() -> None:
         enforce_data_retention,
         CronTrigger(hour=3, minute=30),
         id="enforce_data_retention",
+        replace_existing=True,
+    )
+
+    # Каждую минуту — правила оповещений о признаках атаки.
+    sched.add_job(
+        check_security_alerts,
+        CronTrigger(minute="*"),
+        id="check_security_alerts",
         replace_existing=True,
     )
 
@@ -383,3 +392,20 @@ async def enforce_data_retention() -> None:
             logger.info("enforce_data_retention: %s", stats)
         except Exception:  # noqa: BLE001 — cron не должен ронять шедулер
             logger.exception("enforce_data_retention failed")
+
+
+async def check_security_alerts() -> None:
+    """Правила оповещений (app/services/alerts.py) по счётчикам в Redis."""
+    async with _scheduler_lock("check_security_alerts", ttl_seconds=55) as acquired:
+        if not acquired:
+            return
+        rc = redis_module.redis_client
+        if rc is None:
+            return
+        try:
+            fired = await alerts.check_and_send(rc)
+            if fired:
+                logger.warning("security alerts fired: %s", fired)
+        except Exception:  # noqa: BLE001 — cron не должен ронять шедулер
+            logger.exception("check_security_alerts failed")
+

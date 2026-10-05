@@ -140,6 +140,24 @@ class Settings(BaseSettings):
     login_lockout_failures: int = 10
     login_lockout_seconds: int = 900
 
+    # --- Метрики и оповещения (план защиты 2026-10-05, этап 3) ---
+    # Каналы оповещений; пустые — только запись в лог app.security.
+    alert_telegram_bot_token: str | None = None
+    alert_telegram_chat_id: str | None = None
+    alert_email: str | None = None
+    # Одно и то же правило — не чаще раза в N секунд.
+    alert_cooldown_seconds: int = 3600
+    # Пороги правил (app/services/alerts.py).
+    alert_rate_limited_10m: int = 300
+    alert_5xx_10m: int = 20
+    alert_sms_min_sent_1h: int = 30
+    alert_sms_min_conversion: float = 0.3
+    alert_sms_budget_share: float = 0.8
+    alert_account_locked_1h: int = 10
+    alert_captcha_failed_10m: int = 100
+    # Запрос дольше — считается медленным (метрика slow_request).
+    slow_request_seconds: float = 2.0
+
     # --- Способы входа (docs/superpowers/specs/2026-10-01-phone-primary-auth-design.md) ---
     # Телефон (OTP) — основной способ и не отключается. Email — дополнительный:
     # вход по почте можно выключить флагом; регистрация по почте по умолчанию
@@ -234,6 +252,9 @@ class Settings(BaseSettings):
         "smtp_password",
         "sms_api_key",
         "internal_api_key",
+        "alert_telegram_bot_token",
+        "alert_telegram_chat_id",
+        "alert_email",
         mode="before",
     )
     @classmethod

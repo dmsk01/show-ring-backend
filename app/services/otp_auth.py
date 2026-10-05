@@ -31,6 +31,7 @@ from app.config import settings
 from app.repositories import user as user_repo
 from app.schemas.user import TokenResponse
 from app.services import consent as consent_svc
+from app.services import security_metrics
 from app.services.auth import issue_token_pair
 from app.services.sms import SMSProvider
 from app.utils.security import hash_token
@@ -199,6 +200,7 @@ async def send_otp_code(
     # 4. Отправка. Сбой провайдера пробрасывается (роутер → 502);
     #    cooldown при этом остаётся — клиент не должен долбить ретраями.
     await sms.send(phone, _SMS_TEXT[purpose].format(code=code))
+    await security_metrics.record(security_metrics.SMS_SENT, redis=redis)
 
     if settings.debug:
         # Dev-flow без SMS-шлюза: код в логе. В проде — никогда.
@@ -271,6 +273,7 @@ async def consume_otp_code(
             "otp_verify_race purpose=%s subject=%s", purpose.value, subject
         )
         raise OTPExpiredError
+    await security_metrics.record(security_metrics.OTP_VERIFIED, redis=redis)
 
 
 async def verify_otp_code(

@@ -29,6 +29,7 @@ from fastapi import HTTPException
 from redis.asyncio import Redis
 
 from app.config import settings
+from app.services import security_metrics
 
 logger = logging.getLogger(__name__)
 security_logger = logging.getLogger("app.security")
@@ -89,6 +90,7 @@ async def require_captcha(redis: Redis, payload: str | None) -> None:
             result.invalid_signature,
             result.invalid_solution,
         )
+        await security_metrics.record(security_metrics.CAPTCHA_FAILED, redis=redis)
         raise HTTPException(status_code=400, detail="captcha_invalid")
 
     # Одноразовость: SET NX атомарен — из двух параллельных запросов с одним
@@ -98,4 +100,5 @@ async def require_captcha(redis: Redis, payload: str | None) -> None:
     )
     if not first_use:
         security_logger.warning("captcha_replay")
+        await security_metrics.record(security_metrics.CAPTCHA_FAILED, redis=redis)
         raise HTTPException(status_code=400, detail="captcha_invalid")

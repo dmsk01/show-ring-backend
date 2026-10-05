@@ -27,6 +27,7 @@ from fastapi import HTTPException
 from redis.asyncio import Redis
 
 from app.config import settings
+from app.services import security_metrics
 from app.services.captcha import require_captcha
 
 security_logger = logging.getLogger("app.security")
@@ -69,6 +70,7 @@ async def check_before_login(
 async def record_failure(redis: Redis, *, email: str, ip: str) -> bool:
     """Учесть неудачный вход. True — аккаунт только что заблокирован."""
     window = settings.login_lockout_seconds
+    await security_metrics.record(security_metrics.LOGIN_FAILED, redis=redis)
     fails = await redis.incr(_email_key(email))
     if fails == 1:
         await redis.expire(_email_key(email), window)
@@ -83,6 +85,7 @@ async def record_failure(redis: Redis, *, email: str, ip: str) -> bool:
             security_logger.warning(
                 "login_account_locked email=%s ip=%s", _norm(email), ip
             )
+            await security_metrics.record(security_metrics.ACCOUNT_LOCKED, redis=redis)
             return True
     return False
 
