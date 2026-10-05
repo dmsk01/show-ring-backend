@@ -250,7 +250,10 @@ async def test_send_reauth_uses_purpose_and_subject_keys():
     assert _stored_code_keys(redis) == [f"otp:reauth:code:{user_id}"]
     cooldown_key = redis.set.await_args_list[0].args[0]
     assert cooldown_key == f"otp:reauth:cooldown:{PHONE}"
-    redis.incr.assert_awaited_once_with(f"otp:daily:{PHONE}")
+    # INCR-ов два: суточный лимит номера и общий бюджет SMS сервиса.
+    incr_keys = [c.args[0] for c in redis.incr.await_args_list]
+    assert incr_keys[0] == f"otp:daily:{PHONE}"
+    assert incr_keys[1].startswith("otp:budget:")
     # SMS уходит на номер, текст — под цель.
     sent_phone, message = sms.send.await_args.args
     assert sent_phone == PHONE
@@ -276,3 +279,27 @@ async def test_consume_success_burns_code():
     )
 
     redis.delete.assert_any_await("otp:link_phone:code:u1:+7")
+
+
+async def test_send_rejects_foreign_number_before_any_counter(monkeypatch):
+    monkeypatch.setattr(settings, "sms_allowed_phone_prefixes", ["+7"])
+    redis, sms = _redis(), _sms()
+
+    with pytest.raises(otp_auth.OTPCountryNotAllowedError):
+        await otp_auth.send_otp_code(redis, sms, "+442071838750")
+
+    # Ни cooldown, ни счётчики не тронуты, SMS не ушло.
+    redis.set.assert_not_awaited()
+    redis.incr.assert_not_awaited()
+    sms.send.assert_not_awaited()
+
+
+async def test_budget_threshold_is_logged(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "sms_daily_budget", 10)
+    # Суточный счётчик номера = 1, бюджет сервиса = 8 → порог 80%.
+    redis = _redis(incr=AsyncMock(side_effect=[1, 8]))
+
+    with caplog.at_level("WARNING", logger="app.security"):
+        await otp_auth.send_otp_code(redis, _sms(), PHONE)
+
+    assert "sms_budget_threshold share=80%" in caplog.text

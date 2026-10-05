@@ -35,8 +35,15 @@ services:
   api:
     logging: *default-logging
     # Прод: несколько uvicorn-воркеров вместо одного процесса.
+    # --limit-concurrency: сверх N одновременных соединений на воркер —
+    # быстрый 503 вместо очереди в памяти при перегрузке (план защиты
+    # 2026-10-05). WebSocket-соединения тоже считаются — при росте числа
+    # онлайн-пользователей поднимать UVICORN_LIMIT_CONCURRENCY.
+    # --timeout-keep-alive: не держать простаивающие keep-alive соединения.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0",
-              "--port", "8000", "--workers", "${UVICORN_WORKERS:-2}"]
+              "--port", "8000", "--workers", "${UVICORN_WORKERS:-2}",
+              "--limit-concurrency", "${UVICORN_LIMIT_CONCURRENCY:-400}",
+              "--timeout-keep-alive", "5"]
     environment:
       # JSON-список для pydantic-settings (list[str]).
       FORWARDED_ALLOW_IPS: '["172.28.0.0/16"]'

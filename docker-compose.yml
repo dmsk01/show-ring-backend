@@ -180,6 +180,12 @@ services:
       # обязательно SMS_PROVIDER=smsru + SMS_API_KEY.
       SMS_PROVIDER: ${SMS_PROVIDER:-mock}
       SMS_API_KEY: ${SMS_API_KEY:-}
+      # Анти SMS pumping (план защиты 2026-10-05). Дефолты = app/config.py.
+      SMS_ALLOWED_PHONE_PREFIXES: '${SMS_ALLOWED_PHONE_PREFIXES:-["+7"]}'
+      SMS_DAILY_BUDGET: ${SMS_DAILY_BUDGET:-1000}
+      OTP_SUBNET_LIMIT: ${OTP_SUBNET_LIMIT:-60}
+      # Потолок времени одного SQL-запроса приложения, мс (0 = выключен).
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-10000}
       AUTH_EMAIL_LOGIN_ENABLED: ${AUTH_EMAIL_LOGIN_ENABLED:-true}
       AUTH_EMAIL_REGISTRATION_ENABLED: ${AUTH_EMAIL_REGISTRATION_ENABLED:-false}
       AUTH_PHONE_REQUIRED: ${AUTH_PHONE_REQUIRED:-true}

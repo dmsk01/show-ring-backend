@@ -16,13 +16,16 @@ from app.services.auth import (
     logout_user,
 )
 from app.services.otp_auth import (
+    OTPCountryNotAllowedError,
     OTPExpiredError,
     OTPInvalidError,
     OTPRateLimitedError,
     OTPUserBlockedError,
+    SMSBudgetExceededError,
     send_otp_code,
     verify_otp_code,
 )
+from app.utils.net import ip_subnet
 from app.services.consent import ConsentKind, ConsentRequiredError
 from app.services.consent import grant as consent_grant
 from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
@@ -442,8 +445,24 @@ async def send_code(
     await check_rate_limit(
         request, limit=5, window=60, redis=redis, fail_closed=True
     )
+    # Лимит на подсеть: пул прокси обходит лимит «на IP», но обычно
+    # сидит в соседних адресах (анти SMS pumping, план 2026-10-05).
+    client_ip = request.client.host if request.client else "unknown"
+    await check_rate_limit(
+        request,
+        limit=settings.otp_subnet_limit,
+        window=3600,
+        redis=redis,
+        fail_closed=True,
+        bucket="send-code:subnet",
+        client_key=ip_subnet(client_ip),
+    )
     try:
         await send_otp_code(redis, sms, body.phone)
+    except OTPCountryNotAllowedError:
+        raise HTTPException(status_code=400, detail="country_not_supported")
+    except SMSBudgetExceededError:
+        raise HTTPException(status_code=503, detail="sms_unavailable")
     except OTPRateLimitedError:
         raise HTTPException(status_code=429, detail="too_many_requests")
     except SMSDeliveryError:

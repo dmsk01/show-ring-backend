@@ -40,7 +40,11 @@ from app.services.account_security import (
 from app.services import consent as consent_svc
 from app.services.account_deletion import delete_account
 from app.services.auth import change_password, request_email_change
-from app.services.otp_auth import OTPRateLimitedError
+from app.services.otp_auth import (
+    OTPCountryNotAllowedError,
+    OTPRateLimitedError,
+    SMSBudgetExceededError,
+)
 from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
 
 # Отдельный логгер security-событий, чтобы можно было направлять в SIEM
@@ -147,6 +151,10 @@ async def _send_otp_or_http(coro) -> dict:
     # Маппинг ошибок отправки — как у /auth/send-code.
     try:
         await coro
+    except OTPCountryNotAllowedError:
+        raise HTTPException(status_code=400, detail="country_not_supported")
+    except SMSBudgetExceededError:
+        raise HTTPException(status_code=503, detail="sms_unavailable")
     except OTPRateLimitedError:
         raise HTTPException(status_code=429, detail="too_many_requests")
     except SMSDeliveryError:

@@ -15,9 +15,11 @@
   otp:{purpose}:attempts:{subject} — счётчик попыток ввода (INCR атомарен)
   otp:daily:{phone}                — суточный счётчик отправок на номер,
                                      ОБЩИЙ для всех целей (анти SMS-pumping)
+  otp:budget:{YYYY-MM-DD}          — счётчик SMS на весь сервис за сутки (UTC)
 """
 
 import enum
+from datetime import datetime, timezone
 import logging
 import secrets
 
@@ -54,6 +56,14 @@ class OTPRateLimitedError(Exception):
     """Повторная отправка раньше cooldown / суточный потолок. → 429"""
 
 
+class OTPCountryNotAllowedError(Exception):
+    """Номер вне белого списка стран (sms_allowed_phone_prefixes). → 400"""
+
+
+class SMSBudgetExceededError(Exception):
+    """Исчерпан суточный бюджет SMS на весь сервис. → 503"""
+
+
 class OTPExpiredError(Exception):
     """Кода нет: истёк, не запрашивался или сожжён попытками. → 401"""
 
@@ -84,6 +94,41 @@ def _daily_key(phone: str) -> str:
     return f"otp:daily:{phone}"
 
 
+def _budget_key() -> str:
+    return f"otp:budget:{datetime.now(timezone.utc):%Y-%m-%d}"
+
+
+# Доли бюджета, на которых пишем предупреждение (сигнал для оповещения).
+_BUDGET_ALERT_SHARES = (0.5, 0.8, 1.0)
+
+
+def _phone_allowed(phone: str) -> bool:
+    prefixes = settings.sms_allowed_phone_prefixes
+    return not prefixes or any(phone.startswith(p) for p in prefixes)
+
+
+async def _spend_budget(redis: Redis) -> None:
+    """Учесть одно SMS в суточном бюджете сервиса; сверх него — отказ."""
+    budget = settings.sms_daily_budget
+    if budget <= 0:
+        return
+    key = _budget_key()
+    used = await redis.incr(key)
+    if used == 1:
+        # Двое суток — ключ гарантированно переживает смену даты.
+        await redis.expire(key, 2 * 86400)
+    for share in _BUDGET_ALERT_SHARES:
+        if used == max(1, int(budget * share)):
+            security_logger.warning(
+                "sms_budget_threshold share=%.0f%% used=%s budget=%s",
+                share * 100,
+                used,
+                budget,
+            )
+    if used > budget:
+        raise SMSBudgetExceededError
+
+
 def _generate_code() -> str:
     # secrets (не random): криптографический RNG. Ведущие нули сохраняем
     # форматированием — код всегда фиксированной длины.
@@ -104,6 +149,11 @@ async def send_otp_code(
     subject по умолчанию — сам номер (цель login).
     """
     subject = subject or phone
+
+    # 0. Белый список стран — до всех счётчиков: чужой номер ничего не тратит.
+    if not _phone_allowed(phone):
+        security_logger.warning("otp_country_blocked phone=%s", phone)
+        raise OTPCountryNotAllowedError
 
     # 1. Cooldown: SET NX EX атомарен — из двух параллельных запросов
     #    SMS отправит ровно один.
@@ -127,6 +177,14 @@ async def send_otp_code(
     if daily > settings.otp_daily_limit:
         security_logger.warning("otp_daily_limit phone=%s", phone)
         raise OTPRateLimitedError
+
+    # 2a. Общий бюджет SMS на сервис: последний рубеж, если накрутка идёт
+    #     по множеству номеров с множества IP.
+    try:
+        await _spend_budget(redis)
+    except SMSBudgetExceededError:
+        security_logger.error("sms_budget_exceeded phone=%s", phone)
+        raise
 
     # 3. Новый код перезаписывает старый (валиден только последний),
     #    счётчик попыток обнуляется.
