@@ -57,6 +57,10 @@ class KennelUpdate(BaseModel):
 class KennelResponse(KennelBase):
     model_config = ConfigDict(from_attributes=True)
 
+    # Есть открытые контакты — показать кнопку «Показать контакты».
+    # Сами контакты посторонним в карточке не отдаются (utils/public_contacts).
+    has_public_contacts: bool = False
+
     id: uuid.UUID
     owner_id: uuid.UUID
     avatar_file_id: uuid.UUID | None
@@ -77,3 +81,12 @@ class KennelPage(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class KennelContacts(BaseModel):
+    """Ответ «Показать контакты» (GET /kennels/{id}/contacts)."""
+
+    contact_phone: str | None
+    contact_email: str | None
+    website: str | None
+

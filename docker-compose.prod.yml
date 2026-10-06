@@ -98,6 +98,8 @@ services:
       # Фолбэк для SSR-запросов изнутри контейнера (минуя nginx);
       # браузерные запросы ходят относительным /api через nginx.
       BACKEND_URL: http://api:8000
+      # CSP фронта (src/proxy.ts): enforce | report-only | off (аварийный откат).
+      CSP_MODE: ${CSP_MODE:-enforce}
     deploy:
       resources:
         limits:

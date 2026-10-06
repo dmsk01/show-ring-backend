@@ -32,6 +32,7 @@ from app.utils.pagination import ANON_MAX_PER_PAGE, cap_per_page
 from app.redis import get_redis
 from app.repositories import classified as repo
 from app.schemas.classified import (
+    ClassifiedContacts,
     ClassifiedCreate,
     ClassifiedImageCreate,
     ClassifiedPage,
@@ -40,7 +41,11 @@ from app.schemas.classified import (
 )
 from app.services import classified as svc
 from app.services import consent as consent_svc
-from app.utils.public_contacts import hide_private_contacts
+from app.utils.public_contacts import (
+    REVEAL_LIMIT_PER_HOUR,
+    contacts_or_none,
+    hide_private_contacts,
+)
 
 router = APIRouter(prefix="/classifieds", tags=["classifieds"])
 
@@ -300,6 +305,32 @@ async def get_classified(
     obj = await repo.get_classified(db, classified_id, with_images=True)
     assert obj is not None  # invariant: только что инкрементировали — точно есть
     return _public(obj, viewer)
+
+
+@router.get(
+    "/{classified_id}/contacts",
+    response_model=ClassifiedContacts,
+    summary="Показать контакты автора объявления",
+    description=(
+        "Контакты — отдельным запросом по кнопке, лимит 30 в час с IP. "
+        "404 — автор не дал согласия на распространение или контактов нет."
+    ),
+)
+async def get_classified_contacts(
+    request: Request,
+    classified_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    viewer: User | None = Depends(get_current_user_optional),
+):
+    await check_rate_limit(
+        request, REVEAL_LIMIT_PER_HOUR, 3600, redis, bucket="contacts:reveal"
+    )
+    obj = await repo.get_classified(db, classified_id, with_images=False)
+    data = contacts_or_none(obj, viewer=viewer) if obj is not None else None
+    if data is None:
+        raise HTTPException(404, "contacts_not_found")
+    return ClassifiedContacts(**data)
 
 
 @router.put(

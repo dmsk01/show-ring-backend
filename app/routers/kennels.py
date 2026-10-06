@@ -8,6 +8,7 @@ import uuid
 from typing import Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -21,6 +22,7 @@ from app.models.user import User
 from app.utils.pagination import ANON_MAX_PER_PAGE, cap_per_page
 from app.repositories import kennel as repo
 from app.schemas.kennel import (
+    KennelContacts,
     KennelCreate,
     KennelPage,
     KennelResponse,
@@ -28,7 +30,14 @@ from app.schemas.kennel import (
 )
 from app.services import consent as consent_svc
 from app.services import kennel as svc
-from app.utils.public_contacts import CONTACT_FIELDS, hide_private_contacts
+from app.middleware.progressive_ban import check_rate_limit
+from app.redis import get_redis
+from app.utils.public_contacts import (
+    CONTACT_FIELDS,
+    REVEAL_LIMIT_PER_HOUR,
+    contacts_or_none,
+    hide_private_contacts,
+)
 
 router = APIRouter(prefix="/kennels", tags=["kennels"])
 
@@ -158,6 +167,38 @@ async def get_kennel(
         raise HTTPException(404, "Питомник не найден")
     counts = await repo.counts_by_kennels(db, [obj.id])
     return _kennel_response(obj, *counts.get(obj.id, (0, 0)), viewer)
+
+
+@router.get(
+    "/{kennel_id}/contacts",
+    response_model=KennelContacts,
+    summary="Показать контакты питомника",
+    description=(
+        "Контакты отдаются отдельным запросом по кнопке, а не в карточке: "
+        "так бот, обходящий витрину, не соберёт все телефоны разом. Лимит "
+        "30 запросов в час с IP. 404 — владелец не дал согласия на "
+        "распространение (ст. 10.1 152-ФЗ) или контактов нет."
+    ),
+)
+async def get_kennel_contacts(
+    request: Request,
+    kennel_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    viewer: User | None = Depends(get_current_user_optional),
+):
+    await check_rate_limit(
+        request, REVEAL_LIMIT_PER_HOUR, 3600, redis, bucket="contacts:reveal"
+    )
+    obj = await repo.get_kennel(db, kennel_id)
+    data = (
+        contacts_or_none(obj, viewer=viewer, fields=(*CONTACT_FIELDS, "website"))
+        if obj is not None
+        else None
+    )
+    if data is None:
+        raise HTTPException(404, "contacts_not_found")
+    return KennelContacts(**data)
 
 
 @router.put(

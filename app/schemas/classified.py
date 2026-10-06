@@ -162,6 +162,9 @@ class ClassifiedUpdate(BaseModel):
 class ClassifiedResponse(ClassifiedBase):
     model_config = ConfigDict(from_attributes=True)
 
+    # Есть открытые контакты — показать кнопку «Показать контакты».
+    has_public_contacts: bool = False
+
     id: uuid.UUID
     author_id: uuid.UUID
     status: ClassifiedStatus
@@ -177,3 +180,11 @@ class ClassifiedPage(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class ClassifiedContacts(BaseModel):
+    """Ответ «Показать контакты» (GET /classifieds/{id}/contacts)."""
+
+    contact_phone: str | None
+    contact_email: str | None
+
