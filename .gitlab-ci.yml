@@ -49,7 +49,8 @@ test:
   script:
     - pip install -r requirements.txt
     - alembic upgrade head      # таблицы должны существовать ДО тестов
-    - pytest -q
+    - python -m scripts.seed_references  # справочники, иначе часть тестов skip
+    - pytest -q -rs
 
 build:
   stage: build

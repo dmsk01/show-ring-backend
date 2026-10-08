@@ -75,8 +75,14 @@ jobs:
       # Таблицы должны существовать ДО тестов — conftest их не создаёт.
       - name: Apply migrations
         run: alembic upgrade head
+      # Справочники (породы, ранги, классы, оценки, титулы): без них тесты
+      # результатов, BOB/BIG/BIS, записей и чек-ина сами делают skip, и
+      # зелёный прогон их не проверяет. Скрипт идемпотентный.
+      - name: Seed references
+        run: python -m scripts.seed_references
+      # -rs — причины оставшихся пропусков видны в логе.
       - name: Run tests
-        run: pytest -q
+        run: pytest -q -rs
 
   deploy:
     needs: [lint, test]
