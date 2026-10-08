@@ -29,6 +29,7 @@ from redis.asyncio import Redis
 from app.config import settings
 from app.services import security_metrics
 from app.services.captcha import require_captcha
+from app.utils.log_mask import mask_email
 
 security_logger = logging.getLogger("app.security")
 
@@ -83,7 +84,7 @@ async def record_failure(redis: Redis, *, email: str, ip: str) -> bool:
         await redis.delete(_email_key(email))
         if locked:
             security_logger.warning(
-                "login_account_locked email=%s ip=%s", _norm(email), ip
+                "login_account_locked email=%s ip=%s", mask_email(_norm(email)), ip
             )
             await security_metrics.record(security_metrics.ACCOUNT_LOCKED, redis=redis)
             return True
@@ -93,3 +94,22 @@ async def record_failure(redis: Redis, *, email: str, ip: str) -> bool:
 async def record_success(redis: Redis, *, email: str) -> None:
     """Успешный вход обнуляет счётчик аккаунта (IP-счётчик живёт своё окно)."""
     await redis.delete(_email_key(email))
+
+
+# Письмо владельцу о блокировке — не чаще раза в сутки (ревью 2026-10-06,
+# BE-37): зная email, злоумышленник мог держать аккаунт заблокированным и
+# каждые login_lockout_seconds слать владельцу письмо.
+LOCK_NOTICE_INTERVAL_SECONDS = 86400
+
+
+def _notice_key(email: str) -> str:
+    return f"login:lock_notice:{_norm(email)}"
+
+
+async def should_notify_lock(redis: Redis, *, email: str) -> bool:
+    """True — письмо о блокировке можно отправить (и окно занято на сутки)."""
+    return bool(
+        await redis.set(
+            _notice_key(email), "1", nx=True, ex=LOCK_NOTICE_INTERVAL_SECONDS
+        )
+    )

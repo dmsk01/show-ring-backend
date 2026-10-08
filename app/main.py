@@ -6,11 +6,11 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from contextlib import asynccontextmanager
 from sqlalchemy import text
-from app.config import settings
+from app.config import production_problems, settings
 from app.database import engine
 from app.logging_config import setup_logging
 from app.middleware.csrf import CSRFMiddleware
-from app.middleware.error_handler import register_error_handlers
+from app.middleware.error_handler import UnhandledErrorMiddleware, register_error_handlers
 from app.middleware.idempotency import IdempotencyMiddleware
 from app.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.middleware.request_id import RequestIdMiddleware
@@ -58,6 +58,15 @@ async def lifespan(app: FastAPI):
     # log-сообщения уже шли в выбранный формат (JSON в prod, текст в dev).
     # Идемпотентно: переинициализация при reload не дублирует хендлеры.
     setup_logging()
+    # Ревью 2026-10-06, BE-38: опасная prod-конфигурация видна при старте,
+    # а не на первом запросе пользователя.
+    problems = production_problems(settings)
+    for problem in problems:
+        logger.critical("Небезопасная конфигурация: %s", problem)
+    if problems and settings.strict_config:
+        raise RuntimeError(
+            "STRICT_CONFIG=true: исправьте конфигурацию — " + "; ".join(problems)
+        )
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -87,16 +96,26 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Scheduler failed to start: %s", e)
     yield
-    await engine.dispose()
-    await close_redis()
-    try:
-        await rabbit_service.close()
-    except Exception as e:
-        logger.warning("RabbitMQ close failed: %s", e)
+    await shutdown_resources()
+
+
+async def shutdown_resources() -> None:
+    """
+    Остановка в обратном порядке зависимостей (ревью 2026-10-06, BE-31):
+    сначала планировщик — его задачи пользуются БД, Redis и Rabbit; пул БД
+    закрывается последним. Раньше engine.dispose() шёл первым, и cron-задача,
+    работавшая в момент остановки, получала закрытый пул.
+    """
     try:
         await stop_scheduler()
     except Exception as e:
         logger.warning("Scheduler stop failed: %s", e)
+    try:
+        await rabbit_service.close()
+    except Exception as e:
+        logger.warning("RabbitMQ close failed: %s", e)
+    await close_redis()
+    await engine.dispose()
 
 
 def _docs_settings(debug: bool) -> dict[str, str | None]:
@@ -148,6 +167,9 @@ register_error_handlers(app)
 #                       client IP до того, как rate-limit/ad-fraud его
 #                       прочитают.
 #   7. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
+# Самый внутренний: необработанное исключение → JSON 500, который ещё
+# проходит через RequestId/CORS/SecurityHeaders (ревью 2026-10-06, BE-22).
+app.add_middleware(UnhandledErrorMiddleware)
 app.add_middleware(RequestIdMiddleware)
 # Метрики 5xx и медленных запросов — до остальных, чтобы видеть итоговый статус.
 app.add_middleware(MetricsMiddleware)

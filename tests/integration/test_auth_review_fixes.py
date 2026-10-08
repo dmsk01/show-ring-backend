@@ -23,7 +23,7 @@ async def test_email_change_notifies_old_address(client, db_session):
     old_email = f"old_{uuid.uuid4().hex[:10]}@example.com"
     new_email = f"new_{uuid.uuid4().hex[:10]}@example.com"
     await client.post(
-        "/auth/register", json={"email": old_email, "password": PASSWORD}
+        "/auth/register", json={"email": old_email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     r = await client.post(
         "/auth/login",

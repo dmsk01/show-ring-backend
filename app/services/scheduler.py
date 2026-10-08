@@ -18,16 +18,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import delete, func, select, update
 
 from app import redis as redis_module
+from app.utils.dates import today_local
 from app.database import async_session_factory
 from app.models.classified import Classified, ClassifiedStatus
 from app.models.task import Task, TaskStatusEnum
@@ -113,9 +115,18 @@ async def _scheduler_lock(job_name: str, ttl_seconds: int = _LOCK_TTL_SECONDS):
         yield False
         return
 
+    # Продление lock'а, пока задача работает (ревью 2026-10-06, BE-31):
+    # retention/архивация на больших таблицах могут идти дольше TTL, и после
+    # его истечения вторая реплика запускала ту же задачу параллельно.
+    watchdog = asyncio.create_task(_extend_lock(rc, lock_key, nonce, ttl_seconds))
     try:
         yield True
     finally:
+        watchdog.cancel()
+        try:
+            await watchdog
+        except asyncio.CancelledError:
+            pass
         try:
             await rc.eval(_LOCK_RELEASE_SCRIPT, 1, lock_key, nonce)
         except Exception:  # noqa: BLE001
@@ -124,6 +135,26 @@ async def _scheduler_lock(job_name: str, ttl_seconds: int = _LOCK_TTL_SECONDS):
             logger.exception(
                 "Scheduler job %s: failed to release lock", job_name,
             )
+
+
+_LOCK_EXTEND_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
+
+async def _extend_lock(rc, lock_key: str, nonce: str, ttl_seconds: int) -> None:
+    """Каждую треть TTL продлевать lock, пока он наш (nonce совпадает)."""
+    interval = max(ttl_seconds / 3, 0.1)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await rc.eval(_LOCK_EXTEND_SCRIPT, 1, lock_key, nonce, ttl_seconds)
+        except Exception:  # noqa: BLE001 — продлим на следующем шаге
+            logger.warning("Scheduler lock %s: extend failed", lock_key, exc_info=True)
 
 
 # AsyncIOScheduler — singleton-инстанс. APScheduler не любит, когда
@@ -281,12 +312,10 @@ async def requeue_stuck_tasks() -> None:
                 return
 
             for task in stuck:
-                task.status = TaskStatusEnum.pending
-                # Имя очереди = task.type (см. константы в routers/documents.py
-                # и worker/handlers/*; договорённость — type строки совпадают
-                # с queue_name для DB-backed задач). Для типов, которых нет в
-                # этой карте, перепубликацию пропускаем — UPDATE → pending
-                # всё равно сделан, можно перезапустить вручную.
+                # Очередь по типу задачи (app/services/task_queues.py).
+                # ИСПРАВЛЕНО (ревью 2026-10-06, BE-19): раньше статус ставился
+                # в pending ДО этой проверки — задача без очереди навсегда
+                # висела в pending без сообщения. Теперь — failed с причиной.
                 queue_name = _QUEUE_FOR_TASK_TYPE.get(task.type)
                 if queue_name is None:
                     logger.warning(
@@ -294,7 +323,10 @@ async def requeue_stuck_tasks() -> None:
                         task.type,
                         task.id,
                     )
+                    task.status = TaskStatusEnum.failed
+                    task.result = {"error": f"no queue for task type {task.type!r}"}
                     continue
+                task.status = TaskStatusEnum.pending
                 # Тело сообщения — то же, что и в роутерах при первичной
                 # публикации (см. routers/documents._publish_task).
                 # model_dump(mode="json") сериализует UUID/datetime в строки,
@@ -373,7 +405,7 @@ async def remind_missing_documents() -> None:
             return
         try:
             async with async_session_factory() as db:
-                sent = await checkin_reminders.send_document_reminders(db, date.today())
+                sent = await checkin_reminders.send_document_reminders(db, today_local())
             logger.info("Documents reminders sent: %d", sent)
         except Exception:  # noqa: BLE001 — cron не должен ронять шедулер
             logger.exception("remind_missing_documents failed")

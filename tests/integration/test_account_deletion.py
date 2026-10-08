@@ -18,11 +18,12 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from app.main import app
-from app.models.classified import Classified
+from app.models.classified import Classified, ClassifiedImage
 from app.models.consent import UserConsent
 from app.models.dog import Dog, DogDocument, DogDocumentKind, SexEnum
 from app.models.file import UploadedFile
 from app.models.kennel import Kennel
+from app.models.outbox import OutboxEvent
 from app.models.show import ShowStatus
 from app.models.user import RefreshToken, User, UserProfile
 from app.services.sms import SMSProvider, get_sms_provider
@@ -114,6 +115,25 @@ async def test_phone_user_deletes_account(client, sms, db_session, test_redis):
         headers=auth(token),
     )
     classified_id = uuid.UUID(r.json()["id"])
+    # BE-11: фото объявления (часто — дом продавца) и письмо в outbox с
+    # адресом пользователя тоже должны исчезнуть вместе с аккаунтом.
+    photo = UploadedFile(
+        uploaded_by=uid, s3_key=f"classifieds/{uuid.uuid4()}.jpg",
+        original_filename="home.jpg", content_type="image/jpeg", size_bytes=10,
+    )
+    db_session.add(photo)
+    await db_session.flush()
+    db_session.add(ClassifiedImage(classified_id=classified_id, file_id=photo.id))
+    me_email = f"del_{uuid.uuid4().hex[:6]}@example.com"
+    user_row = await db_session.get(User, uid)
+    user_row.email = me_email
+    mail = OutboxEvent(
+        routing_key="email_tasks",
+        payload={"to_email": me_email, "html_body": "token=abc"},
+    )
+    db_session.add(mail)
+    await db_session.commit()
+    photo_id, mail_id = photo.id, mail.id
     breed, _, _ = await make_references(db_session)
     dog = Dog(
         breed_id=breed.id, name="Рекс", sex=SexEnum.male, owner_id=uid,
@@ -160,6 +180,8 @@ async def test_phone_user_deletes_account(client, sms, db_session, test_redis):
     assert kennel.website is None
     assert kennel.contacts_public is False
 
+    assert await db_session.get(UploadedFile, photo_id) is None
+    assert await db_session.get(OutboxEvent, mail_id) is None
     assert await db_session.get(DogDocument, doc_id) is None
     assert await db_session.get(UploadedFile, scan_id) is None
     # Сама собака — историческая запись (родословные, результаты), но

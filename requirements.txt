@@ -15,9 +15,8 @@ pydantic-settings>=2.6.0
 python-dotenv>=1.0.0
 
 # --- Этап 2: Авторизация и безопасность ---
-passlib[bcrypt]>=1.7.4
-bcrypt<4.1                      # passlib 1.7.4 несовместим с bcrypt>=4.1 (ломает verify: "password > 72 bytes")
-python-jose[cryptography]>=3.3.0
+bcrypt>=4.1                     # хэши паролей напрямую (passlib не поддерживается — ревью 2026-10-06, BE-29)
+PyJWT>=2.9.0                    # JWT (вместо неподдерживаемого python-jose)
 python-multipart>=0.0.12
 redis[hiredis]>=5.2.0           # Progressive rate limiting, кэш, WS pub/sub
 
@@ -43,10 +42,9 @@ APScheduler>=3.10.0             # Планировщик (cron-like задачи
 websockets>=13.0                # Уже в uvicorn[standard], явная зависимость
 
 # --- Этап 14: Production ---
-structlog>=24.4.0               # Structured logging (JSON)
 
 # --- Общие утилиты ---
 email-validator>=2.0.0          # Валидация email (используется Pydantic)
 httpx>=0.27.0                   # Async HTTP-клиент (worker book_handler — внешние API; рантайм, не только тесты)
-bleach>=6.0.0                   # Санитизация HTML/XSS (app/middleware/sanitization.py)
+nh3>=0.2.17                     # Санитизация HTML/XSS (вместо deprecated bleach): sanitization.py, html_sanitize.py
 altcha==2.3.0                   # Капча proof-of-work, формат v3 (app/services/captcha.py)

@@ -14,11 +14,12 @@ from fastapi import HTTPException
 from app.services import auth as auth_service
 from app.models.user import EmailVerificationToken
 from app.repositories import user as user_repo
+from app.utils.security import hash_password
 from sqlalchemy.exc import IntegrityError
 
 
 # bcrypt медленный (~250мс) — хешируем один раз на модуль.
-_CACHED_PASSWORD_HASH = auth_service.hash_password("CorrectPass1")
+_CACHED_PASSWORD_HASH = hash_password("CorrectPass1")
 
 
 def _fake_user(*, is_active: bool = True):
@@ -83,14 +84,14 @@ async def test_login_no_user_calls_dummy_verify(monkeypatch):
     monkeypatch.setattr(
         user_repo, "get_user_by_email", AsyncMock(return_value=None)
     )
-    dummy_mock = MagicMock()
-    monkeypatch.setattr(auth_service, "dummy_verify_password", dummy_mock)
+    dummy_mock = AsyncMock()
+    monkeypatch.setattr(auth_service, "dummy_verify_password_async", dummy_mock)
 
     with pytest.raises(ValueError, match="invalid_credentials"):
         await auth_service.login_user(
             _fake_session(), "ghost@example.com", "whatever"
         )
-    dummy_mock.assert_called_once()
+    dummy_mock.assert_awaited_once()
 
 
 async def test_login_blocked_user_rejected(monkeypatch):

@@ -13,7 +13,7 @@
   модели outbox.
 
 Параллелизация: несколько воркеров безопасно работают одновременно
-благодаря `SELECT FOR UPDATE SKIP LOCKED` в fetch_pending — каждый
+благодаря claim_pending (SKIP LOCKED + locked_until) — каждый
 возьмёт свой кусок.
 """
 
@@ -63,15 +63,15 @@ async def dispatch_once(
     выбирал и публиковал их повторно. Per-event commit ограничивает
     окно «published-но-не-marked-sent» одним событием за раз.
 
-    Trade-off: после первого commit'а FOR UPDATE-локи на оставшихся
-    строках в пачке освобождаются, и другой воркер может подхватить
-    те же события. Двойной publish обрабатывается на уровне consumer'а
-    (см. bug_230 — идемпотентность по message_id).
+    Пачка «застолблена» через locked_until (claim_pending), поэтому
+    per-event commit'ы не открывают её другим dispatcher'ам (BE-18).
     """
-    events = await outbox_repo.fetch_pending(db, limit=BATCH_SIZE)
+    # Ревью 2026-10-06, BE-18: пачку «застолбляем» (locked_until) и сразу
+    # коммитим — второй dispatcher её не возьмёт, пока мы публикуем, даже
+    # после наших per-event commit'ов ниже.
+    events = await outbox_repo.claim_pending(db, limit=BATCH_SIZE)
+    await db.commit()
     if not events:
-        # Откатываем пустую транзакцию — иначе lock висит до timeout.
-        await db.rollback()
         return 0, 0
 
     sent = 0
@@ -123,6 +123,9 @@ async def _publish(
         body=body,
         delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
         content_type="application/json",
+        # id события — ключ дедупликации у потребителя и в трассировке
+        # (ревью 2026-10-06, BE-18).
+        message_id=str(event.id),
     )
     if event.exchange:
         ex = await channel.declare_exchange(

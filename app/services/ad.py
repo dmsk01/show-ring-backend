@@ -17,12 +17,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import json
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.dates import today_local
 from app.config import settings
 from app.models.ad import AdBanner, AdCampaign, AdEventType, CampaignStatus
 
@@ -113,6 +114,26 @@ async def update_campaign(
     if obj is None:
         raise ValueError("not_found")
     _ensure_owner(obj, user_id, is_admin)
+
+    # Кросс-проверки на MERGED-значениях (ревью 2026-10-06, BE-05):
+    # CampaignUpdate — частичная схема без валидатора дат CampaignBase.
+    new_start = fields.get("date_start", obj.date_start)
+    new_end = fields.get("date_end", obj.date_end)
+    if new_start is None or new_end is None or new_end < new_start:
+        raise ValueError("invalid_dates")
+    new_budget = fields.get("budget", obj.budget)
+    if new_budget is None or new_budget < obj.spent:
+        raise ValueError("budget_below_spent")
+
+    # Модерация: первую активацию делает admin; владелец может вернуть в
+    # показ только уже одобренную кампанию (например, после паузы).
+    if fields.get("status") == CampaignStatus.active:
+        if is_admin:
+            if obj.approved_at is None:
+                obj.approved_at = datetime.now(timezone.utc)
+        elif obj.approved_at is None:
+            raise ValueError("moderation_required")
+
     for k, v in fields.items():
         setattr(obj, k, v)
     await db.commit()
@@ -209,7 +230,7 @@ async def pick_banner(
         animal_type_id=animal_type_id,
         breed_id=breed_id,
         region=region,
-        today=date.today(),
+        today=today_local(),
     )
 
 
@@ -235,10 +256,14 @@ async def _is_duplicate(
     redis_client = redis_state.redis_client
     if redis_client is None:
         return False
-    if not ip or not user_agent_hash:
-        # Без ip/ua дедупликация невозможна — пропускаем проверку.
+    if not ip:
+        # Без ip дедупликация невозможна — пропускаем проверку.
         return False
-    key = f"ad_dedup:{banner_id}:{ip}:{user_agent_hash}:{event_type.value}"
+    # Без User-Agent дедуплицируем по IP (ревью 2026-10-06, BE-25): раньше
+    # пустой UA отключал дедуп полностью — curl без UA накручивал события.
+    key = (
+        f"ad_dedup:{banner_id}:{ip}:{user_agent_hash or '-'}:{event_type.value}"
+    )
     try:
         # NX=True + EX=60: ставим ключ, только если его нет; TTL 60 сек.
         # set возвращает True (поставили) или None (был — дубль).
@@ -283,20 +308,6 @@ async def record_event(
     if await _is_duplicate(banner_id, event_type, ip, ua_hash):
         return False
 
-    # Если включён async-режим, не делаем БД-чтений в API: воркер
-    # сам подгрузит banner/campaign перед батч-вставкой. Это даёт
-    # суб-миллисекундный response time на /ads/events.
-    if settings.ad_events_async:
-        await _publish_event(
-            banner_id=banner_id,
-            event_type=event_type,
-            user_id=user_id,
-            ip=ip,
-            ua_hash=ua_hash,
-            page_url=page_url,
-        )
-        return True
-
     banner = await repo.get_banner(db, banner_id)
     if banner is None:
         raise ValueError("banner_not_found")
@@ -316,6 +327,22 @@ async def record_event(
     # неактивных или пустых кампаний событие считается отброшенным.
     if campaign.status != CampaignStatus.active or campaign.budget <= 0:
         return False
+
+    # Async-режим: публикуем в очередь, батч пишет воркер. ИСПРАВЛЕНО
+    # (ревью 2026-10-06, BE-06): раньше публикация шла ДО проверок баннера
+    # и кампании — выдуманный banner_id валил весь батч воркера на FK, а
+    # события кампаний на паузе оплачивались. Проверки — те же, что у
+    # синхронного пути (два лёгких SELECT по PK).
+    if settings.ad_events_async:
+        await _publish_event(
+            banner_id=banner_id,
+            event_type=event_type,
+            user_id=user_id,
+            ip=ip,
+            ua_hash=ua_hash,
+            page_url=page_url,
+        )
+        return True
 
     # Списываем бюджет только за impression. Клики на этапе 10
     # не тарифицируются — CPM-модель. CPC расширим в будущем.

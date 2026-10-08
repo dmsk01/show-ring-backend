@@ -21,7 +21,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, is_admin
+from app.dependencies import get_current_user, is_admin, require_any_role
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
 from app.redis import get_redis
@@ -54,8 +54,10 @@ def _raise_for_error(err: ValueError) -> NoReturn:
     not_found = {"not_found", "campaign_not_found", "banner_not_found"}
     if code in not_found:
         raise HTTPException(404, code)
-    if code == "forbidden":
+    if code in ("forbidden", "moderation_required"):
         raise HTTPException(403, code)
+    if code in ("invalid_dates", "budget_below_spent"):
+        raise HTTPException(422, code)
     if code == "banner_inactive":
         raise HTTPException(409, code)
     raise HTTPException(400, code)
@@ -75,7 +77,9 @@ def _raise_for_error(err: ValueError) -> NoReturn:
 async def create_campaign(
     body: CampaignCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    # Ревью 2026-10-06, BE-05: раньше — любой аккаунт. Раздел «Реклама» на
+    # фронте открыт organizer/admin; запуск в показ — после модерации admin.
+    user: User = Depends(require_any_role("organizer", "admin")),
 ):
     obj = await svc.create_campaign(
         db, advertiser_id=user.id, fields=body.model_dump()

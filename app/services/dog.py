@@ -18,6 +18,7 @@ import uuid
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.policies import can_manage_dog
 from app.models.dog import Dog, SexEnum
 from app.models.kennel import Kennel
 from app.repositories import dog as repo
@@ -91,13 +92,9 @@ async def _check_can_manage_dog(
     владелец собаки без питомника не мог редактировать собственную
     карточку. Симметрично _check_can_register_dog в services/show.py.
     """
-    if is_admin or dog.owner_id == requester_id:
-        return
-    if dog.kennel_id is not None:
-        kennel = await kennel_repo.get_kennel(db, dog.kennel_id)
-        if kennel is not None and kennel.owner_id == requester_id:
-            return
-    raise ValueError("forbidden")
+    # Правило — app/policies.can_manage_dog (BE-33): одно на все операции.
+    if not await can_manage_dog(db, dog, requester_id, is_admin=is_admin):
+        raise ValueError("forbidden")
 
 
 async def create_dog(
@@ -182,9 +179,15 @@ async def delete_dog(
     # Право (как в update_dog): владелец собаки, владелец питомника
     # или admin.
     await _check_can_manage_dog(db, obj, requester_id, is_admin)
-    # Каскады БД: dog_photos, show_entries (а с ними show_results) и
-    # dog_titles удаляются (ON DELETE CASCADE). Ссылки детей/помётов на
-    # эту собаку как родителя (father_id/mother_id) → SET NULL.
+    # Ревью 2026-10-06, BE-10: собака с историей выставок (запись на
+    # закрытую/идущую/завершённую выставку или титул) — часть каталогов и
+    # документов РКФ. Её не удаляем; БД страхует FK RESTRICT.
+    if await repo.has_show_history(db, dog_id):
+        raise ValueError("dog_has_show_history")
+    # Записи на ещё открытые (draft/registration_open/cancelled) выставки
+    # снимаем явно — каскада больше нет. Фото (dog_photos) удаляются
+    # каскадом; ссылки детей/помётов на собаку-родителя → SET NULL.
+    await repo.delete_open_show_entries(db, dog_id)
     await db.delete(obj)
     await db.commit()
 

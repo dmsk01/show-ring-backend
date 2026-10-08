@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
-from typing import Sequence
+from typing import Literal, Sequence
 
-from sqlalchemy import ColumnElement, Row, func, select
+from sqlalchemy import ColumnElement, Row, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.dog import Dog
-from app.models.reference import ShowClass
+from app.models.reference import Breed, ShowClass
 from app.models.show import (
     Show,
     ShowBreed,
@@ -33,6 +33,10 @@ from app.models.show import (
 _SHOW_SORT = {"date_start": Show.date_start, "created_at": Show.created_at}
 
 
+# Кому видны черновики в публичных списках: "all" | id организатора | None.
+DraftVisibility = Literal["all"] | uuid.UUID | None
+
+
 def _show_filter_stmt(
     rank_id: uuid.UUID | None,
     city: str | None,
@@ -40,8 +44,17 @@ def _show_filter_stmt(
     date_to: date | None,
     status: ShowStatus | None,
     search: str | None,
+    drafts: DraftVisibility = None,
 ):
     stmt = select(Show)
+    # Черновики (ревью 2026-10-06, BE-15): "all" — admin; UUID — только свои
+    # черновики организатора; None — аноним и прочие, черновиков не видно.
+    if drafts is None:
+        stmt = stmt.where(Show.status != ShowStatus.draft)
+    elif drafts != "all":
+        stmt = stmt.where(
+            or_(Show.status != ShowStatus.draft, Show.organizer_id == drafts)
+        )
     if rank_id is not None:
         stmt = stmt.where(Show.rank_id == rank_id)
     if city:
@@ -83,6 +96,7 @@ async def list_shows(
     date_to: date | None = None,
     status: ShowStatus | None = None,
     search: str | None = None,
+    drafts: DraftVisibility = None,
     sort_by: str = "date_start",
     order: str = "asc",
     page: int = 1,
@@ -92,7 +106,9 @@ async def list_shows(
     # пользователь ищет "что скоро будет", а не "что недавно создали".
     col = _SHOW_SORT.get(sort_by, Show.date_start)
     stmt = (
-        _show_filter_stmt(rank_id, city, date_from, date_to, status, search)
+        _show_filter_stmt(
+            rank_id, city, date_from, date_to, status, search, drafts
+        )
         .order_by(col.asc() if order == "asc" else col.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
@@ -109,9 +125,10 @@ async def count_shows(
     date_to: date | None = None,
     status: ShowStatus | None = None,
     search: str | None = None,
+    drafts: DraftVisibility = None,
 ) -> int:
     base = _show_filter_stmt(
-        rank_id, city, date_from, date_to, status, search
+        rank_id, city, date_from, date_to, status, search, drafts
     ).subquery()
     return int(
         (await db.execute(select(func.count()).select_from(base))).scalar_one()
@@ -320,6 +337,20 @@ async def list_entries_without_catalog_number(
         .order_by(ShowEntry.created_at.asc())
     )
     return (await db.execute(stmt)).scalars().all()
+
+
+async def list_entries_with_dog_breed(
+    db: AsyncSession, show_id: uuid.UUID
+) -> Sequence[Row[ShowEntry, Dog, Breed]]:
+    """Все записи выставки с собакой и породой — для перепроверки классов
+    по возрасту при переносе даты (одним запросом, без N+1)."""
+    stmt = (
+        select(ShowEntry, Dog, Breed)
+        .join(Dog, Dog.id == ShowEntry.dog_id)
+        .join(Breed, Breed.id == Dog.breed_id)
+        .where(ShowEntry.show_id == show_id)
+    )
+    return (await db.execute(stmt)).all()
 
 
 async def create_show_entry(db: AsyncSession, **fields) -> ShowEntry:

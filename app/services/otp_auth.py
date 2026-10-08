@@ -34,10 +34,17 @@ from app.services import consent as consent_svc
 from app.services import security_metrics
 from app.services.auth import issue_token_pair
 from app.services.sms import SMSProvider
+from app.utils.log_mask import mask_phone
 from app.utils.security import hash_token
 
 logger = logging.getLogger(__name__)
 security_logger = logging.getLogger("app.security")
+
+
+def _mask_subject(subject: str) -> str:
+    """subject OTP — номер телефона (вход) или user_id (reauth); номер
+    маскируем (ревью 2026-10-06, BE-12), id оставляем для корреляции."""
+    return mask_phone(subject) if subject.startswith("+") else subject
 
 
 class OTPPurpose(str, enum.Enum):
@@ -153,7 +160,7 @@ async def send_otp_code(
 
     # 0. Белый список стран — до всех счётчиков: чужой номер ничего не тратит.
     if not _phone_allowed(phone):
-        security_logger.warning("otp_country_blocked phone=%s", phone)
+        security_logger.warning("otp_country_blocked phone=%s", mask_phone(phone))
         raise OTPCountryNotAllowedError
 
     # 1. Cooldown: SET NX EX атомарен — из двух параллельных запросов
@@ -166,7 +173,7 @@ async def send_otp_code(
     )
     if not ok:
         security_logger.info(
-            "otp_send_cooldown purpose=%s phone=%s", purpose.value, phone
+            "otp_send_cooldown purpose=%s phone=%s", purpose.value, mask_phone(phone)
         )
         raise OTPRateLimitedError
 
@@ -176,7 +183,7 @@ async def send_otp_code(
     if daily == 1:
         await redis.expire(_daily_key(phone), 86400)
     if daily > settings.otp_daily_limit:
-        security_logger.warning("otp_daily_limit phone=%s", phone)
+        security_logger.warning("otp_daily_limit phone=%s", mask_phone(phone))
         raise OTPRateLimitedError
 
     # 2a. Общий бюджет SMS на сервис: последний рубеж, если накрутка идёт
@@ -184,7 +191,7 @@ async def send_otp_code(
     try:
         await _spend_budget(redis)
     except SMSBudgetExceededError:
-        security_logger.error("sms_budget_exceeded phone=%s", phone)
+        security_logger.error("sms_budget_exceeded phone=%s", mask_phone(phone))
         raise
 
     # 3. Новый код перезаписывает старый (валиден только последний),
@@ -207,7 +214,7 @@ async def send_otp_code(
         logger.info("[DEV] OTP %s for %s: %s", purpose.value, phone, code)
     else:
         security_logger.info(
-            "otp_sent purpose=%s phone=%s", purpose.value, phone
+            "otp_sent purpose=%s phone=%s", purpose.value, mask_phone(phone)
         )
 
 
@@ -222,7 +229,7 @@ async def consume_otp_code(
     stored_hash = await redis.get(code_key)
     if stored_hash is None:
         security_logger.info(
-            "otp_verify_no_code purpose=%s subject=%s", purpose.value, subject
+            "otp_verify_no_code purpose=%s subject=%s", purpose.value, _mask_subject(subject)
         )
         raise OTPExpiredError
 
@@ -236,7 +243,7 @@ async def consume_otp_code(
     if attempts > settings.otp_max_attempts:
         await redis.delete(code_key, attempts_key)
         security_logger.warning(
-            "otp_brute_force purpose=%s subject=%s", purpose.value, subject
+            "otp_brute_force purpose=%s subject=%s", purpose.value, _mask_subject(subject)
         )
         raise OTPExpiredError
 
@@ -252,13 +259,13 @@ async def consume_otp_code(
             security_logger.warning(
                 "otp_attempts_exhausted purpose=%s subject=%s",
                 purpose.value,
-                subject,
+                _mask_subject(subject),
             )
         else:
             security_logger.info(
                 "otp_wrong_code purpose=%s subject=%s attempt=%s",
                 purpose.value,
-                subject,
+                _mask_subject(subject),
                 attempts,
             )
         raise OTPInvalidError
@@ -270,7 +277,7 @@ async def consume_otp_code(
     await redis.delete(attempts_key)
     if consumed == 0:
         security_logger.warning(
-            "otp_verify_race purpose=%s subject=%s", purpose.value, subject
+            "otp_verify_race purpose=%s subject=%s", purpose.value, _mask_subject(subject)
         )
         raise OTPExpiredError
     await security_metrics.record(security_metrics.OTP_VERIFIED, redis=redis)

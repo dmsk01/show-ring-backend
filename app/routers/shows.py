@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
-from typing import Literal, NoReturn
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.dates import today_local
 from app.database import get_db
 from app.dependencies import get_current_user, is_admin, require_any_role, get_current_user_optional
 from app.models.show import ShowStatus
@@ -52,43 +53,26 @@ router = APIRouter(prefix="/shows", tags=["shows"])
 _is_admin = is_admin
 
 
-def _raise_for_error(err: ValueError) -> NoReturn:
-    """
-    NoReturn — функция всегда кидает HTTPException. Аннотация нужна,
-    чтобы pyright/mypy понимали, что код после её вызова недостижим
-    (иначе кричит на "переменные могут быть unbound" в try/except-блоках).
-    """
-    code = str(err)
-    not_found_codes = {
-        "not_found",
-        "dog_not_found",
-        "breed_not_found",
-        "show_class_not_found",
-        "judge_assignment_not_found",
-        "ring_not_found",
-        "entry_not_found",
-        "handler_not_found",
-    }
-    if code in not_found_codes:
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    if code in ("dog_already_registered",):
-        raise HTTPException(409, code)
-    if code in (
-        "registration_not_open",
-        "registration_deadline_passed",
-        "registration_locked",
-        "show_locked",
-        "invalid_status_transition",
-        "breed_not_allowed",
-        "class_not_available_for_age",
-        "class_animal_type_mismatch",
-        "dog_birth_date_missing",
-        "invalid_dates",
-    ):
-        raise HTTPException(422, code)
-    raise HTTPException(400, code)
+def _draft_visibility(viewer: User | None) -> repo.DraftVisibility:
+    """Кому видны черновики (BE-15): admin — все, организатор — свои."""
+    if viewer is None:
+        return None
+    return "all" if _is_admin(viewer) else viewer.id
+
+
+async def _get_visible_show(
+    db: AsyncSession, show_id: uuid.UUID, viewer: User | None
+):
+    """Выставка для публичного чтения. Черновик чужому — 404, как будто
+    его нет: неопубликованные данные организатора не раскрываем."""
+    obj = await repo.get_show(db, show_id)
+    if obj is None:
+        raise HTTPException(404, "Выставка не найдена")
+    if obj.status == ShowStatus.draft:
+        drafts = _draft_visibility(viewer)
+        if drafts != "all" and drafts != obj.organizer_id:
+            raise HTTPException(404, "Выставка не найдена")
+    return obj
 
 
 # ---------------------------------------------------------------------
@@ -145,6 +129,7 @@ async def list_shows(
         date_to=date_to,
         status=status_,
         search=search,
+        drafts=_draft_visibility(viewer),
         sort_by=sort_by,
         order=order,
         page=page,
@@ -158,6 +143,7 @@ async def list_shows(
         date_to=date_to,
         status=status_,
         search=search,
+        drafts=_draft_visibility(viewer),
     )
     return ShowPage(
         items=[ShowResponse.model_validate(s) for s in items],
@@ -172,11 +158,12 @@ async def list_shows(
     response_model=ShowResponse,
     summary="Карточка выставки",
 )
-async def get_show(show_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    obj = await repo.get_show(db, show_id)
-    if obj is None:
-        raise HTTPException(404, "Выставка не найдена")
-    return obj
+async def get_show(
+    show_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
+):
+    return await _get_visible_show(db, show_id, viewer)
 
 
 @router.put(
@@ -190,16 +177,13 @@ async def update_show(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.update_show(
-            db,
-            show_id=show_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.update_show(
+        db,
+        show_id=show_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(exclude_unset=True),
+    )
 
 
 @router.put(
@@ -213,16 +197,13 @@ async def change_status(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.change_status(
-            db,
-            show_id=show_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            target=body.status,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.change_status(
+        db,
+        show_id=show_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        target=body.status,
+    )
 
 
 @router.delete(
@@ -235,15 +216,12 @@ async def delete_show(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_show(
-            db,
-            show_id=show_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_show(
+        db,
+        show_id=show_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -263,18 +241,15 @@ async def add_judge(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.add_judge(
-            db,
-            show_id=show_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            judge_id=body.judge_id,
-            breed_id=body.breed_id,
-            breed_group_id=body.breed_group_id,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.add_judge(
+        db,
+        show_id=show_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        judge_id=body.judge_id,
+        breed_id=body.breed_id,
+        breed_group_id=body.breed_group_id,
+    )
 
 
 @router.get(
@@ -285,7 +260,9 @@ async def add_judge(
 async def list_judges(
     show_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    await _get_visible_show(db, show_id, viewer)
     return await repo.list_show_judges(db, show_id)
 
 
@@ -300,16 +277,13 @@ async def remove_judge(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.remove_judge(
-            db,
-            show_id=show_id,
-            judge_record_id=judge_record_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.remove_judge(
+        db,
+        show_id=show_id,
+        judge_record_id=judge_record_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -329,16 +303,13 @@ async def add_ring(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.add_ring(
-            db,
-            show_id=show_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.add_ring(
+        db,
+        show_id=show_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(),
+    )
 
 
 @router.get(
@@ -349,7 +320,9 @@ async def add_ring(
 async def list_rings(
     show_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    await _get_visible_show(db, show_id, viewer)
     return await repo.list_show_rings(db, show_id)
 
 
@@ -365,17 +338,14 @@ async def update_ring(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.update_ring(
-            db,
-            show_id=show_id,
-            ring_id=ring_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.update_ring(
+        db,
+        show_id=show_id,
+        ring_id=ring_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(exclude_unset=True),
+    )
 
 
 @router.delete(
@@ -389,16 +359,13 @@ async def delete_ring(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_ring(
-            db,
-            show_id=show_id,
-            ring_id=ring_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_ring(
+        db,
+        show_id=show_id,
+        ring_id=ring_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -422,12 +389,9 @@ async def get_available_classes(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),  # noqa: ARG001
 ):
-    try:
-        dog, classes, age_months = await svc.get_available_classes_for_dog(
-            db, show_id=show_id, dog_id=dog_id
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    dog, classes, age_months = await svc.get_available_classes_for_dog(
+        db, show_id=show_id, dog_id=dog_id
+    )
     return AvailableClassesResponse(
         dog_id=dog.id,
         age_at_show_months=age_months,
@@ -464,20 +428,17 @@ async def create_entry(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.register_entry(
-            db,
-            show_id=show_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            dog_id=body.dog_id,
-            show_class_id=body.show_class_id,
-            handler_id=body.handler_id,
-            notes=body.notes,
-            today=date.today(),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.register_entry(
+        db,
+        show_id=show_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        dog_id=body.dog_id,
+        show_class_id=body.show_class_id,
+        handler_id=body.handler_id,
+        notes=body.notes,
+        today=today_local(),
+    )
 
 
 # Путь без {show_id} (два сегмента после /shows), поэтому с
@@ -544,6 +505,7 @@ async def list_entries(
     db: AsyncSession = Depends(get_db),
     viewer: User | None = Depends(get_current_user_optional),
 ):
+    await _get_visible_show(db, show_id, viewer)
     per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE_LARGE)
     items = await repo.list_show_entries(
         db, show_id, page=page, per_page=per_page
@@ -568,16 +530,13 @@ async def cancel_entry(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.cancel_entry(
-            db,
-            show_id=show_id,
-            entry_id=entry_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.cancel_entry(
+        db,
+        show_id=show_id,
+        entry_id=entry_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 @router.patch(
@@ -592,20 +551,17 @@ async def update_entry(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.update_entry(
-            db,
-            show_id=show_id,
-            entry_id=entry_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            show_class_id=body.show_class_id,
-            handler_id=body.handler_id,
-            notes=body.notes,
-            today=date.today(),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.update_entry(
+        db,
+        show_id=show_id,
+        entry_id=entry_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        show_class_id=body.show_class_id,
+        handler_id=body.handler_id,
+        notes=body.notes,
+        today=today_local(),
+    )
     row = await repo.get_entry_enriched(db, entry_id)
     if row is None:  # запись только что обновили; None возможен лишь в гонке
         raise HTTPException(404, "entry_not_found")

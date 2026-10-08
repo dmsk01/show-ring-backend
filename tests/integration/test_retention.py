@@ -62,7 +62,8 @@ async def test_retention_purges_and_anonymizes(db_session):
 
     stats = await purge_expired_personal_data(db_session, now=NOW)
 
-    assert stats == {"security_logs_deleted": 1, "ad_events_anonymized": 1}
+    assert stats["security_logs_deleted"] == 1
+    assert stats["ad_events_anonymized"] == 1
     db_session.expire_all()
     assert await db_session.get(SecurityAuditLog, ids[0]) is None
     assert await db_session.get(SecurityAuditLog, ids[1]) is not None
@@ -78,3 +79,32 @@ async def test_retention_is_idempotent(db_session):
     stats = await purge_expired_personal_data(db_session, now=NOW)
     assert stats["ad_events_anonymized"] == 0
     assert stats["security_logs_deleted"] == 0
+
+
+async def test_retention_purges_delivered_outbox_events(db_session):
+    # BE-11 (ревью 2026-10-06): payload email-задач в outbox содержит адрес
+    # получателя и HTML письма со ссылками-токенами. Цель (доставка)
+    # достигнута — строки удаляются: sent через 7 дней, failed через 30.
+    from app.models.outbox import OutboxEvent, OutboxStatus
+
+    def ev(status, age_days):
+        return OutboxEvent(
+            routing_key="email_tasks", payload={"to_email": "x@example.com"},
+            status=status, created_at=NOW - timedelta(days=age_days),
+        )
+
+    rows = [
+        ev(OutboxStatus.sent, 8), ev(OutboxStatus.sent, 1),
+        ev(OutboxStatus.failed, 31), ev(OutboxStatus.failed, 10),
+        ev(OutboxStatus.pending, 60),
+    ]
+    db_session.add_all(rows)
+    await db_session.flush()
+    ids = [r.id for r in rows]
+
+    stats = await purge_expired_personal_data(db_session, now=NOW)
+
+    assert stats["outbox_events_deleted"] >= 2
+    db_session.expire_all()
+    alive = [await db_session.get(OutboxEvent, i) is not None for i in ids]
+    assert alive == [False, True, False, True, True]

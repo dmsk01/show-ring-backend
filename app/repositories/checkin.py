@@ -113,16 +113,6 @@ async def list_staffed_shows(db: AsyncSession, user_id: uuid.UUID) -> list[Show]
     return list((await db.execute(stmt)).scalars().unique())
 
 
-async def get_user_by_email_ci(db: AsyncSession, email: str) -> User | None:
-    """
-    Поиск по email без учёта регистра: организатор вводит адрес регистратора
-    вручную, а при регистрации email не нормализуется (users.email хранится
-    как ввели).
-    """
-    stmt = select(User).where(func.lower(User.email) == email.strip().lower()).limit(1)
-    return (await db.execute(stmt)).scalar_one_or_none()
-
-
 async def list_participant_entries(
     db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID
 ) -> list[ShowEntry]:

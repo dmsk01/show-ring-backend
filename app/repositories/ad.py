@@ -212,6 +212,23 @@ async def try_charge_campaign(
     return getattr(result, "rowcount", 0) == 1
 
 
+async def charge_up_to_budget(
+    db: AsyncSession, campaign_id: uuid.UUID, cost: Decimal
+) -> None:
+    """
+    Списать cost, но не больше остатка бюджета (батч воркера, BE-06).
+
+    try_charge_campaign — «всё или ничего»: если остатка не хватало на
+    весь батч, не списывалось ничего, хотя часть показов уже состоялась.
+    """
+    stmt = (
+        update(AdCampaign)
+        .where(AdCampaign.id == campaign_id, AdCampaign.spent < AdCampaign.budget)
+        .values(spent=func.least(AdCampaign.budget, AdCampaign.spent + cost))
+    )
+    await db.execute(stmt)
+
+
 async def auto_complete_campaign_if_exhausted(
     db: AsyncSession, campaign_id: uuid.UUID
 ) -> None:

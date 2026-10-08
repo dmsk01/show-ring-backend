@@ -64,3 +64,47 @@ async def test_xff_from_untrusted_peer_is_ignored():
     async with _client(("198.51.100.1", 5555)) as c:
         r = await c.get("/", headers={"X-Forwarded-For": "1.2.3.4"})
     assert r.text == "198.51.100.1"
+
+
+async def _ws_scope_after_middleware(peer, headers):
+    """Прогнать websocket-scope через middleware, вернуть scope внутри app."""
+    seen: dict = {}
+
+    async def inner(scope, receive, send):
+        seen.update(scope)
+
+    mw = proxy_headers.ProxyHeadersMiddleware(inner)
+    scope = {
+        "type": "websocket",
+        "scheme": "ws",
+        "path": "/notifications/ws",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "client": peer,
+    }
+
+    async def receive():  # pragma: no cover — inner не читает
+        return {"type": "websocket.connect"}
+
+    async def send(message):  # pragma: no cover
+        pass
+
+    await mw(scope, receive, send)
+    return seen
+
+
+async def test_websocket_client_ip_from_trusted_proxy():
+    # BE-01: BaseHTTPMiddleware пропускал websocket-scope без обработки —
+    # за nginx все WS-клиенты были «одним IP» и делили rate-limit.
+    scope = await _ws_scope_after_middleware(
+        _PROXY_PEER,
+        {"X-Forwarded-For": "1.2.3.4, 203.0.113.7", "X-Forwarded-Proto": "https"},
+    )
+    assert scope["client"][0] == "203.0.113.7"
+    assert scope["scheme"] == "wss"
+
+
+async def test_websocket_xff_from_untrusted_peer_is_ignored():
+    scope = await _ws_scope_after_middleware(
+        ("198.51.100.1", 5555), {"X-Forwarded-For": "1.2.3.4"}
+    )
+    assert scope["client"][0] == "198.51.100.1"

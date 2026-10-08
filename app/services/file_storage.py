@@ -30,8 +30,10 @@ from typing import Any, cast
 import aioboto3
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import HTTPException, UploadFile, status
+from PIL import Image
 
 from app.config import settings
+from app.utils.image_processing import strip_image_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +185,17 @@ async def _upload_to_s3(
         chunks.append(chunk)
 
     body = b"".join(chunks)
+    # Ревью 2026-10-06, BE-24: оригинал отдаётся публично — убираем EXIF
+    # (GPS-координаты съёмки). Pillow — CPU, поэтому в thread pool.
+    try:
+        body = await asyncio.to_thread(
+            strip_image_metadata, body, detected.content_type
+        )
+    except (OSError, ValueError, Image.DecompressionBombError):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Не удалось обработать изображение",
+        )
     s3_key = f"{folder}/{uuid.uuid4()}.{detected.extension}"
 
     try:
@@ -208,7 +221,7 @@ async def _upload_to_s3(
             detail="Файловое хранилище недоступно",
         )
 
-    return s3_key, detected.content_type, upload.filename or "file", total
+    return s3_key, detected.content_type, upload.filename or "file", len(body)
 
 
 async def upload_bytes(

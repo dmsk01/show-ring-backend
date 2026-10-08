@@ -9,57 +9,54 @@ Security headers middleware (этап 14).
 - Referrer-Policy: strict-origin-when-cross-origin — не утекаем полный
   URL в Referer на сторонние домены.
 - Permissions-Policy                — отключаем доступ к камере/микрофону
-  для контента, отдаваемого API (микро-меры — API не должно их
-  запрашивать вообще, но prophylaxис не помешает).
+  для контента, отдаваемого API.
+- Strict-Transport-Security — только при HSTS_ENABLED и запросе по HTTPS.
+- Content-Security-Policy — при CSP_ENABLED.
 
-Strict-Transport-Security НЕ добавляем здесь: HSTS должен ставить
-TLS-терминирующий nginx/Caddy, у которого больше контекста (домен,
-preload список и т.д.).
+Чистый ASGI (ревью 2026-10-06, BE-28): заголовки дописываются в
+http.response.start без буферизации ответа и без отдельной задачи на
+каждый запрос, как было у BaseHTTPMiddleware.
 """
 
 from __future__ import annotations
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.datastructures import MutableHeaders
 
 from app.config import settings
 
-
-# CSP для JSON-API: ничего не разрешаем, API не отдаёт HTML.
-# frame-ancestors 'none' дублирует X-Frame-Options для современных
-# браузеров (XFO считается устаревшим в пользу CSP).
 _CSP_API = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
 
+_STATIC_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("X-Robots-Tag", "noindex, nofollow"),
+    ("Referrer-Policy", "strict-origin-when-cross-origin"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+)
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:
-        response = await call_next(request)
-        # setdefault на mutableHeaders нет — пишем напрямую. Если уже
-        # установлено выше (например, обработчиком), не перезаписываем.
-        h = response.headers
-        h.setdefault("X-Content-Type-Options", "nosniff")
-        h.setdefault("X-Frame-Options", "DENY")
-        # Ответы API не индексируются поисковиками (план защиты 2026-10-05):
-        # robots.txt закрывает /api/ для добросовестных роботов, заголовок —
-        # на случай прямых ссылок на JSON.
-        h.setdefault("X-Robots-Tag", "noindex, nofollow")
-        h.setdefault(
-            "Referrer-Policy", "strict-origin-when-cross-origin"
-        )
-        h.setdefault(
-            "Permissions-Policy",
-            "camera=(), microphone=(), geolocation=()",
-        )
-        # HSTS — только когда явно включён в конфиге и запрос пришёл
-        # по HTTPS. Иначе подсказывали бы браузеру переходить на HTTPS
-        # для домена, который пока работает только на HTTP — пользователи
-        # получали бы ERR_SSL_PROTOCOL_ERROR.
-        if settings.hsts_enabled and request.url.scheme == "https":
-            h.setdefault(
-                "Strict-Transport-Security",
-                f"max-age={settings.hsts_max_age_seconds}; includeSubDomains",
-            )
-        if settings.csp_enabled:
-            h.setdefault("Content-Security-Policy", _CSP_API)
-        return response
+
+class SecurityHeadersMiddleware:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        https = scope.get("scheme") == "https"
+
+        async def send_with_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _STATIC_HEADERS:
+                    headers.setdefault(name, value)
+                if settings.hsts_enabled and https:
+                    headers.setdefault(
+                        "Strict-Transport-Security",
+                        f"max-age={settings.hsts_max_age_seconds}; includeSubDomains",
+                    )
+                if settings.csp_enabled:
+                    headers.setdefault("Content-Security-Policy", _CSP_API)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)

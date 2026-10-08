@@ -24,20 +24,22 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.dates import today_local
 from app.models.ad import AdCampaign, CampaignStatus
-from app.models.classified import Classified
+from app.models.classified import Classified, ClassifiedImage
 from app.models.consent import UserConsent
 from app.models.dog import Dog, DogDocument
 from app.models.file import UploadedFile
 from app.models.kennel import Kennel
 from app.models.notification import Notification, Subscription
+from app.models.outbox import OutboxEvent
 from app.models.show import Show, ShowStatus
 from app.models.support import SupportTicket
 from app.models.user import (
@@ -51,7 +53,7 @@ from app.repositories import security_audit as audit_repo
 from app.services import file_storage
 from app.services.account_security import _consume_or_400
 from app.services.otp_auth import OTPPurpose
-from app.utils.security import dummy_verify_password, verify_password
+from app.utils.security import dummy_verify_password_async, verify_password_async
 
 logger = logging.getLogger(__name__)
 security_logger = logging.getLogger("app.security")
@@ -78,9 +80,9 @@ async def _reauth(
         )
         return
     if not password or not user.hashed_password:
-        dummy_verify_password()
+        await dummy_verify_password_async()
         raise HTTPException(status_code=403, detail="invalid_password")
-    if not verify_password(password, user.hashed_password):
+    if not await verify_password_async(password, user.hashed_password):
         raise HTTPException(status_code=403, detail="invalid_password")
 
 
@@ -89,7 +91,7 @@ async def _ensure_no_blockers(db: AsyncSession, user: User) -> None:
         select(Show.id).where(
             Show.organizer_id == user.id,
             Show.status.in_(_UNFINISHED_SHOW_STATUSES),
-            Show.date_start >= date.today(),
+            Show.date_start >= today_local(),
         ).limit(1)
     )
     if shows.first() is not None:
@@ -133,6 +135,19 @@ async def delete_account(
     ).all()
     file_ids = [row.id for row in doc_files]
     s3_keys = [row.s3_key for row in doc_files]
+    # Фото объявлений пользователя (ревью 2026-10-06, BE-11): объявления
+    # удаляются ниже, а их файлы оставались публичными по id — на фото
+    # часто дом или двор продавца.
+    classified_files = (
+        await db.execute(
+            select(UploadedFile.id, UploadedFile.s3_key)
+            .join(ClassifiedImage, ClassifiedImage.file_id == UploadedFile.id)
+            .join(Classified, Classified.id == ClassifiedImage.classified_id)
+            .where(Classified.author_id == uid)
+        )
+    ).all()
+    file_ids += [row.id for row in classified_files]
+    s3_keys += [row.s3_key for row in classified_files]
     if user.avatar_file_id is not None:
         avatar = await db.get(UploadedFile, user.avatar_file_id)
         if avatar is not None:
@@ -146,6 +161,14 @@ async def delete_account(
     )
 
     # --- Контент и служебные данные пользователя ----------------------
+    # Письма пользователю в outbox: payload хранит адрес и HTML со
+    # ссылками-токенами (BE-11).
+    if user.email:
+        await db.execute(
+            delete(OutboxEvent).where(
+                OutboxEvent.payload["to_email"].astext == user.email
+            )
+        )
     for model, column in (
         (Classified, Classified.author_id),
         (SupportTicket, SupportTicket.user_id),

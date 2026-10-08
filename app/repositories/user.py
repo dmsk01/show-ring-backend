@@ -2,25 +2,32 @@ from uuid import UUID
 from typing import Any, cast
 from datetime import datetime, timezone
 
-from sqlalchemy import CursorResult, select, update
-from sqlalchemy.orm import selectinload
+from sqlalchemy import CursorResult, func, select, update
+from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import EmailVerificationToken, RefreshToken, User, UserProfile
 
 
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
-    stmt = select(User).where(User.email == email).options(selectinload(User.roles))
+    # По lower(email): страховка для форм без нормализации (OAuth2-форма
+    # /auth/token) и данных до миграции BE-16; индекс uq_users_email_lower.
+    stmt = (
+        select(User)
+        .where(func.lower(User.email) == email.strip().lower())
+        .options(selectinload(User.roles))
+    )
 
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 
 async def get_user_by_id(db: AsyncSession, user_id: UUID) -> User | None:
-    stmt = select(User).where(User.id == user_id).options(selectinload(User.roles))
-
+    # joinedload: один запрос вместо двух (ревью 2026-10-06, BE-36) — функция
+    # вызывается на каждый аутентифицированный запрос (get_current_user).
+    stmt = select(User).where(User.id == user_id).options(joinedload(User.roles))
     result = await db.execute(stmt)
-    return result.scalar_one_or_none()
+    return result.unique().scalar_one_or_none()
 
 
 async def create_user(db: AsyncSession, email: str, hashed_password: str) -> User:

@@ -94,3 +94,10 @@ class OutboxEvent(Base):
     sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # «Застолблено» dispatcher'ом до этого момента (ревью 2026-10-06, BE-18):
+    # пачка помечается до публикации, второй dispatcher её пропускает, пока
+    # первый работает. Если dispatcher упал, событие снова станет доступно
+    # после истечения срока.
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

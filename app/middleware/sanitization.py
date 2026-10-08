@@ -1,7 +1,8 @@
+import html
 import json
 from email.message import Message
 from typing import Any
-import bleach
+import nh3
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -62,6 +63,33 @@ def _is_raw_html_route(request: Request) -> bool:
     return path == "/posts" or path.startswith("/posts/")
 
 
+_MAX_CLEAN_PASSES = 5
+
+
+def _strip_tags(text: str) -> str:
+    """
+    Удалить HTML-теги, НЕ экранируя текст.
+
+    ИСПРАВЛЕНО (ревью 2026-10-06, BE-07): очистка HTML (раньше bleach, с
+    BE-29 — nh3) не только вырезает
+    теги, но и экранирует & < > в сущности. В БД оседали
+    "https://site.ru/?a=1&amp;b=2" и "Tom &amp; Jerry", а React выводил
+    их буквально. Защита от XSS — экранирование при ВЫВОДЕ (React, Jinja
+    autoescape), здесь лишь убираем разметку.
+
+    Поэтому после очистки раскодируем сущности обратно. Повторяем до
+    неподвижной точки: иначе «&lt;script&gt;» после раскодирования
+    превратился бы в настоящий тег.
+    """
+    current = text
+    for _ in range(_MAX_CLEAN_PASSES):
+        cleaned = html.unescape(nh3.clean(current, tags=set()))
+        if cleaned == current:
+            return cleaned
+        current = cleaned
+    return current
+
+
 def _sanitize(
     value: Any,
     *,
@@ -76,7 +104,7 @@ def _sanitize(
     if key is not None and (key in SENSITIVE_FIELDS or key in raw_fields):
         return value
     if isinstance(value, str):
-        return bleach.clean(value, tags=[], strip=True)
+        return _strip_tags(value)
     if isinstance(value, dict):
         return {
             k: _sanitize(v, key=k, raw_fields=raw_fields)

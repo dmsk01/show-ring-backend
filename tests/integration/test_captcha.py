@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.models.notification import Notification
+from app.models.user import User
 from app.main import app
 from app.services.sms import SMSProvider, get_sms_provider
 
@@ -127,7 +128,7 @@ async def test_tampered_challenge_rejected(client, sms):
 async def _register(client) -> str:
     email = f"guard_{uuid.uuid4().hex[:10]}@example.com"
     r = await client.post(
-        "/auth/register", json={"email": email, "password": PASSWORD}
+        "/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     assert r.status_code == 200, r.text
     return email
@@ -200,3 +201,28 @@ async def test_lockout_counts_unknown_emails_too(client, monkeypatch):
     r = await _login(client, ghost, "whatever1")
     assert r.status_code == 429
     assert r.json()["detail"] == "account_locked"
+
+
+async def test_lock_notice_sent_once_per_day(client, db_session, test_redis, monkeypatch):
+    # Ревью 2026-10-06, BE-37: зная email, можно держать аккаунт в блокировке
+    # и каждые 15 минут слать владельцу письмо. Письмо — не чаще раза в сутки.
+    monkeypatch.setattr(settings, "auth_login_rate_limit", 100)
+    monkeypatch.setattr(settings, "login_captcha_after_failures", 100)
+    monkeypatch.setattr(settings, "login_lockout_failures", 2)
+    email = await _register(client)
+
+    for _ in range(2):  # два цикла «блокировка → истекла»
+        for i in range(2):
+            await _login(client, email, f"wrong-{i}x")
+        await test_redis.delete(f"login:lock:{email}")
+
+    notes = await db_session.execute(
+        select(Notification).where(
+            Notification.event_type == "transactional.account_locked"
+        )
+    )
+    user_notes = [n for n in notes.scalars().all()]
+    me = (
+        await db_session.execute(select(User).where(User.email == email))
+    ).scalar_one()
+    assert len([n for n in user_notes if n.user_id == me.id]) == 1

@@ -106,10 +106,13 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     assert r2.status_code == 200
 
     # Один и тот же пользователь (sub в JWT), а не дубликат.
-    from jose import jwt
+    import jwt
 
-    sub1 = jwt.get_unverified_claims(r1.json()["access_token"])["sub"]
-    sub2 = jwt.get_unverified_claims(r2.json()["access_token"])["sub"]
+    def _sub(token: str) -> str:
+        return jwt.decode(token, options={"verify_signature": False})["sub"]
+
+    sub1 = _sub(r1.json()["access_token"])
+    sub2 = _sub(r2.json()["access_token"])
     assert sub1 == sub2
 
 

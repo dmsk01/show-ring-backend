@@ -12,22 +12,29 @@ redis_client: Redis | None = None
 
 
 async def init_redis() -> None:
+    """
+    Создать клиент Redis. Клиент создаётся ВСЕГДА, даже если Redis сейчас
+    недоступен: Redis.from_url не подключается сразу, а пул redis-py сам
+    переподключится, когда Redis вернётся.
+
+    ИСПРАВЛЕНО (ревью 2026-10-06, BE-02): раньше при неудачном ping клиент
+    обнулялся до рестарта процесса — idempotency, дедуп рекламы, pub/sub и
+    все cron-задачи (scheduler-lock требует клиента) молча отключались, а
+    публичные ручки с Depends(get_redis) отдавали 503 вместо fail-open.
+    Теперь сбой Redis — это ошибка конкретной операции, которую каждый
+    потребитель обрабатывает по своей политике (fail-open/fail-closed).
+    """
     global redis_client
 
+    redis_client = Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+    )
     try:
-        redis_client = Redis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-        )
-
         await redis_client.ping()  # type: ignore[misc]
-
         logger.info("Redis connected")
-
     except RedisError as e:
-        redis_client = None
-        # ИСПРАВЛЕНО: print → logging.warning, чтобы событие попало в лог-агрегатор.
-        logger.warning("Redis connection failed: %s", e)
+        logger.error("Redis unavailable at startup (will reconnect): %s", e)
 
 
 async def close_redis() -> None:

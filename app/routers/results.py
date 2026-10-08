@@ -38,6 +38,11 @@ def _is_admin(user: User) -> bool:
     return any(r.role.value == "admin" for r in user.roles)
 
 
+def _explicit_nulls(body) -> set[str]:
+    """Поля, явно переданные как null (а не просто не переданные)."""
+    return {f for f in body.model_fields_set if getattr(body, f) is None}
+
+
 def _raise_for_error(err: ValueError) -> NoReturn:
     code = str(err)
     not_found = {
@@ -62,7 +67,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
         "winner_must_be_big",
     ):
         raise HTTPException(422, code)
-    if code == "entry_not_admitted":
+    if code in ("entry_not_admitted", "placement_taken"):
         raise HTTPException(409, code)
     raise HTTPException(400, code)
 
@@ -98,6 +103,8 @@ async def upsert_result(
             grade_id=body.grade_id,
             placement=body.placement,
             critique=body.critique,
+            # Явный null в теле = сбросить поле (BE-26).
+            clear=_explicit_nulls(body),
         )
     except ValueError as e:
         _raise_for_error(e)
@@ -140,6 +147,8 @@ async def update_result(
             grade_id=body.grade_id,
             placement=body.placement,
             critique=body.critique,
+            # Явный null в теле = сбросить поле (BE-26).
+            clear=_explicit_nulls(body),
         )
     except ValueError as e:
         _raise_for_error(e)

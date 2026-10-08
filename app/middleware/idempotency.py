@@ -64,6 +64,21 @@ _IN_FLIGHT_TTL_SECONDS = 60
 # идентичный запрос пройдёт заново через handler.
 _MAX_CACHED_BODY_BYTES = 256 * 1024
 
+# Заголовки, которые нельзя воспроизводить из кэша (BE-09): Set-Cookie
+# переотправил бы чужие/старые куки (сессию), X-Request-ID — id чужого
+# запроса, длину/дату Starlette выставит сам.
+_UNCACHEABLE_HEADERS = frozenset(
+    {"set-cookie", "x-request-id", "content-length", "date", "server"}
+)
+
+# Не кэшируем auth: ответ несёт токены в куках/теле, а повтор логина из
+# кэша выдал бы их без проверки пароля.
+_EXCLUDED_PATH_PREFIXES = ("/auth/",)
+
+# Тело запроса читается в память целиком (для хэша) — большие тела
+# (загрузки файлов) пропускаем без idempotency.
+_MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
 
 def _caller_identity(request: Request) -> str:
     """
@@ -84,9 +99,14 @@ def _caller_identity(request: Request) -> str:
     ПОСЛЕ get_current_user — там identity явно authenticated. Сейчас
     минимальный fix в рамках middleware-архитектуры.
     """
-    auth = request.headers.get("authorization")
-    if auth:
-        return "u:" + hashlib.sha256(auth.encode("utf-8")).hexdigest()[:32]
+    # ИСПРАВЛЕНО (ревью 2026-10-06, BE-09): веб-клиент авторизуется
+    # httpOnly-кукой access_token без заголовка Authorization — раньше для
+    # всего веба identity была IP, и пользователи за одним NAT делили кэш.
+    token = request.headers.get("authorization") or request.cookies.get(
+        "access_token"
+    )
+    if token:
+        return "u:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
     if request.client is not None:
         return "ip:" + request.client.host
     return "anon"
@@ -123,6 +143,11 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         redis_client = redis_state.redis_client
         key = request.headers.get(_HEADER)
         if not key or redis_client is None:
+            return await call_next(request)
+        if request.url.path.startswith(_EXCLUDED_PATH_PREFIXES):
+            return await call_next(request)
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > _MAX_REQUEST_BODY_BYTES:
             return await call_next(request)
 
         # Читаем тело и кладём обратно для нижестоящего обработчика —
@@ -238,7 +263,11 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                     "body": full_body.decode("utf-8", errors="replace"),
                     "encoding": "utf-8",
                     "status": response.status_code,
-                    "headers": dict(response.headers),
+                    "headers": {
+                        k: v
+                        for k, v in response.headers.items()
+                        if k.lower() not in _UNCACHEABLE_HEADERS
+                    },
                     "media_type": response.media_type,
                 }
                 try:
@@ -266,12 +295,17 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
 
             # Возвращаем новый Response с уже прочитанным телом —
             # старый body_iterator исчерпан.
-            return Response(
+            # raw_headers, а не dict(response.headers): dict схлопывал
+            # повторяющиеся Set-Cookie в один (терялись куки).
+            replay = Response(
                 content=full_body,
                 status_code=response.status_code,
-                headers=dict(response.headers),
                 media_type=response.media_type,
             )
+            replay.raw_headers = [
+                (k, v) for k, v in response.raw_headers if k.lower() != b"content-length"
+            ] + [(b"content-length", str(len(full_body)).encode())]
+            return replay
 
         # Неуспешный ответ не кэшируем, но lock освобождаем — клиент
         # должен иметь возможность повторить запрос корректно.

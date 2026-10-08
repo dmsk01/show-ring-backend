@@ -39,7 +39,7 @@ def _set_cookies(r) -> dict[str, str]:
 async def _register_and_login(client, *, headers: dict | None = None):
     email = _email()
     r = await client.post(
-        "/auth/register", json={"email": email, "password": PASSWORD}
+        "/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     assert r.status_code == 200, r.text
     r = await client.post(
@@ -131,6 +131,68 @@ async def test_logout_clears_both_cookies(client):
     assert cleared.get("refresh_token") == ""
 
 
+async def test_logout_with_revoked_refresh_still_clears_cookies(client):
+    # BE-13: delete_cookie на внедрённом Response терялся при raise
+    # HTTPException — браузер оставался с мёртвыми куками.
+    r = await _register_and_login(client)
+    refresh = _set_cookies(r)["refresh_token"]
+    r = await client.post(
+        "/auth/logout", json={}, headers={"Cookie": f"refresh_token={refresh}"}
+    )
+    assert r.status_code == 200, r.text
+
+    # Повторный logout с уже отозванным токеном — идемпотентен.
+    r = await client.post(
+        "/auth/logout", json={}, headers={"Cookie": f"refresh_token={refresh}"}
+    )
+    assert r.status_code == 200, r.text
+    cleared = _set_cookies(r)
+    assert cleared.get("access_token") == ""
+    assert cleared.get("refresh_token") == ""
+
+
+async def test_logout_without_refresh_clears_cookies(client):
+    r = await client.post("/auth/logout", json={})
+    assert r.status_code == 200, r.text
+    cleared = _set_cookies(r)
+    assert cleared.get("access_token") == ""
+    assert cleared.get("refresh_token") == ""
+
+
+async def test_refresh_with_invalid_token_clears_cookies(client):
+    r = await client.post(
+        "/auth/refresh", json={}, headers={"Cookie": "refresh_token=bogus"}
+    )
+    assert r.status_code == 401
+    cleared = _set_cookies(r)
+    assert cleared.get("access_token") == ""
+    assert cleared.get("refresh_token") == ""
+
+
+async def test_parallel_refresh_does_not_revoke_all_sessions(client):
+    # BE-27: две вкладки одновременно обновляют токен одной кукой. Вторая
+    # получает 401, но это не reuse-атака — сессия первой вкладки жива.
+    r = await _register_and_login(client)
+    old_refresh = _set_cookies(r)["refresh_token"]
+    r1 = await client.post(
+        "/auth/refresh", json={}, headers={"Cookie": f"refresh_token={old_refresh}"}
+    )
+    assert r1.status_code == 200, r1.text
+    new_refresh = _set_cookies(r1)["refresh_token"]
+
+    r2 = await client.post(
+        "/auth/refresh", json={}, headers={"Cookie": f"refresh_token={old_refresh}"}
+    )
+    assert r2.status_code == 401
+    # Куки браузера уже обновила первая вкладка — вторая их не стирает.
+    assert not r2.headers.get_list("set-cookie")
+
+    r3 =await client.post(
+        "/auth/refresh", json={}, headers={"Cookie": f"refresh_token={new_refresh}"}
+    )
+    assert r3.status_code == 200, r3.text
+
+
 async def test_csrf_rejects_foreign_origin_on_mutation(client):
     r = await client.post(
         "/auth/login",
@@ -146,7 +208,7 @@ async def test_csrf_allows_same_origin(client):
     email = _email()
     r = await client.post(
         "/auth/register",
-        json={"email": email, "password": PASSWORD},
+        json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True},
         headers={"Origin": "http://test"},
     )
     assert r.status_code == 200, r.text

@@ -25,9 +25,11 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_factory, get_db
+import app.dependencies as deps
 from app.dependencies import (
     user_rate_limit,
     authenticate_ws,
+    ws_rate_limit,
     get_current_user,
     require_any_role,
 )
@@ -260,6 +262,16 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
     соединение секунды, а не часы.
     """
     await websocket.accept()
+    # Ревью 2026-10-06, BE-21: чужой Origin, rate-limit подключений (как у
+    # WS уведомлений) и таймаут первого кадра — до сессии БД.
+    if not deps.ws_origin_allowed(websocket):
+        await websocket.close(code=deps.WS_CLOSE_FORBIDDEN_ORIGIN)
+        return
+    if not await ws_rate_limit(websocket, limit=20, window=60):
+        return
+    first = await deps.ws_receive_auth_frame(websocket)
+    if first is None:
+        return
 
     user_id: uuid.UUID | None = None
     is_op = False
@@ -269,11 +281,6 @@ async def support_ws(websocket: WebSocket, ticket_id: uuid.UUID):
     # `async with` соединение возвращается в пул, даже если клиент
     # просидит молча сутки.
     async with async_session_factory() as db:
-        try:
-            first = await websocket.receive_json()
-        except (WebSocketDisconnect, ValueError):
-            await websocket.close(code=1003)  # unsupported_data
-            return
         # token в кадре опционален: веб-клиент аутентифицируется
         # httpOnly-кукой из хендшейка (см. authenticate_ws).
         if first.get("type") != "auth":

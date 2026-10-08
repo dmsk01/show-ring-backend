@@ -54,6 +54,13 @@ class ShowCreate(ShowBase):
     breed_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
+# NOT NULL-колонки выставки: в частичном PUT поле можно не передавать, но
+# явный null — ошибка клиента. Ревью 2026-10-06, BE-23: раньше null в
+# date_start ронял кросс-проверку дат (TypeError → 500), а null в name —
+# нарушение NOT NULL (общий 409).
+_SHOW_NOT_NULL_FIELDS = ("name", "date_start")
+
+
 class ShowUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
     description: str | None = None
@@ -64,6 +71,15 @@ class ShowUpdate(BaseModel):
     venue: str | None = Field(None, max_length=255)
     entry_fee: Decimal | None = Field(None, ge=0)
     registration_deadline: date | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_nulls(cls, data):
+        if isinstance(data, dict):
+            nulls = [f for f in _SHOW_NOT_NULL_FIELDS if f in data and data[f] is None]
+            if nulls:
+                raise ValueError(f"Поля не могут быть null: {', '.join(nulls)}")
+        return data
 
 
 class ShowStatusUpdate(BaseModel):

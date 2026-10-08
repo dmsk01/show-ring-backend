@@ -26,6 +26,16 @@ def _validate_e164(v: str) -> str:
 E164Phone = Annotated[str, AfterValidator(_validate_e164)]
 
 
+def _normalize_email(value: str) -> str:
+    return value.strip().lower()
+
+
+# Email в нижнем регистре (ревью 2026-10-06, BE-16): "User@Mail.ru" и
+# "user@mail.ru" — один адрес. Без нормализации это были два аккаунта, а
+# вход зависел от регистра. Уникальность в БД — индекс по lower(email).
+NormalizedEmail = Annotated[EmailStr, AfterValidator(_normalize_email)]
+
+
 # Ссылки на соцсети храним и валидируем как абсолютный http(s)-URL.
 # Пустая строка трактуется как «очистить» → None (фронт шлёт "" при
 # удалении ссылки из поля). Хэндл вроде "@kennel" сознательно не
@@ -47,7 +57,7 @@ SocialURL = Annotated[str | None, AfterValidator(_validate_social_url)]
 
 
 class UserCreate(BaseModel):
-    email: EmailStr
+    email: NormalizedEmail
     password: str
     # Как у PhoneVerifyCodeRequest. Не обязательны: регистрация по email в
     # проде выключена и служит тестам; недостающие согласия интерфейс
@@ -104,7 +114,7 @@ class PublicUserResponse(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    email: EmailStr | None = None
+    email: NormalizedEmail | None = None
     # ИСПРАВЛЕНО (bug_203): смена email — sensitive операция. Без re-auth
     # компрометация access-токена даёт атакующему смену email на свой и
     # последующий захват аккаунта через password reset. Текущий пароль
@@ -136,7 +146,7 @@ class ResendVerification(BaseModel):
     # Повторная отправка письма подтверждения регистрации. Принимаем
     # email (не current_user), чтобы работало и для незалогиненных.
     # Ответ одинаков независимо от существования адреса (анти-enumeration).
-    email: EmailStr
+    email: NormalizedEmail
 
 
 class TokenResponse(BaseModel):
@@ -187,7 +197,7 @@ class AccountDeleteRequest(BaseModel):
 class EmailLoginCreate(BaseModel):
     # Подключение входа по почте к телефонному аккаунту. Вместо текущего
     # пароля (его нет) — свежий OTP-код на номер аккаунта (re-auth).
-    email: EmailStr
+    email: NormalizedEmail
     password: str
     code: str = Field(pattern=r"^\d{4,8}$")
 

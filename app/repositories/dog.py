@@ -14,10 +14,12 @@ from __future__ import annotations
 import uuid
 from typing import Sequence
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dog import Dog, DogPhoto, SexEnum
+from app.models.result import DogTitle
+from app.models.show import Show, ShowEntry, ShowStatus
 
 
 # Белый список полей сортировки (этап 18): защита от инъекции —
@@ -298,3 +300,31 @@ async def photos_by_dogs(
     for p in (await db.execute(stmt)).scalars().all():
         out.setdefault(p.dog_id, []).append(p)
     return out
+
+
+# Статусы выставки, запись на которую — уже история (каталог присвоен,
+# идут ринги, опубликованы результаты). Ревью 2026-10-06, BE-10.
+_HISTORY_SHOW_STATUSES = (
+    ShowStatus.registration_closed,
+    ShowStatus.in_progress,
+    ShowStatus.completed,
+)
+
+
+async def has_show_history(db: AsyncSession, dog_id: uuid.UUID) -> bool:
+    """Есть ли у собаки запись на закрытую/идущую/завершённую выставку
+    или титул — тогда удалять её нельзя."""
+    in_history_show = exists().where(
+        ShowEntry.dog_id == dog_id,
+        ShowEntry.show_id == Show.id,
+        Show.status.in_(_HISTORY_SHOW_STATUSES),
+    )
+    has_title = exists().where(DogTitle.dog_id == dog_id)
+    return bool((await db.execute(select(or_(in_history_show, has_title)))).scalar())
+
+
+async def delete_open_show_entries(db: AsyncSession, dog_id: uuid.UUID) -> None:
+    """Снять ВСЕ записи собаки (без commit). Вызывать только после
+    has_show_history() == False — тогда остаются лишь записи на черновики,
+    открытую регистрацию и отменённые выставки."""
+    await db.execute(delete(ShowEntry).where(ShowEntry.dog_id == dog_id))

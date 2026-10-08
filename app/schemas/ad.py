@@ -47,7 +47,8 @@ class CampaignBase(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = None
     budget: Decimal = Field(..., gt=0)
-    cost_per_impression: Decimal = Field(Decimal("0.01"), ge=0)
+    # gt=0 (ревью 2026-10-06, BE-05): бесплатный показ = бесконечные показы.
+    cost_per_impression: Decimal = Field(Decimal("0.01"), gt=0)
     date_start: date
     date_end: date
     # Рекламодатель для пометки «Реклама» (ст. 18.1 Закона о рекламе).
@@ -72,7 +73,7 @@ class CampaignUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
     description: str | None = None
     budget: Decimal | None = Field(None, gt=0)
-    cost_per_impression: Decimal | None = Field(None, ge=0)
+    cost_per_impression: Decimal | None = Field(None, gt=0)
     date_start: date | None = None
     date_end: date | None = None
     status: CampaignStatus | None = None

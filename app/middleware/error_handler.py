@@ -15,7 +15,7 @@ ServerErrorMiddleware оборачивает ВСЁ — handlers применя�
 Регистрируем handler'ы (матчинг — по наиболее специфичному классу в MRO
 исключения, поэтому порядок регистрации не важен):
 - (OperationalError, InterfaceError) → 503 — инфраструктурные сбои PG;
-- OSError → 503 — сетевые ошибки (broken pipe и т. п.);
+- OSError → 503 — сетевые/файловые ошибки (S3, SMTP, broken pipe);
 - IntegrityError → 409 — нарушен constraint (UNIQUE / FK / CHECK / NOT NULL);
 - DBAPIError → 422 ТОЛЬКО для data-exception (SQLSTATE класс 22: numeric
   overflow, value too long, invalid text representation), иначе → 500;
@@ -50,6 +50,8 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from app.errors import DomainError
+from app.request_context import request_id_var
 from sqlalchemy.exc import (
     DBAPIError,
     IntegrityError,
@@ -160,6 +162,76 @@ async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def _handle_os_error(request: Request, exc: Exception) -> JSONResponse:
+    # Ревью 2026-10-06, BE-22: OSError — это и сеть до S3/SMTP, и файловая
+    # система, не только PG. Раньше отвечали «Database unavailable», что
+    # уводило разбор инцидента не туда.
+    logger.exception(
+        "Infrastructure I/O error on %s %s", request.method, request.url.path
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Service temporarily unavailable. Please try again later.",
+            "request_id": _request_id(request),
+        },
+    )
+
+
+class UnhandledErrorMiddleware:
+    """
+    Перехват необработанных исключений ВНУТРИ стека middleware
+    (ревью 2026-10-06, BE-22).
+
+    Обработчик Exception в Starlette живёт в ServerErrorMiddleware —
+    снаружи всех пользовательских middleware: ответ 500 шёл мимо CORS,
+    RequestId и SecurityHeaders (браузер видел CORS-ошибку вместо 500, в
+    ответе не было X-Request-ID), а traceback логировался дважды.
+    Подключается ПЕРВЫМ (самым внутренним) — сразу вокруг роутера.
+    Исключения самих middleware по-прежнему ловит _handle_unexpected.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def send_wrapper(message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:
+            if started:
+                # Заголовки уже ушли — исправить ответ нельзя.
+                raise
+            logger.exception(
+                "Unhandled error on %s %s", scope.get("method"), scope.get("path")
+            )
+            response = JSONResponse(
+                status_code=500,
+                content={
+                    "detail": "Internal server error",
+                    "request_id": request_id_var.get(),
+                },
+            )
+            await response(scope, receive, send)
+
+
+async def _handle_domain_error(request: Request, exc: Exception) -> JSONResponse:
+    # Ревью 2026-10-06, BE-32: статус несёт класс исключения (app/errors.py),
+    # тело — прежний контракт {"detail": "<code>"}.
+    assert isinstance(exc, DomainError)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.code})
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """
     Подключение exception-handlers к FastAPI-приложению. Вызывается
@@ -170,7 +242,8 @@ def register_error_handlers(app: FastAPI) -> None:
     """
     app.add_exception_handler(OperationalError, _handle_db_infra)
     app.add_exception_handler(InterfaceError, _handle_db_infra)
-    app.add_exception_handler(OSError, _handle_db_infra)
+    app.add_exception_handler(OSError, _handle_os_error)
+    app.add_exception_handler(DomainError, _handle_domain_error)
     app.add_exception_handler(IntegrityError, _handle_integrity_error)
     app.add_exception_handler(DBAPIError, _handle_dbapi_error)
     app.add_exception_handler(Exception, _handle_unexpected)

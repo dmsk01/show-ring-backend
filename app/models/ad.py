@@ -121,6 +121,12 @@ class AdCampaign(Base, TimestampMixin):
     advertiser_inn: Mapped[str | None] = mapped_column(
         String(12), nullable=True
     )
+    # Модерация (ревью 2026-10-06, BE-05): кампанию впервые активирует только
+    # admin — момент одобрения. После него владелец может ставить на паузу
+    # и возобновлять сам; без одобрения status=active недоступен владельцу.
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     banners: Mapped[list["AdBanner"]] = relationship(
         back_populates="campaign",

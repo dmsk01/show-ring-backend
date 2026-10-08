@@ -22,7 +22,7 @@ PASSWORD = "secret123"
 async def _make_token(client) -> str:
     email = f"file_{uuid.uuid4().hex[:10]}@example.com"
     await client.post(
-        "/auth/register", json={"email": email, "password": PASSWORD}
+        "/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     r = await client.post(
         "/auth/login",

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session_factory, get_db
+import app.dependencies as deps
 from app.dependencies import (
     authenticate_ws,
     get_current_user,
@@ -248,6 +249,10 @@ async def notifications_ws(websocket: WebSocket):
     bug_205): отошедший клиент не держит соединение из пула.
     """
     await websocket.accept()
+    # Чужой Origin — до любой работы (ревью 2026-10-06, BE-21).
+    if not deps.ws_origin_allowed(websocket):
+        await websocket.close(code=deps.WS_CLOSE_FORBIDDEN_ORIGIN)
+        return
 
     # Rate-limit хендшейка по IP (10 connect/мин) — защита от флуда
     # соединений. При превышении ws_rate_limit сам закрывает сокет
@@ -256,12 +261,10 @@ async def notifications_ws(websocket: WebSocket):
         return
 
     # --- AUTH (короткая сессия БД только на handshake) ---
-    try:
-        first = await websocket.receive_json()
-    except (WebSocketDisconnect, ValueError):
-        await websocket.close(code=1003)  # unsupported_data
+    first = await deps.ws_receive_auth_frame(websocket)
+    if first is None:
         return
-    if not isinstance(first, dict) or first.get("type") != "auth":
+    if first.get("type") != "auth":
         await websocket.send_json(
             {"type": "error", "payload": {"code": "auth_required"}}
         )

@@ -83,3 +83,39 @@ def make_variant(
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=JPEG_QUALITY)
     return buf.getvalue(), img.width, img.height
+
+
+# Форматы, которые пересохраняем без метаданных. GIF не трогаем: EXIF в нём
+# не бывает, а пересохранение ломает анимацию.
+_STRIP_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
+_STRIP_JPEG_QUALITY = 95
+
+
+def strip_image_metadata(data: bytes, content_type: str) -> bytes:
+    """
+    Удалить метаданные (EXIF, в т. ч. GPS-координаты съёмки) из оригинала.
+
+    Ревью 2026-10-06, BE-24: варианты (thumb/medium) пересжимались без EXIF,
+    но оригинал по публичному /files/{id} отдавался как есть — с координатами
+    места съёмки (часто адрес питомника или дома). Ориентацию из EXIF
+    применяем к пикселям, иначе после удаления тега фото с телефона
+    отобразится боком. Не-изображения возвращаются без изменений.
+    """
+    fmt = _STRIP_FORMATS.get(content_type)
+    if fmt is None:
+        return data
+    img = Image.open(io.BytesIO(data))
+    width, height = img.size
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"image too large: {width}x{height} > {MAX_IMAGE_PIXELS}px"
+        )
+    img = ImageOps.exif_transpose(img)
+    if fmt == "JPEG" and img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    if fmt == "JPEG":
+        img.save(buf, format=fmt, quality=_STRIP_JPEG_QUALITY)
+    else:
+        img.save(buf, format=fmt)
+    return buf.getvalue()

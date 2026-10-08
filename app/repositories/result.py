@@ -305,3 +305,31 @@ async def get_grade(
     db: AsyncSession, grade_id: uuid.UUID
 ) -> Grade | None:
     return await db.get(Grade, grade_id)
+
+
+async def placement_taken(
+    db: AsyncSession,
+    *,
+    show_id: uuid.UUID,
+    show_class_id: uuid.UUID,
+    breed_id: uuid.UUID,
+    sex,
+    placement: int,
+    exclude_entry_id: uuid.UUID,
+) -> bool:
+    """Занято ли место в классе (порода + пол) другой записью (BE-26)."""
+    stmt = (
+        select(ShowResult.id)
+        .join(ShowEntry, ShowEntry.id == ShowResult.show_entry_id)
+        .join(Dog, Dog.id == ShowEntry.dog_id)
+        .where(
+            ShowEntry.show_id == show_id,
+            ShowEntry.show_class_id == show_class_id,
+            ShowEntry.id != exclude_entry_id,
+            Dog.breed_id == breed_id,
+            Dog.sex == sex,
+            ShowResult.placement == placement,
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).first() is not None

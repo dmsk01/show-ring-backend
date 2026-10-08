@@ -1,6 +1,9 @@
 """
 Сервис выставок (этап 6).
 
+Ошибки — доменные исключения app/errors.py (ревью 2026-10-06, BE-32):
+статус ответа несёт класс исключения, роутер их не перехватывает.
+
 Бизнес-правила:
 - Создавать выставку может только organizer или admin.
 - Редактировать/удалять — только организатор-владелец (или admin).
@@ -21,7 +24,9 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, Forbidden, NotFound, Unprocessable
 from app.models.dog import Dog
+from app.policies import can_manage_dog
 from app.models.reference import Breed, ShowClass
 from app.models.show import (
     Show,
@@ -32,7 +37,6 @@ from app.models.show import (
 )
 from app.repositories import checkin as checkin_repo
 from app.repositories import dog as dog_repo
-from app.repositories import kennel as kennel_repo
 from app.repositories import show as repo
 from app.repositories import user as user_repo
 from app.schemas.notification import EventMessage
@@ -45,11 +49,32 @@ from app.services import show_rules
 # ---------------------------------------------------------------------
 
 
-async def _ensure_organizer_owner(
+def _ensure_organizer_owner(
     show: Show, requester_id: uuid.UUID, is_admin: bool
 ) -> None:
     if show.organizer_id != requester_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
+
+
+async def _get_owned_show(
+    db: AsyncSession,
+    show_id: uuid.UUID,
+    requester_id: uuid.UUID,
+    is_admin: bool,
+    *,
+    for_update: bool = False,
+) -> Show:
+    """Выставка + проверка «организатор или admin» (ревью 2026-10-06, BE-33:
+    раньше эти четыре строки повторялись в каждой функции модуля)."""
+    show = await (
+        repo.get_show_for_update(db, show_id)
+        if for_update
+        else repo.get_show(db, show_id)
+    )
+    if show is None:
+        raise NotFound("not_found")
+    _ensure_organizer_owner(show, requester_id, is_admin)
+    return show
 
 
 async def create_show(
@@ -73,14 +98,11 @@ async def update_show(
     is_admin: bool,
     fields: dict,
 ) -> Show:
-    obj = await repo.get_show(db, show_id)
-    if obj is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(obj, requester_id, is_admin)
+    obj = await _get_owned_show(db, show_id, requester_id, is_admin)
     # Менять название/город/даты можно только в draft и registration_open.
     # После закрытия регистрации это уже зафиксированные данные каталога.
     if obj.status not in (ShowStatus.draft, ShowStatus.registration_open):
-        raise ValueError("show_locked")
+        raise Unprocessable("show_locked")
     # Кросс-валидация дат на MERGED-значениях (новые поверх текущих).
     # ИСПРАВЛЕНО (review 2026-06-10): ShowUpdate — отдельная модель без
     # валидатора ShowBase, и частичный PUT мог сдвинуть date_start за
@@ -92,14 +114,40 @@ async def update_show(
         "registration_deadline", obj.registration_deadline
     )
     if new_end is not None and new_end < new_start:
-        raise ValueError("invalid_dates")
+        raise Unprocessable("invalid_dates")
     if new_deadline is not None and new_deadline > new_start:
-        raise ValueError("invalid_dates")
+        raise Unprocessable("invalid_dates")
+    if new_start != obj.date_start:
+        await _ensure_entries_fit_date(db, show_id, new_start)
     for k, v in fields.items():
         setattr(obj, k, v)
     await db.commit()
     await db.refresh(obj)
     return obj
+
+
+async def _ensure_entries_fit_date(
+    db: AsyncSession, show_id: uuid.UUID, new_start: date
+) -> None:
+    """
+    Класс записи выбран по возрасту собаки на date_start. Перенос выставки
+    не должен оставлять записи в классах, из которых собака «выросла» или
+    до которых не «доросла» (ревью 2026-10-06, BE-23).
+    """
+    rows = await repo.list_entries_with_dog_breed(db, show_id)
+    available: dict[tuple[uuid.UUID, int], set[uuid.UUID]] = {}
+    for entry, dog, breed in rows:
+        if dog.date_of_birth is None:
+            continue
+        age = show_rules.age_in_months_on(dog.date_of_birth, new_start)
+        key = (breed.animal_type_id, age)
+        if key not in available:
+            classes = await show_rules.list_available_classes_for_age(
+                db, breed.animal_type_id, age
+            )
+            available[key] = {c.id for c in classes}
+        if entry.show_class_id not in available[key]:
+            raise Unprocessable("entries_class_mismatch")
 
 
 async def delete_show(
@@ -108,17 +156,14 @@ async def delete_show(
     requester_id: uuid.UUID,
     is_admin: bool,
 ) -> None:
-    obj = await repo.get_show(db, show_id)
-    if obj is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(obj, requester_id, is_admin)
+    obj = await _get_owned_show(db, show_id, requester_id, is_admin)
     # Жёсткое удаление разрешено только для draft и cancelled. Активные и
     # завершённые выставки несут записи/результаты/титулы — это история,
     # которую нельзя терять. Для боевых выставок есть статус cancelled
     # (PUT /shows/{id}/status). На completed БД и так заблокировала бы
     # удаление: dog_titles.show_id = ON DELETE RESTRICT.
     if obj.status not in (ShowStatus.draft, ShowStatus.cancelled):
-        raise ValueError("show_locked")
+        raise Unprocessable("show_locked")
     # Каскад (breeds/judges/rings/entries) отрабатывает на уровне ORM
     # (delete-orphan) и БД (ON DELETE CASCADE) — связанные строки уйдут.
     await db.delete(obj)
@@ -138,13 +183,10 @@ async def change_status(
     # закрытие регистрации» мог оставить запись без номера или словить
     # нарушение uq_show_entry_catalog (500). Лок сериализует переход
     # статуса с конкурентными записями.
-    obj = await repo.get_show_for_update(db, show_id)
-    if obj is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(obj, requester_id, is_admin)
+    obj = await _get_owned_show(db, show_id, requester_id, is_admin, for_update=True)
 
     if not show_rules.is_transition_allowed(obj.status, target):
-        raise ValueError("invalid_status_transition")
+        raise Unprocessable("invalid_status_transition")
 
     # При закрытии регистрации — присваиваем номера каталога тем
     # записям, у которых их ещё нет (порядок по created_at).
@@ -239,12 +281,9 @@ async def add_judge(
     breed_id: uuid.UUID | None,
     breed_group_id: uuid.UUID | None,
 ) -> ShowJudge:
-    show = await repo.get_show(db, show_id)
-    if show is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(show, requester_id, is_admin)
+    show = await _get_owned_show(db, show_id, requester_id, is_admin)
     if show.status not in (ShowStatus.draft, ShowStatus.registration_open):
-        raise ValueError("show_locked")
+        raise Unprocessable("show_locked")
     obj = await repo.add_show_judge(
         db,
         show_id=show_id,
@@ -263,13 +302,10 @@ async def remove_judge(
     requester_id: uuid.UUID,
     is_admin: bool,
 ) -> None:
-    show = await repo.get_show(db, show_id)
-    if show is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(show, requester_id, is_admin)
+    await _get_owned_show(db, show_id, requester_id, is_admin)
     judge = await repo.get_show_judge(db, judge_record_id)
     if judge is None or judge.show_id != show_id:
-        raise ValueError("judge_assignment_not_found")
+        raise NotFound("judge_assignment_not_found")
     await db.delete(judge)
     await db.commit()
 
@@ -286,10 +322,7 @@ async def add_ring(
     is_admin: bool,
     fields: dict,
 ) -> ShowRing:
-    show = await repo.get_show(db, show_id)
-    if show is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(show, requester_id, is_admin)
+    await _get_owned_show(db, show_id, requester_id, is_admin)
     obj = await repo.create_show_ring(db, show_id=show_id, **fields)
     await db.commit()
     return obj
@@ -303,13 +336,10 @@ async def update_ring(
     is_admin: bool,
     fields: dict,
 ) -> ShowRing:
-    show = await repo.get_show(db, show_id)
-    if show is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(show, requester_id, is_admin)
+    await _get_owned_show(db, show_id, requester_id, is_admin)
     ring = await repo.get_show_ring(db, ring_id)
     if ring is None or ring.show_id != show_id:
-        raise ValueError("ring_not_found")
+        raise NotFound("ring_not_found")
     for k, v in fields.items():
         setattr(ring, k, v)
     await db.commit()
@@ -323,13 +353,10 @@ async def delete_ring(
     requester_id: uuid.UUID,
     is_admin: bool,
 ) -> None:
-    show = await repo.get_show(db, show_id)
-    if show is None:
-        raise ValueError("not_found")
-    await _ensure_organizer_owner(show, requester_id, is_admin)
+    await _get_owned_show(db, show_id, requester_id, is_admin)
     ring = await repo.get_show_ring(db, ring_id)
     if ring is None or ring.show_id != show_id:
-        raise ValueError("ring_not_found")
+        raise NotFound("ring_not_found")
     # Ринг — чистый элемент расписания: на show_rings никто не ссылается
     # (результаты привязаны к ShowEntry, не к рингу), поэтому удаление
     # безопасно в любом статусе. Симметрично add_ring/update_ring.
@@ -353,18 +380,18 @@ async def get_available_classes_for_dog(
     """
     show = await repo.get_show(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     dog = await dog_repo.get_dog(db, dog_id)
     if dog is None:
-        raise ValueError("dog_not_found")
+        raise NotFound("dog_not_found")
     if dog.date_of_birth is None:
-        raise ValueError("dog_birth_date_missing")
+        raise Unprocessable("dog_birth_date_missing")
 
     # animal_type определяем через породу. Загружаем breed чтобы знать,
     # к какому виду относится собака.
     breed = await db.get(Breed, dog.breed_id)
     if breed is None:
-        raise ValueError("breed_not_found")
+        raise NotFound("breed_not_found")
 
     age_months = show_rules.age_in_months_on(
         dog.date_of_birth, show.date_start
@@ -390,13 +417,13 @@ async def _check_can_register_dog(
 ) -> None:
     """Проверки правил записи. Бросает ValueError при провале."""
     if show.status != ShowStatus.registration_open:
-        raise ValueError("registration_not_open")
+        raise Unprocessable("registration_not_open")
 
     if (
         show.registration_deadline is not None
         and today > show.registration_deadline
     ):
-        raise ValueError("registration_deadline_passed")
+        raise Unprocessable("registration_deadline_passed")
 
     # Записать собаку может её владелец (dog.owner_id), владелец
     # питомника собаки или admin — та же модель прав, что у управления
@@ -405,18 +432,36 @@ async def _check_can_register_dog(
     # управляет своими собаками (review 2026-06-10 — поведение признано
     # намеренным, комментарий синхронизирован с кодом). Без права на
     # собаку — forbidden.
-    if not is_admin:
-        is_owner = dog.owner_id is not None and dog.owner_id == requester_id
-        if not is_owner:
-            if dog.kennel_id is None:
-                raise ValueError("forbidden")
-            kennel = await kennel_repo.get_kennel(db, dog.kennel_id)
-            if kennel is None or kennel.owner_id != requester_id:
-                raise ValueError("forbidden")
+    if not await can_manage_dog(db, dog, requester_id, is_admin=is_admin):
+        raise Forbidden("forbidden")
 
     allowed = await repo.is_breed_allowed(db, show.id, dog.breed_id)
     if not allowed:
-        raise ValueError("breed_not_allowed")
+        raise Unprocessable("breed_not_allowed")
+
+
+async def _validate_class_for_dog(
+    db: AsyncSession, show: Show, dog: Dog, show_class_id: uuid.UUID
+) -> None:
+    """Класс существует, того же вида животного и подходит собаке по
+    возрасту на дату выставки (ревью 2026-10-06, BE-33: проверка была
+    продублирована в register_entry и update_entry)."""
+    cls = await db.get(ShowClass, show_class_id)
+    if cls is None:
+        raise NotFound("show_class_not_found")
+    breed = await db.get(Breed, dog.breed_id)
+    if breed is None:
+        raise NotFound("breed_not_found")
+    if cls.animal_type_id != breed.animal_type_id:
+        raise Unprocessable("class_animal_type_mismatch")
+    if dog.date_of_birth is None:
+        raise Unprocessable("dog_birth_date_missing")
+    age_months = show_rules.age_in_months_on(dog.date_of_birth, show.date_start)
+    available = await show_rules.list_available_classes_for_age(
+        db, breed.animal_type_id, age_months
+    )
+    if not any(c.id == show_class_id for c in available):
+        raise Unprocessable("class_not_available_for_age")
 
 
 async def register_entry(
@@ -437,47 +482,30 @@ async def register_entry(
     # Дополнительно UNIQUE(show_id, dog_id) ловит дубликат на уровне БД.
     show = await repo.get_show_for_update(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
 
     dog = await dog_repo.get_dog(db, dog_id)
     if dog is None:
-        raise ValueError("dog_not_found")
+        raise NotFound("dog_not_found")
     if dog.date_of_birth is None:
-        raise ValueError("dog_birth_date_missing")
+        raise Unprocessable("dog_birth_date_missing")
 
     await _check_can_register_dog(
         db, show, dog, requester_id, is_admin, today
     )
 
     if await repo.is_dog_registered(db, show_id, dog_id):
-        raise ValueError("dog_already_registered")
+        raise Conflict("dog_already_registered")
 
     # Проверяем выбранный класс: существует, относится к нужному
     # animal_type, проходит по возрасту.
-    cls = await db.get(ShowClass, show_class_id)
-    if cls is None:
-        raise ValueError("show_class_not_found")
-
-    breed = await db.get(Breed, dog.breed_id)
-    if breed is None:
-        raise ValueError("breed_not_found")
-    if cls.animal_type_id != breed.animal_type_id:
-        raise ValueError("class_animal_type_mismatch")
-
-    age_months = show_rules.age_in_months_on(
-        dog.date_of_birth, show.date_start
-    )
-    available = await show_rules.list_available_classes_for_age(
-        db, breed.animal_type_id, age_months
-    )
-    if not any(c.id == show_class_id for c in available):
-        raise ValueError("class_not_available_for_age")
+    await _validate_class_for_dog(db, show, dog, show_class_id)
 
     # Хендлер — FK на users (review 2026-06-10): несуществующий UUID
     # раньше ронял 500 через IntegrityError, теперь — 404.
     if handler_id is not None:
         if await user_repo.get_user_by_id(db, handler_id) is None:
-            raise ValueError("handler_not_found")
+            raise NotFound("handler_not_found")
 
     obj = await repo.create_show_entry(
         db,
@@ -501,18 +529,22 @@ async def cancel_entry(
 ) -> None:
     entry = await repo.get_show_entry(db, entry_id)
     if entry is None or entry.show_id != show_id:
-        raise ValueError("entry_not_found")
-    # Отменить запись может только тот, кто её сделал (или admin).
-    if entry.registered_by != requester_id and not is_admin:
-        raise ValueError("forbidden")
-    # После закрытия регистрации отмену делает только организатор/admin.
+        raise NotFound("entry_not_found")
     show = await repo.get_show(db, show_id)
-    if show is not None and show.status not in (
-        ShowStatus.draft,
-        ShowStatus.registration_open,
+    if show is None:
+        raise NotFound("not_found")
+    # Отменить запись может её автор, организатор выставки или admin.
+    # ИСПРАВЛЕНО (ревью 2026-10-06, BE-14): проверка «только автор» шла
+    # раньше ветки организатора, и организатор не мог отменить чужую запись.
+    is_manager = is_admin or show.organizer_id == requester_id
+    if entry.registered_by != requester_id and not is_manager:
+        raise Forbidden("forbidden")
+    # После закрытия регистрации отмену делает только организатор/admin.
+    if (
+        show.status not in (ShowStatus.draft, ShowStatus.registration_open)
+        and not is_manager
     ):
-        if not (is_admin or show.organizer_id == requester_id):
-            raise ValueError("registration_locked")
+        raise Unprocessable("registration_locked")
     await db.delete(entry)
     await db.commit()
 
@@ -536,41 +568,30 @@ async def update_entry(
     """
     entry = await repo.get_show_entry(db, entry_id)
     if entry is None or entry.show_id != show_id:
-        raise ValueError("entry_not_found")
+        raise NotFound("entry_not_found")
     if entry.registered_by != requester_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
     show = await repo.get_show(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     if show.status != ShowStatus.registration_open and not is_admin:
-        raise ValueError("registration_locked")
+        raise Unprocessable("registration_locked")
 
     # Смена класса — валидируем по возрасту собаки (как в register_entry).
     if show_class_id is not None and show_class_id != entry.show_class_id:
-        cls = await db.get(ShowClass, show_class_id)
-        if cls is None:
-            raise ValueError("show_class_not_found")
+        if await db.get(ShowClass, show_class_id) is None:
+            raise NotFound("show_class_not_found")
         dog = await dog_repo.get_dog(db, entry.dog_id)
-        if dog is None or dog.date_of_birth is None:
-            raise ValueError("dog_birth_date_missing")
-        breed = await db.get(Breed, dog.breed_id)
-        if breed is None:
-            raise ValueError("breed_not_found")
-        if cls.animal_type_id != breed.animal_type_id:
-            raise ValueError("class_animal_type_mismatch")
-        age_months = show_rules.age_in_months_on(dog.date_of_birth, show.date_start)
-        available = await show_rules.list_available_classes_for_age(
-            db, breed.animal_type_id, age_months
-        )
-        if not any(c.id == show_class_id for c in available):
-            raise ValueError("class_not_available_for_age")
+        if dog is None:
+            raise Unprocessable("dog_birth_date_missing")
+        await _validate_class_for_dog(db, show, dog, show_class_id)
         entry.show_class_id = show_class_id
 
     if handler_id is not None:
         # Как в register_entry: валидируем FK, чтобы не ловить 500.
         if await user_repo.get_user_by_id(db, handler_id) is None:
-            raise ValueError("handler_not_found")
+            raise NotFound("handler_not_found")
         entry.handler_id = handler_id
     if notes is not None:
         entry.notes = notes

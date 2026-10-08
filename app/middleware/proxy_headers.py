@@ -13,7 +13,8 @@ ip самого прокси (127.0.0.1), а реальный IP клиента 
 IP-based проверки. Поэтому доверяем заголовку ТОЛЬКО если запрос
 пришёл с одного из IP в forwarded_allow_ips.
 
-Реализация: переписываем request.scope['client'] на (real_ip, port).
+Реализация: переписываем scope['client'] на (real_ip, port) — и для HTTP,
+и для WebSocket.
 После middleware вся остальная цепочка видит правильный IP.
 """
 
@@ -22,9 +23,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.datastructures import Headers
 
 from app.config import settings
 
@@ -70,56 +69,55 @@ def _rightmost_untrusted(xff: str) -> str:
     return hops[0] if hops else ""
 
 
-class ProxyHeadersMiddleware(BaseHTTPMiddleware):
+class ProxyHeadersMiddleware:
     """
     Подменяет client IP из X-Forwarded-For, если peer в списке
     доверенных прокси.
+
+    Чистый ASGI, а не BaseHTTPMiddleware (ревью 2026-10-06, BE-01):
+    BaseHTTPMiddleware пропускает websocket-scope без обработки, и за
+    nginx все WS-клиенты выглядели одним IP — rate-limit хендшейка
+    (ws_rate_limit) становился общим на весь сайт.
     """
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if _TRUSTED_NETS:
-            peer = request.client.host if request.client else None
-            if _is_trusted_peer(peer):
-                xff = request.headers.get("x-forwarded-for")
-                if xff:
-                    # ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #1):
-                    # раньше брали самый ЛЕВЫЙ адрес. Но левую часть
-                    # присылает сам клиент, а прокси лишь дописывают
-                    # справа — "X-Forwarded-For: 1.2.3.4" от атакующего
-                    # становился его «IP» и обходил все rate-limit'ы.
-                    # Правильно: идти справа налево, пропуская наши
-                    # доверенные прокси; первый недоверенный адрес — и
-                    # есть клиент, каким его увидел крайний наш прокси.
-                    real_ip = _rightmost_untrusted(xff)
-                    # ИСПРАВЛЕНО (bug_012 ultrareview): валидируем,
-                    # что строка действительно IP. Без проверки:
-                    # - empty XFF (nginx misconfig с пустым
-                    #   $proxy_add_x_forwarded_for) → real_ip="" →
-                    #   rate-limit (rate:{ip}:{ep}) и ad-fraud
-                    #   dedup (ad_dedup:{banner}:{ip}:...) рушатся,
-                    #   все анонимы в одной корзине;
-                    # - nginx по умолчанию APPENDS XFF, не replaces;
-                    #   client-controlled значение проходит как
-                    #   leftmost token, давая rate-limit bypass
-                    #   ротацией XFF на /auth/login.
-                    # Симметрия с _is_trusted_peer, где такая же
-                    # валидация уже есть.
-                    try:
-                        ipaddress.ip_address(real_ip)
-                    except ValueError:
-                        logger.warning(
-                            "Trusted proxy %s sent malformed XFF %r",
-                            peer, xff,
-                        )
-                    else:
-                        # Подменяем scope. Порт сохраняем из исходного
-                        # request.client (port в XFF не передаётся).
-                        port = request.client.port if request.client else 0
-                        request.scope["client"] = (real_ip, port)
-                # X-Forwarded-Proto для корректного scheme в HTTPS-режиме
-                # за reverse-proxy. Без этого request.url.scheme='http'
-                # даже когда клиент пришёл по HTTPS.
-                proto = request.headers.get("x-forwarded-proto")
-                if proto in ("http", "https"):
-                    request.scope["scheme"] = proto
-        return await call_next(request)
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket") and _TRUSTED_NETS:
+            _apply_forwarded(scope)
+        await self.app(scope, receive, send)
+
+
+def _apply_forwarded(scope) -> None:
+    client = scope.get("client")
+    peer = client[0] if client else None
+    if not _is_trusted_peer(peer):
+        return
+    headers = Headers(scope=scope)
+    xff = headers.get("x-forwarded-for")
+    if xff:
+        # ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #1): левую часть XFF
+        # присылает сам клиент, прокси лишь дописывают справа. Идём справа
+        # налево, пропуская наши доверенные прокси; первый недоверенный
+        # адрес — клиент, каким его увидел крайний наш прокси.
+        real_ip = _rightmost_untrusted(xff)
+        # ИСПРАВЛЕНО (bug_012 ultrareview): строка обязана быть IP — иначе
+        # пустой/битый XFF схлопывал всех анонимов в одну корзину
+        # rate-limit'а и ad-dedup'а.
+        try:
+            ipaddress.ip_address(real_ip)
+        except ValueError:
+            logger.warning("Trusted proxy %s sent malformed XFF %r", peer, xff)
+        else:
+            # Порт в XFF не передаётся — сохраняем исходный.
+            port = client[1] if client else 0
+            scope["client"] = (real_ip, port)
+    # X-Forwarded-Proto: за reverse-proxy без него scheme был бы http/ws
+    # даже при HTTPS/WSS у клиента.
+    proto = headers.get("x-forwarded-proto")
+    if proto in ("http", "https"):
+        if scope["type"] == "websocket":
+            scope["scheme"] = "wss" if proto == "https" else "ws"
+        else:
+            scope["scheme"] = proto

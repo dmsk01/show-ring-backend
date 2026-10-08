@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Index,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -41,6 +42,8 @@ class User(Base, TimestampMixin):
             "email IS NOT NULL OR phone IS NOT NULL",
             name="ck_users_email_or_phone",
         ),
+        # Уникальность без учёта регистра (ревью 2026-10-06, BE-16).
+        Index("uq_users_email_lower", func.lower(text("email")), unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

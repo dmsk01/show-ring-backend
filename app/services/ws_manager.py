@@ -54,6 +54,12 @@ from app import redis as redis_state
 
 logger = logging.getLogger(__name__)
 
+# Пауза перед переподпиской после сбоя Redis (удваивается до максимума).
+RESUBSCRIBE_DELAY_SECONDS = 1.0
+_RESUBSCRIBE_MAX_DELAY_SECONDS = 30.0
+# Сколько ждём отправку одному сокету; дольше — клиент считается мёртвым.
+SEND_TIMEOUT_SECONDS = 5.0
+
 
 class WSConnectionManager:
     """
@@ -164,12 +170,20 @@ class WSConnectionManager:
         conns = list(self._connections.get(ticket_id, set()))
         # Рассылка не под lock'ом: send может занять время, а блокировать
         # connect/disconnect других тикетов из-за этого не хочется.
+        # Параллельно и с таймаутом (ревью 2026-10-06, BE-21): раньше один
+        # медленный клиент задерживал доставку всем остальным.
+        results = await asyncio.gather(
+            *(
+                asyncio.wait_for(ws.send_json(payload), SEND_TIMEOUT_SECONDS)
+                for ws in conns
+            ),
+            return_exceptions=True,
+        )
         dead: list[WebSocket] = []
-        for ws in conns:
-            try:
-                await ws.send_json(payload)
-            except Exception as e:  # noqa: BLE001 — рвём сокет на любой ошибке
-                logger.warning("WS send failed, dropping: %s", e)
+        for ws, result in zip(conns, results):
+            if isinstance(result, BaseException):
+                # Рвём сокет на любой ошибке, включая таймаут.
+                logger.warning("WS send failed, dropping: %r", result)
                 dead.append(ws)
         if dead:
             async with self._lock:
@@ -184,16 +198,37 @@ class WSConnectionManager:
 
     async def _listen(self, ticket_id: uuid.UUID) -> None:
         """
-        Фоновая задача: подписывается на support:{ticket_id} в Redis,
-        и при получении сообщения раскидывает в локальные WS.
+        Фоновая задача: подписывается на канал ключа в Redis и раскидывает
+        сообщения в локальные WS. Завершается через cancel() (последний
+        disconnect).
 
-        При cancel() корректно завершается через try/finally.
+        ИСПРАВЛЕНО (ревью 2026-10-06, BE-21): при сбое Redis listener раньше
+        завершался, но оставался в _subscriptions мёртвым — доставка для
+        ключа молча прекращалась, пока не отключатся все его сокеты. Теперь
+        переподписываемся с backoff, пока у ключа есть локальные сокеты.
         """
-        client = redis_state.redis_client
-        if client is None:
-            return
-        pubsub = client.pubsub()
         channel = self._channel(ticket_id)
+        delay = RESUBSCRIBE_DELAY_SECONDS
+        while ticket_id in self._connections:
+            client = redis_state.redis_client
+            if client is None:
+                return
+            try:
+                await self._listen_once(client, ticket_id, channel)
+                delay = RESUBSCRIBE_DELAY_SECONDS
+            except asyncio.CancelledError:
+                # Нормальное завершение при последнем disconnect.
+                raise
+            except Exception:
+                logger.exception(
+                    "PubSub listener crashed for %s, resubscribing in %.1fs",
+                    channel, delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _RESUBSCRIBE_MAX_DELAY_SECONDS)
+
+    async def _listen_once(self, client, ticket_id: uuid.UUID, channel: str) -> None:
+        pubsub = client.pubsub()
         try:
             await pubsub.subscribe(channel)
             async for message in pubsub.listen():
@@ -210,11 +245,6 @@ class WSConnectionManager:
                     )
                     continue
                 await self._broadcast_local(ticket_id, data)
-        except asyncio.CancelledError:
-            # Нормальное завершение при последнем disconnect.
-            raise
-        except Exception:
-            logger.exception("PubSub listener crashed for %s", channel)
         finally:
             try:
                 await pubsub.unsubscribe(channel)

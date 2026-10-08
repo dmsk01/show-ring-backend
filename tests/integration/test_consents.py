@@ -14,7 +14,7 @@ import re
 import uuid
 
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.main import app
 from app.models.consent import UserConsent
@@ -130,8 +130,15 @@ async def test_existing_phone_user_can_log_in_without_consents(
 
 
 async def test_legacy_user_sees_missing_and_grants(client, db_session):
-    # Пользователь, созданный без согласий (регистрация по email до правок).
+    # Пользователь без согласий (регистрация по email до правок). Сейчас
+    # регистрация без согласий невозможна (BE-17) — моделируем «старый»
+    # аккаунт, удаляя согласия напрямую.
     _, token = await make_api_user(client)
+    me = await client.get("/users/me", headers=auth(token))
+    await db_session.execute(
+        delete(UserConsent).where(UserConsent.user_id == uuid.UUID(me.json()["id"]))
+    )
+    await db_session.commit()
 
     r = await client.get("/users/me/consents", headers=auth(token))
     assert r.status_code == 200, r.text

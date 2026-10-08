@@ -24,10 +24,10 @@ import logging
 import uuid
 from collections import defaultdict
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.ad import AdBanner, AdEvent, AdEventType
+from app.models.ad import AdBanner, AdEvent, AdEventType, CampaignStatus
 from app.repositories import ad as ad_repo
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,22 @@ async def process_batch(
     """
     if not batch:
         return
+
+    # Ревью 2026-10-06, BE-06: событие несуществующего баннера валило весь
+    # батч на FK (а с ним — повторы и потерю валидных событий при
+    # переполнении буфера). Отбрасываем такие события до INSERT.
+    banner_ids = {uuid.UUID(raw["banner_id"]) for raw in batch}
+    known = set(
+        (
+            await db.execute(select(AdBanner.id).where(AdBanner.id.in_(banner_ids)))
+        ).scalars()
+    )
+    dropped = [raw for raw in batch if uuid.UUID(raw["banner_id"]) not in known]
+    if dropped:
+        logger.warning("ad_events batch: dropped %d events of unknown banners", len(dropped))
+        batch = [raw for raw in batch if uuid.UUID(raw["banner_id"]) in known]
+        if not batch:
+            return
 
     # 1. Bulk INSERT через add_all — SQLAlchemy сделает один INSERT
     # … VALUES (...), (...), ... вместо N отдельных.
@@ -105,14 +121,17 @@ async def process_batch(
         if banner is None:
             continue
         campaign = await ad_repo.get_campaign(db, banner.campaign_id)
-        if campaign is None or campaign.cost_per_impression <= 0:
+        # Платят только кампании в показе (как в синхронном пути, BE-06).
+        if (
+            campaign is None
+            or campaign.status != CampaignStatus.active
+            or campaign.cost_per_impression <= 0
+        ):
             continue
         total_cost = campaign.cost_per_impression * n
-        charged = await ad_repo.try_charge_campaign(
-            db, campaign.id, total_cost
-        )
-        if not charged:
-            await ad_repo.auto_complete_campaign_if_exhausted(db, campaign.id)
+        # Не «всё или ничего»: остаток бюджета списывается полностью.
+        await ad_repo.charge_up_to_budget(db, campaign.id, total_cost)
+        await ad_repo.auto_complete_campaign_if_exhausted(db, campaign.id)
 
     await db.commit()
     logger.info("ad_events batch: %d events processed", len(batch))

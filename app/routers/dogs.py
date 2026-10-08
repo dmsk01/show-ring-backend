@@ -51,7 +51,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
         raise HTTPException(404, code)
     if code == "forbidden":
         raise HTTPException(403, code)
-    if code in ("duplicate_unique_field", "parent_already_set"):
+    if code in ("duplicate_unique_field", "parent_already_set", "dog_has_show_history"):
         raise HTTPException(409, code)
     if code in (
         "father_must_be_male",
