@@ -66,3 +66,31 @@ async def test_smsru_provider_network_error_raises():
     provider = SmsRuProvider("key", transport=httpx.MockTransport(handler))
     with pytest.raises(SMSDeliveryError):
         await provider.send("+79991234567", "code")
+
+
+# --- Ревью 2026-10-06, BE-38 ---------------------------------------------
+
+
+async def test_smsru_invalid_json_is_delivery_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>gateway error</html>")
+
+    provider = SmsRuProvider("key", transport=httpx.MockTransport(handler))
+    with pytest.raises(SMSDeliveryError):
+        await provider.send("+79991234567", "code")
+
+
+async def test_smsru_per_phone_error_is_delivery_error():
+    # Общий status=OK, но конкретный номер отклонён — SMS не ушло.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "OK",
+                "sms": {"79991234567": {"status": "ERROR", "status_code": 207}},
+            },
+        )
+
+    provider = SmsRuProvider("key", transport=httpx.MockTransport(handler))
+    with pytest.raises(SMSDeliveryError):
+        await provider.send("+79991234567", "code")

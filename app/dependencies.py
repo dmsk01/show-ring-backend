@@ -1,16 +1,19 @@
+import asyncio
 import logging
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request, WebSocket
+from fastapi import Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from redis.asyncio import Redis
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-from jose import JWTError
 from app import redis as redis_state
+from app.config import settings
 from app.database import get_db
+from app.redis import get_redis
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
 from app.repositories.user import get_user_by_id
-from app.utils.security import decode_access_token
+from app.utils.security import JWTError, decode_access_token
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,50 @@ logger = logging.getLogger(__name__)
 # с HTTP 429 Too Many Requests, чтобы клиент мог отличить флуд-отказ от
 # обычного auth-разрыва (4401).
 WS_CLOSE_RATE_LIMITED = 4429
+# Ревью 2026-10-06, BE-21: чужой Origin (по аналогии с 403) и молчащий
+# клиент, не приславший auth-кадр за отведённое время (по аналогии с 408).
+WS_CLOSE_FORBIDDEN_ORIGIN = 4403
+WS_CLOSE_AUTH_TIMEOUT = 4408
+WS_AUTH_TIMEOUT_SECONDS = 10.0
+
+
+def ws_origin_allowed(websocket: WebSocket) -> bool:
+    """
+    Origin WS-хендшейка: свой хост или разрешённый CORS-origin.
+
+    CSRFMiddleware (HTTP-only) WebSocket не видит, а WS принимает
+    httpOnly-куку из хендшейка — без этой проверки от cross-site
+    WebSocket hijacking защищал только SameSite=Strict. Без Origin
+    (мобильный клиент, curl) — пропускаем, как и для HTTP.
+    """
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return True
+    secure = websocket.url.scheme in ("wss", "https")
+    own = f"{'https' if secure else 'http'}://{websocket.url.netloc}"
+    return origin == own or origin in settings.cors_allow_origins
+
+
+async def ws_receive_auth_frame(websocket: WebSocket) -> dict | None:
+    """
+    Дождаться первого кадра (auth) не дольше WS_AUTH_TIMEOUT_SECONDS.
+
+    None — сокет уже закрыт (таймаут → 4408, мусор/разрыв → 1003), и
+    вызывающий обязан сделать return. Раньше ожидание было бесконечным:
+    молчащий неаутентифицированный сокет держал слот --limit-concurrency.
+    """
+    try:
+        first = await asyncio.wait_for(
+            websocket.receive_json(), WS_AUTH_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        await websocket.close(code=WS_CLOSE_AUTH_TIMEOUT)
+        return None
+    except (WebSocketDisconnect, ValueError):
+        await websocket.close(code=1003)  # unsupported_data
+        return None
+    return first if isinstance(first, dict) else {}
+
 
 # ИСПРАВЛЕНО: tokenUrl указывает на form-эндпоинт /auth/token, который
 # принимает OAuth2PasswordRequestForm. /auth/login по-прежнему живёт
@@ -30,44 +77,62 @@ WS_CLOSE_RATE_LIMITED = 4429
 # 401 при полном отсутствии токена кидает сам get_current_user.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
-# Необязательная аутентификация (аудит H1): для публичных ручек, которым
-# нужно ЗНАТЬ пользователя, если токен есть (например, показать черновики
-# блога writer'у), но не требовать его — аноним просто получает публичный
-# срез. auto_error=False → отсутствие заголовка не даёт 401, отдаёт None.
-oauth2_scheme_optional = OAuth2PasswordBearer(
-    tokenUrl="/auth/token", auto_error=False
-)
-
 
 def _extract_access_token(request: Request, header_token: str | None) -> str | None:
     """Access-токен: заголовок Authorization → httpOnly-кука (веб)."""
     return header_token or request.cookies.get("access_token")
 
 
+class _TokenRejected(Exception):
+    """Токен не даёт доступа; detail — текст для 401."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+async def _user_from_token(db: AsyncSession, token: str) -> User:
+    """
+    Единая проверка access-токена (ревью 2026-10-06, BE-34): раньше одна и
+    та же логика была скопирована в get_current_user, get_current_user_optional
+    и authenticate_ws. Бросает _TokenRejected; вызывающий решает, это 401
+    или просто «аноним».
+    """
+    try:
+        payload = decode_access_token(token)
+    except JWTError:
+        raise _TokenRejected("Невалидный токен") from None
+    # Явная проверка типа: refresh или иной JWT не годится как access.
+    if payload.get("type") != "access":
+        raise _TokenRejected("Невалидный токен")
+    # UUID() на мусорном sub кидает ValueError — это 401, а не 500.
+    try:
+        uid = UUID(payload.get("sub") or "")
+    except (ValueError, TypeError):
+        raise _TokenRejected("Невалидный токен") from None
+    user = await get_user_by_id(db, uid)
+    if user is None:
+        raise _TokenRejected("Невалидный токен")
+    if not user.is_active:
+        raise _TokenRejected("Пользователь заблокирован")
+    return user
+
+
 async def get_current_user_optional(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    header_token: str | None = Depends(oauth2_scheme_optional),
+    header_token: str | None = Depends(oauth2_scheme),
 ) -> User | None:
-    """Текущий пользователь или None. Любая ошибка токена → None (не 401):
-    публичная ручка продолжает работать как для анонима."""
+    """Текущий пользователь или None (аудит H1): для публичных ручек, которым
+    нужно ЗНАТЬ пользователя, если токен есть. Любая ошибка токена → None
+    (не 401): публичная ручка продолжает работать как для анонима."""
     token = _extract_access_token(request, header_token)
     if not token:
         return None
     try:
-        payload = decode_access_token(token)
-    except JWTError:
+        return await _user_from_token(db, token)
+    except _TokenRejected:
         return None
-    if payload.get("type") != "access":
-        return None
-    try:
-        uid = UUID(payload.get("sub", ""))
-    except (ValueError, TypeError):
-        return None
-    user = await get_user_by_id(db, uid)
-    if user is None or not user.is_active:
-        return None
-    return user
 
 
 def is_writer(user: User | None) -> bool:
@@ -81,7 +146,7 @@ async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
     header_token: str | None = Depends(oauth2_scheme),
-):
+) -> User:
     token = _extract_access_token(request, header_token)
     if not token:
         # auto_error=False больше не кидает 401 сам — отвечаем как
@@ -92,28 +157,9 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        payload = decode_access_token(token)
-        # ИСПРАВЛЕНО: явная проверка типа токена — защита от случая,
-        # когда в /auth/login начнут возвращать JWT и для refresh.
-        if payload.get("type") != "access":
-            raise HTTPException(status_code=401, detail="Невалидный токен")
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Невалидный токен")
-        # ИСПРАВЛЕНО: UUID() кидает ValueError при некорректном sub —
-        # раньше пробрасывалось в ErrorHandler → 500. Теперь 401.
-        try:
-            uid = UUID(user_id)
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=401, detail="Невалидный токен")
-        user = await get_user_by_id(db, uid)
-        if not user:
-            raise HTTPException(status_code=401, detail="Невалидный токен")
-        if not user.is_active:
-            raise HTTPException(status_code=401, detail="Пользователь заблокирован")
-        return user
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Невалидный токен")
+        return await _user_from_token(db, token)
+    except _TokenRejected as e:
+        raise HTTPException(status_code=401, detail=e.detail) from None
 
 
 async def authenticate_ws(
@@ -138,19 +184,9 @@ async def authenticate_ws(
     if not token:
         return None
     try:
-        payload = decode_access_token(token)
-    except JWTError:
+        return await _user_from_token(db, token)
+    except _TokenRejected:
         return None
-    if payload.get("type") != "access":
-        return None
-    try:
-        uid = UUID(payload.get("sub", ""))
-    except (ValueError, TypeError):
-        return None
-    user = await get_user_by_id(db, uid)
-    if user is None or not user.is_active:
-        return None
-    return user
 
 
 async def ws_rate_limit(
@@ -202,3 +238,34 @@ def require_any_role(*roles: str):
 # появится super_admin), правка в одном месте.
 def is_admin(user: User) -> bool:
     return any(r.role.value == "admin" for r in user.roles)
+
+
+def user_rate_limit(bucket: str, *, limit: int, window: int):
+    """
+    Зависимость: лимит действия на ПОЛЬЗОВАТЕЛЯ (план защиты 2026-10-05).
+
+    Ключ — user_id, а не IP: смена адреса лимит не обходит, а соседи по
+    NAT друг другу не мешают. Тот же прогрессивный бан, что у
+    check_rate_limit. fail-open: при сбое Redis действие не блокируем —
+    это защита от злоупотреблений, а не от взлома.
+
+        @router.post("/tickets", dependencies=[Depends(
+            user_rate_limit("support:ticket", limit=5, window=3600))])
+    """
+
+    async def dependency(
+        request: Request,
+        user: User = Depends(get_current_user),
+        redis: Redis = Depends(get_redis),
+    ) -> None:
+        await check_rate_limit(
+            request,
+            limit,
+            window,
+            redis,
+            bucket=bucket,
+            client_key=f"user:{user.id}",
+        )
+
+    return dependency
+

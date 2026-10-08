@@ -50,7 +50,11 @@ async def _phone_login(client, sms, phone: str) -> tuple[dict, dict]:
     assert r.status_code == 200, r.text
     r = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": sms.last_code()},
+        json={
+            "phone": phone,
+            "code": sms.last_code(),
+            "accept_terms": True, "personal_data_consent": True,
+        },
         headers=BODY,
     )
     assert r.status_code == 200, r.text
@@ -61,7 +65,7 @@ async def _phone_login(client, sms, phone: str) -> tuple[dict, dict]:
 async def _email_user(client) -> tuple[str, dict]:
     email = f"legacy{random.randint(10**6, 10**7)}@example.com"
     r = await client.post(
-        "/auth/register", json={"email": email, "password": "Password123"}
+        "/auth/register", json={"email": email, "password": "Password123", "accept_terms": True, "personal_data_consent": True}
     )
     assert r.status_code == 200, r.text
     r = await client.post(
@@ -91,7 +95,7 @@ async def test_email_registration_disabled_403(client, monkeypatch):
     monkeypatch.setattr(settings, "auth_email_registration_enabled", False)
     r = await client.post(
         "/auth/register",
-        json={"email": "nobody@example.com", "password": "Password123"},
+        json={"email": "nobody@example.com", "password": "Password123", "accept_terms": True, "personal_data_consent": True},
     )
     assert r.status_code == 403
     assert r.json()["detail"] == "registration_method_disabled"

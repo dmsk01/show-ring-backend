@@ -104,7 +104,7 @@ async def find_banner_for_serve(
     - кампания active
     - spent < budget (бюджет не исчерпан)
     - дата сегодня в [date_start, date_end]
-    - баннер is_active=True
+    - баннер is_active=True и промаркирован (erid задан)
 
     Выбор случайного: ORDER BY random() LIMIT 1 — на dev-объёмах
     нормально. На проде с тысячами баннеров переходим на weighted
@@ -116,6 +116,8 @@ async def find_banner_for_serve(
         .where(
             AdBanner.placement == placement,
             AdBanner.is_active.is_(True),
+            # Немаркированную рекламу не показываем (ст. 18.1 Закона о рекламе).
+            AdBanner.erid.is_not(None),
             AdCampaign.status == CampaignStatus.active,
             AdCampaign.spent < AdCampaign.budget,
             AdCampaign.date_start <= today,
@@ -208,6 +210,23 @@ async def try_charge_campaign(
     # rowcount недоступен в Result[Any] для pyright — через getattr
     # (см. репозиторий tasks с тем же комментарием).
     return getattr(result, "rowcount", 0) == 1
+
+
+async def charge_up_to_budget(
+    db: AsyncSession, campaign_id: uuid.UUID, cost: Decimal
+) -> None:
+    """
+    Списать cost, но не больше остатка бюджета (батч воркера, BE-06).
+
+    try_charge_campaign — «всё или ничего»: если остатка не хватало на
+    весь батч, не списывалось ничего, хотя часть показов уже состоялась.
+    """
+    stmt = (
+        update(AdCampaign)
+        .where(AdCampaign.id == campaign_id, AdCampaign.spent < AdCampaign.budget)
+        .values(spent=func.least(AdCampaign.budget, AdCampaign.spent + cost))
+    )
+    await db.execute(stmt)
 
 
 async def auto_complete_campaign_if_exhausted(

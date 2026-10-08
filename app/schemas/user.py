@@ -26,6 +26,16 @@ def _validate_e164(v: str) -> str:
 E164Phone = Annotated[str, AfterValidator(_validate_e164)]
 
 
+def _normalize_email(value: str) -> str:
+    return value.strip().lower()
+
+
+# Email в нижнем регистре (ревью 2026-10-06, BE-16): "User@Mail.ru" и
+# "user@mail.ru" — один адрес. Без нормализации это были два аккаунта, а
+# вход зависел от регистра. Уникальность в БД — индекс по lower(email).
+NormalizedEmail = Annotated[EmailStr, AfterValidator(_normalize_email)]
+
+
 # Ссылки на соцсети храним и валидируем как абсолютный http(s)-URL.
 # Пустая строка трактуется как «очистить» → None (фронт шлёт "" при
 # удалении ссылки из поля). Хэндл вроде "@kennel" сознательно не
@@ -47,14 +57,25 @@ SocialURL = Annotated[str | None, AfterValidator(_validate_social_url)]
 
 
 class UserCreate(BaseModel):
-    email: EmailStr
+    email: NormalizedEmail
     password: str
+    # Как у PhoneVerifyCodeRequest. Не обязательны: регистрация по email в
+    # проде выключена и служит тестам; недостающие согласия интерфейс
+    # запросит после входа (GET /users/me/consents → missing).
+    accept_terms: bool = False
+    personal_data_consent: bool = False
 
     @field_validator("password")
     @classmethod
     def validate_pwd(cls, v: str) -> str:
         validate_password(v)
         return v
+
+
+class UserLogin(UserCreate):
+    # Решение капчи ALTCHA — нужно после нескольких неудачных попыток
+    # входа (app/services/login_guard.py), иначе игнорируется.
+    captcha: str | None = Field(None, max_length=8192)
 
 
 class RoleResponse(BaseModel):
@@ -93,7 +114,7 @@ class PublicUserResponse(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    email: EmailStr | None = None
+    email: NormalizedEmail | None = None
     # ИСПРАВЛЕНО (bug_203): смена email — sensitive операция. Без re-auth
     # компрометация access-токена даёт атакующему смену email на свой и
     # последующий захват аккаунта через password reset. Текущий пароль
@@ -125,7 +146,7 @@ class ResendVerification(BaseModel):
     # Повторная отправка письма подтверждения регистрации. Принимаем
     # email (не current_user), чтобы работало и для незалогиненных.
     # Ответ одинаков независимо от существования адреса (анти-enumeration).
-    email: EmailStr
+    email: NormalizedEmail
 
 
 class TokenResponse(BaseModel):
@@ -148,18 +169,35 @@ class RefreshRequest(BaseModel):
 
 class PhoneSendCodeRequest(BaseModel):
     phone: E164Phone
+    # Решение капчи ALTCHA (base64). Обязательно для /auth/send-code при
+    # captcha_enabled; в /users/me/phone/send-code (уже вошедший
+    # пользователь) не используется.
+    captcha: str | None = Field(None, max_length=8192)
 
 
 class PhoneVerifyCodeRequest(BaseModel):
     phone: E164Phone
     # Только цифры; длина с запасом под настройку otp_code_length (4–8).
     code: str = Field(pattern=r"^\d{4,8}$")
+    # Две отдельные отметки: согласие на обработку ПДн оформляется отдельно
+    # от принятия Соглашения (ч. 1 ст. 9 152-ФЗ в ред. 156-ФЗ). Для нового
+    # номера обе обязательны (иначе 400 consent_required); для существующего
+    # аккаунта — записываются, если переданы.
+    accept_terms: bool = False
+    personal_data_consent: bool = False
+
+
+class AccountDeleteRequest(BaseModel):
+    # Подтверждение личности: код из /users/me/reauth/send-code, если у
+    # аккаунта подтверждён телефон; иначе текущий пароль.
+    code: str | None = Field(None, pattern=r"^\d{4,8}$")
+    password: str | None = None
 
 
 class EmailLoginCreate(BaseModel):
     # Подключение входа по почте к телефонному аккаунту. Вместо текущего
     # пароля (его нет) — свежий OTP-код на номер аккаунта (re-auth).
-    email: EmailStr
+    email: NormalizedEmail
     password: str
     code: str = Field(pattern=r"^\d{4,8}$")
 

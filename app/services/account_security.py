@@ -37,7 +37,7 @@ from app.services.otp_auth import (
     send_otp_code,
 )
 from app.services.sms import SMSProvider
-from app.utils.security import generate_verification_token, hash_password
+from app.utils.security import generate_verification_token, hash_password_async
 
 logger = logging.getLogger(__name__)
 security_logger = logging.getLogger("app.security")
@@ -196,7 +196,7 @@ async def request_email_login(
         redis, code, purpose=OTPPurpose.reauth, subject=str(user.id)
     )
 
-    user.hashed_password = hash_password(password)
+    user.hashed_password = await hash_password_async(password)
     user.pending_email = email
     # Ссылка прошлого запроса (возможно, на адрес с опечаткой) больше не
     # действует: confirm применил бы НОВЫЙ pending_email по старой ссылке.

@@ -29,7 +29,7 @@ def auth(token: str) -> dict:
 async def make_api_user(client) -> tuple[uuid.UUID, str]:
     """Регистрирует и логинит пользователя через API: (id, access_token)."""
     email = f"chk_{uuid.uuid4().hex[:10]}@example.com"
-    await client.post("/auth/register", json={"email": email, "password": PASSWORD})
+    await client.post("/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True})
     r = await client.post(
         "/auth/login",
         json={"email": email, "password": PASSWORD},

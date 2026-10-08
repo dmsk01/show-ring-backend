@@ -11,12 +11,17 @@ from __future__ import annotations
 
 from typing import Any
 
+# Подпись обезличенного аккаунта (services/account_deletion).
+DELETED_USER_LABEL = "Удалённый пользователь"
+
 
 def full_name(user: Any | None) -> str:
     """«Фамилия Имя Отчество», пустые части опускаются. Если профиль пуст —
     fallback на email. None → пустая строка."""
     if user is None:
         return ""
+    if getattr(user, "deleted_at", None) is not None:
+        return DELETED_USER_LABEL
     profile = getattr(user, "profile", None)
     if profile is not None:
         parts = [

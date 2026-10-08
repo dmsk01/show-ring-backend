@@ -29,6 +29,7 @@ from app.models.reference import Breed, BreedGroup, ShowClass, ShowRank
 from app.models.result import ShowResult
 from app.models.show import Show, ShowEntry, ShowJudge
 from app.models.user import User
+from app.utils.names import DELETED_USER_LABEL
 
 
 # ---------------------------------------------------------------------
@@ -126,6 +127,8 @@ def _user_display(user: User | None) -> str | None:
     """
     if user is None:
         return None
+    if user.deleted_at is not None:
+        return DELETED_USER_LABEL
     # Телефон НЕ подставляем: документы публичные, а номер — логин для
     # SMS-входа. У телефонного юзера без ФИО/email — None («—» в шаблоне).
     return user.email

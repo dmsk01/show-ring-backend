@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.redis import get_redis
@@ -7,6 +8,7 @@ from app.middleware.progressive_ban import check_rate_limit
 from app.config import settings
 from app.database import get_db
 from app.services.auth import (
+    REFRESH_SUPERSEDED,
     confirm_email_change,
     refresh_access_token,
     register_user,
@@ -16,13 +18,21 @@ from app.services.auth import (
     logout_user,
 )
 from app.services.otp_auth import (
+    OTPCountryNotAllowedError,
     OTPExpiredError,
     OTPInvalidError,
     OTPRateLimitedError,
     OTPUserBlockedError,
+    SMSBudgetExceededError,
     send_otp_code,
     verify_otp_code,
 )
+from app.utils.net import ip_subnet
+from app.services import login_guard
+from app.services.captcha import require_captcha
+from app.services.email_tasks import enqueue_transactional_email
+from app.repositories import user as user_repo
+from app.services.consent import ACCOUNT_KINDS, ConsentKind, ConsentRequiredError
 from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
 from app.services.auth_methods import enabled_auth_methods, primary_auth_method
 from app.schemas.user import (
@@ -35,6 +45,7 @@ from app.schemas.user import (
     ResendVerification,
     TokenResponse,
     UserCreate,
+    UserLogin,
 )
 
 # Анти-enumeration: ответ одинаков, существует адрес или нет.
@@ -115,19 +126,35 @@ def _deliver_tokens(
     return tokens
 
 
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie("access_token", path=_access_cookie_path())
+    response.delete_cookie("refresh_token", path=_refresh_cookie_path())
+
+
+def _auth_error(detail: str, *, clear_cookies: bool) -> JSONResponse:
+    """401 с (опциональной) очисткой кук.
+
+    Ревью 2026-10-06, BE-13: delete_cookie на внедрённом Response терялся
+    при raise HTTPException — FastAPI строит новый ответ без его заголовков,
+    и браузер оставался с мёртвыми куками (цикл 401 на фронте). Поэтому
+    ответ собираем сами.
+    """
+    response = JSONResponse(status_code=401, content={"detail": detail})
+    if clear_cookies:
+        _clear_auth_cookies(response)
+    return response
+
+
 def _ensure_email_login_enabled() -> None:
     # Email — дополнительный способ входа, может быть выключен флагом.
     if not settings.auth_email_login_enabled:
         raise HTTPException(status_code=403, detail="login_method_disabled")
 
 
-def _extract_refresh(request: Request, body: RefreshRequest) -> str:
+def _extract_refresh(request: Request, body: RefreshRequest) -> str | None:
     # Тело (мобильный клиент) → кука (веб). Кука читается всегда:
     # cookie-режим — дефолт, глобального флага больше нет.
-    raw = body.refresh_token or request.cookies.get("refresh_token")
-    if not raw:
-        raise HTTPException(status_code=401, detail="missing_refresh_token")
-    return raw
+    return body.refresh_token or request.cookies.get("refresh_token")
 
 
 @router.get(
@@ -190,7 +217,27 @@ async def register(
     # ИСПРАВЛЕНО: ответ одинаков и для нового, и для уже существующего
     # email — это защита от перечисления учётных записей. Сервис
     # возвращает None в случае коллизии, мы это не светим наружу.
-    await register_user(db, body.email, body.password)
+    consents = tuple(
+        kind
+        for kind, given in (
+            (ConsentKind.terms, body.accept_terms),
+            (ConsentKind.personal_data, body.personal_data_consent),
+        )
+        if given
+    )
+    # Ревью 2026-10-06, BE-17: как и вход по телефону, аккаунт создаётся
+    # только со всеми обязательными согласиями (152-ФЗ). Ответ не зависит
+    # от того, занят ли адрес — enumeration не появляется.
+    if not set(ACCOUNT_KINDS) <= set(consents):
+        raise HTTPException(status_code=400, detail="consent_required")
+    await register_user(
+        db,
+        body.email,
+        body.password,
+        consents=consents,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
     return _REGISTER_RESPONSE
 
 
@@ -266,6 +313,45 @@ async def confirm_email_change_endpoint(
     return {"message": "Email изменён"}
 
 
+async def _guarded_login(
+    request: Request,
+    response: Response,
+    db: AsyncSession,
+    redis: Redis,
+    email: str,
+    password: str,
+    captcha: str | None,
+) -> TokenResponse:
+    """Вход по паролю под защитой login_guard: капча и блокировка аккаунта."""
+    ip = request.client.host if request.client else "unknown"
+    await login_guard.check_before_login(redis, email=email, ip=ip, captcha=captcha)
+    try:
+        tokens = await login_user(db, email, password)
+    except ValueError as e:
+        if str(e) == "invalid_credentials":
+            locked_now = await login_guard.record_failure(redis, email=email, ip=ip)
+            if locked_now and await login_guard.should_notify_lock(redis, email=email):
+                await _notify_account_locked(db, email, ip)
+        raise HTTPException(status_code=401, detail=str(e))
+    await login_guard.record_success(redis, email=email)
+    return _deliver_tokens(request, response, tokens)
+
+
+async def _notify_account_locked(db: AsyncSession, email: str, ip: str) -> None:
+    """Письмо владельцу о блокировке (только если адрес принадлежит аккаунту)."""
+    user = await user_repo.get_user_by_email(db, email)
+    if user is None or not user.email:
+        return
+    await enqueue_transactional_email(
+        db,
+        user_id=user.id,
+        to_email=user.email,
+        template_name="account_locked",
+        context={"minutes": settings.login_lockout_seconds // 60, "ip": ip},
+    )
+    await db.commit()
+
+
 @router.post(
     "/login",
     summary="Вход в систему",
@@ -278,7 +364,7 @@ async def confirm_email_change_endpoint(
 )
 async def login(
     request: Request,
-    body: UserCreate,
+    body: UserLogin,
     response: Response,
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
@@ -294,12 +380,9 @@ async def login(
         bucket=_LOGIN_RATE_BUCKET,
     )
     _ensure_email_login_enabled()
-    try:
-        return _deliver_tokens(
-            request, response, await login_user(db, body.email, body.password)
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    return await _guarded_login(
+        request, response, db, redis, body.email, body.password, body.captcha
+    )
 
 
 @router.post(
@@ -333,13 +416,12 @@ async def login_form(
         bucket=_LOGIN_RATE_BUCKET,
     )
     _ensure_email_login_enabled()
-    try:
-        # OAuth2 спецификация требует поле username — мапим его на email.
-        return _deliver_tokens(
-            request, response, await login_user(db, form.username, form.password)
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    # OAuth2 спецификация требует поле username — мапим его на email.
+    # Поля для капчи в форме нет: когда она станет нужна — 400
+    # captcha_required, вход через /auth/login.
+    return await _guarded_login(
+        request, response, db, redis, form.username, form.password, None
+    )
 
 
 @router.post(
@@ -350,6 +432,7 @@ async def login_form(
         "Старый refresh после успешного вызова становится недействительным "
         "(rotation): повторный запрос с тем же токеном даёт 401."
     ),
+    response_model=TokenResponse,
 )
 async def refresh(
     request: Request,
@@ -357,7 +440,7 @@ async def refresh(
     body: RefreshRequest = RefreshRequest(),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
-) -> TokenResponse:
+) -> TokenResponse | JSONResponse:
     await check_rate_limit(
         request,
         limit=5,
@@ -365,14 +448,20 @@ async def refresh(
         redis=redis,
         fail_closed=True,  # bug_247: см. /register
     )
+    raw = _extract_refresh(request, body)
+    if not raw:
+        return _auth_error("missing_refresh_token", clear_cookies=True)
     try:
         # ИСПРАВЛЕНО: возвращаем TokenResponse целиком — клиент обязан
         # заменить refresh-токен. См. rotation в services.auth.refresh_access_token.
-        return _deliver_tokens(
-            request, response, await refresh_access_token(db, _extract_refresh(request, body))
-        )
+        tokens = await refresh_access_token(db, raw, redis=redis)
     except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        # refresh_superseded — параллельная вкладка уже ротировала токен и
+        # поставила браузеру новые куки (BE-27): их не трогаем.
+        return _auth_error(
+            str(e), clear_cookies=str(e) != REFRESH_SUPERSEDED
+        )
+    return _deliver_tokens(request, response, tokens)
 
 
 @router.post(
@@ -396,13 +485,16 @@ async def logout(
     )
     # Куки чистим всегда, даже если токен уже отозван — иначе браузер
     # остаётся с невалидными куками и получает 401 на каждом запросе.
-    response.delete_cookie("access_token", path=_access_cookie_path())
-    response.delete_cookie("refresh_token", path=_refresh_cookie_path())
-    try:
-        await logout_user(db, _extract_refresh(request, body))
-        return {"message": "Успешный выход"}
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    # Logout идемпотентен (BE-13): отсутствующий или уже отозванный
+    # refresh — не ошибка, цель «выйти» достигнута.
+    _clear_auth_cookies(response)
+    raw = _extract_refresh(request, body)
+    if raw:
+        try:
+            await logout_user(db, raw)
+        except ValueError:
+            pass
+    return {"message": "Успешный выход"}
 
 
 @router.post(
@@ -426,8 +518,27 @@ async def send_code(
     await check_rate_limit(
         request, limit=5, window=60, redis=redis, fail_closed=True
     )
+    # Лимит на подсеть: пул прокси обходит лимит «на IP», но обычно
+    # сидит в соседних адресах (анти SMS pumping, план 2026-10-05).
+    client_ip = request.client.host if request.client else "unknown"
+    await check_rate_limit(
+        request,
+        limit=settings.otp_subnet_limit,
+        window=3600,
+        redis=redis,
+        fail_closed=True,
+        bucket="send-code:subnet",
+        client_key=ip_subnet(client_ip),
+    )
+    # Капча — после дешёвых лимитов, но до любой работы с SMS: каждое SMS
+    # стоит денег, а решение задачи стоит боту CPU.
+    await require_captcha(redis, body.captcha)
     try:
         await send_otp_code(redis, sms, body.phone)
+    except OTPCountryNotAllowedError:
+        raise HTTPException(status_code=400, detail="country_not_supported")
+    except SMSBudgetExceededError:
+        raise HTTPException(status_code=503, detail="sms_unavailable")
     except OTPRateLimitedError:
         raise HTTPException(status_code=429, detail="too_many_requests")
     except SMSDeliveryError:
@@ -457,8 +568,26 @@ async def verify_code(
     await check_rate_limit(
         request, limit=10, window=60, redis=redis, fail_closed=True
     )
+    consents = tuple(
+        kind
+        for kind, given in (
+            (ConsentKind.terms, body.accept_terms),
+            (ConsentKind.personal_data, body.personal_data_consent),
+        )
+        if given
+    )
     try:
-        tokens, _ = await verify_otp_code(db, redis, body.phone, body.code)
+        tokens, _ = await verify_otp_code(
+            db,
+            redis,
+            body.phone,
+            body.code,
+            consents=consents,
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except ConsentRequiredError:
+        raise HTTPException(status_code=400, detail="consent_required")
     except OTPExpiredError:
         raise HTTPException(status_code=401, detail="code_expired")
     except OTPUserBlockedError:

@@ -106,3 +106,43 @@ def test_json_content_type_detection_matches_fastapi():
     assert not _is_json_content_type("")
     assert not _is_json_content_type("multipart/form-data; boundary=x")
     assert not _is_json_content_type("text/plain")
+
+
+# ---------------------------------------------------------------------
+# BE-07 (ревью 2026-10-06): санитизация не должна HTML-экранировать текст
+# ---------------------------------------------------------------------
+
+
+def test_ampersand_is_not_escaped():
+    cleaned = _sanitize({"name": "Tom & Jerry"})
+    assert cleaned["name"] == "Tom & Jerry"
+
+
+def test_url_query_is_preserved():
+    url = "https://site.ru/page?a=1&b=2"
+    assert _sanitize({"website": url})["website"] == url
+
+
+def test_less_than_sign_is_preserved():
+    assert _sanitize({"description": "щенки <3 мес, a < b"})["description"] == (
+        "щенки <3 мес, a < b"
+    )
+
+
+def test_tags_are_still_stripped():
+    assert _sanitize({"name": "<b>Рекс</b>"})["name"] == "Рекс"
+
+
+def test_entity_encoded_tags_do_not_survive():
+    # После «раскодирования» сущностей тег не должен появиться в данных.
+    cleaned = _sanitize({"name": "&lt;script&gt;alert(1)&lt;/script&gt;x"})
+    assert "<script" not in cleaned["name"].lower()
+
+
+def test_repair_script_decodes_bleach_entities():
+    from scripts.unescape_sanitized_text import decode_entities_once
+
+    assert decode_entities_once("Tom &amp; Jerry") == "Tom & Jerry"
+    assert decode_entities_once("a &lt;3 &gt; b") == "a <3 > b"
+    # Двойное экранирование снимается за два прохода, а не одним «перескоком».
+    assert decode_entities_once("&amp;amp;") == "&amp;"

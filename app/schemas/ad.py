@@ -47,9 +47,13 @@ class CampaignBase(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = None
     budget: Decimal = Field(..., gt=0)
-    cost_per_impression: Decimal = Field(Decimal("0.01"), ge=0)
+    # gt=0 (ревью 2026-10-06, BE-05): бесплатный показ = бесконечные показы.
+    cost_per_impression: Decimal = Field(Decimal("0.01"), gt=0)
     date_start: date
     date_end: date
+    # Рекламодатель для пометки «Реклама» (ст. 18.1 Закона о рекламе).
+    advertiser_name: str | None = Field(None, max_length=255)
+    advertiser_inn: str | None = Field(None, pattern=r"^\d{10}(\d{2})?$")
 
     @model_validator(mode="after")
     def _validate_dates(self) -> "CampaignBase":
@@ -69,10 +73,12 @@ class CampaignUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
     description: str | None = None
     budget: Decimal | None = Field(None, gt=0)
-    cost_per_impression: Decimal | None = Field(None, ge=0)
+    cost_per_impression: Decimal | None = Field(None, gt=0)
     date_start: date | None = None
     date_end: date | None = None
     status: CampaignStatus | None = None
+    advertiser_name: str | None = Field(None, max_length=255)
+    advertiser_inn: str | None = Field(None, pattern=r"^\d{10}(\d{2})?$")
 
 
 class CampaignResponse(CampaignBase):
@@ -102,6 +108,8 @@ class BannerBase(BaseModel):
     target_breed_id: uuid.UUID | None = None
     target_region: str | None = Field(None, max_length=128)
     is_active: bool = True
+    # erid из ОРД; без него баннер не показывается.
+    erid: str | None = Field(None, max_length=128)
 
     @field_validator("target_url")
     @classmethod
@@ -122,6 +130,7 @@ class BannerUpdate(BaseModel):
     target_breed_id: uuid.UUID | None = None
     target_region: str | None = Field(None, max_length=128)
     is_active: bool | None = None
+    erid: str | None = Field(None, max_length=128)
 
     @field_validator("target_url")
     @classmethod
@@ -156,6 +165,12 @@ class ServeResponse(BaseModel):
     target_url: str
     title: str | None
     placement: BannerPlacement
+    # Маркировка (ст. 18.1 Закона о рекламе): фронт выводит
+    # «Реклама · <рекламодатель> · erid: <...>» на самом баннере.
+    label: str = "Реклама"
+    erid: str
+    advertiser_name: str | None
+    advertiser_inn: str | None
 
 
 # ---------------------------------------------------------------------

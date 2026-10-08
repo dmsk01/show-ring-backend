@@ -11,9 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_user_optional
 from app.models.litter import Litter, LitterStatus
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE, cap_per_page
 from app.repositories import dog as dog_repo
 from app.repositories import litter as repo
 from app.schemas.dog import DogRef, DogResponse
@@ -120,7 +121,9 @@ async def list_litters(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     # Триммим на границе ввода: "пусто/одни пробелы" → None (без фильтра).
     search = search.strip() or None if search else None
     items = await repo.list_litters(

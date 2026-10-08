@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from typing import NoReturn
 
@@ -24,23 +23,21 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, user_rate_limit
 from app.models.user import User
 from app.repositories import show as show_repo
-from app.repositories import task as task_repo
-from app.schemas.task import DocumentKind, TaskMessage, TaskResponse
+from app.schemas.task import DocumentKind, TaskResponse
 from app.services import document_official
 from app.services.document import to_jsonable
-from app.services.rabbit import rabbit_service
+from app.services.task_dispatch import create_and_enqueue_task
 
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/shows", tags=["documents"])
 
-# Имя очереди задач генерации документов. Все типы задач этой подсистемы
-# идут в одну очередь — воркер диспатчит по полю type. Если бы для разных
-# типов было разное SLA, имело бы смысл разделить очереди.
-DOCUMENT_TASK_QUEUE = "document_task"
+# Генерация документов — тяжёлая задача в очереди (docx/pdf на тысячи
+# собак). Общий лимит на все виды документов (план защиты 2026-10-05).
+_DOCS_LIMIT = user_rate_limit("documents:generate", limit=10, window=3600)
+
 
 
 def _is_organizer_or_admin(user: User, organizer_id: uuid.UUID) -> bool:
@@ -75,31 +72,13 @@ async def _publish_task(
     payload: dict,
 ) -> TaskResponse:
     """
-    Общая часть для всех типов задач:
-    1. INSERT Task(pending).
-    2. PUBLISH в очередь.
-    3. Возврат TaskResponse.
-
-    Если publish упадёт (rabbit недоступен) — задача останется в pending
-    в БД, можно retry'ить позже. Это лучше, чем 500 без следа.
+    Создать Task(pending) и поставить его в очередь документов через
+    transactional outbox (ревью 2026-10-06, BE-19): при недоступном
+    RabbitMQ сообщение уйдёт, когда брокер вернётся, — задача не зависает.
     """
-    task = await task_repo.create_task(
-        db,
-        type_=kind.value,
-        payload=payload,
-        created_by=user.id,
+    task = await create_and_enqueue_task(
+        db, type_=kind.value, payload=payload, created_by=user.id
     )
-    message = TaskMessage(
-        task_id=task.id, action=kind.value, payload=payload
-    ).to_json()
-    try:
-        await rabbit_service.publish(DOCUMENT_TASK_QUEUE, message)
-    except Exception as e:  # noqa: BLE001
-        # Не падаем на HTTP-уровне: задача в БД, можно перепубликовать
-        # через отдельный admin-эндпоинт (будет добавлен на этапе 14).
-        logger.warning(
-            "Failed to publish task %s to RabbitMQ: %s", task.id, e
-        )
     return TaskResponse.model_validate(task)
 
 
@@ -110,6 +89,7 @@ async def _publish_task(
 
 @router.post(
     "/{show_id}/catalog/generate",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Запустить генерацию каталога выставки",
@@ -130,6 +110,7 @@ async def generate_catalog(
 
 @router.post(
     "/{show_id}/diplomas/generate",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Запустить генерацию пакета дипломов для всех участников",
@@ -150,6 +131,7 @@ async def generate_diplomas(
 
 @router.post(
     "/{show_id}/entries/{entry_id}/diploma",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Сгенерировать диплом для одного участника",
@@ -180,6 +162,7 @@ async def generate_diploma(
 
 @router.post(
     "/{show_id}/official/catalog",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Каталог выставки в формате РКФ (docx)",
@@ -201,6 +184,7 @@ async def generate_official_catalog(
 
 @router.post(
     "/{show_id}/official/diplomas",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Пакет дипломов в формате РКФ (docx)",
@@ -222,6 +206,7 @@ async def generate_official_diplomas(
 
 @router.post(
     "/{show_id}/entries/{entry_id}/official/diploma",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Диплом участника в формате РКФ (docx)",
@@ -244,6 +229,7 @@ async def generate_official_diploma(
 
 @router.post(
     "/{show_id}/official/ring-sheets",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Ринговые ведомости в формате РКФ (docx)",
@@ -268,6 +254,7 @@ async def generate_official_ring_sheets(
 
 @router.post(
     "/{show_id}/official/certificates",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Сертификаты титулов выставки в формате РКФ (docx)",
@@ -289,6 +276,7 @@ async def generate_official_certificates(
 
 @router.post(
     "/{show_id}/entries/{entry_id}/official/certificates",
+    dependencies=[Depends(_DOCS_LIMIT)],
     response_model=TaskResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Сертификаты титулов одной собаки в формате РКФ (docx)",

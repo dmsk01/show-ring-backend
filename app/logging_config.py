@@ -17,6 +17,7 @@ import sys
 from datetime import datetime, timezone
 
 from app.config import settings
+from app.request_context import install_log_record_factory
 
 
 # Поля LogRecord, которые НЕ нужно дублировать в JSON-выводе — они есть
@@ -67,6 +68,8 @@ def setup_logging() -> None:
     вызова (lifespan FastAPI или ручной reload):
     очищает прежние хендлеры — иначе на reload дубль-вывод.
     """
+    # request_id в каждой записи (ревью 2026-10-06, BE-22) — нужен формату.
+    install_log_record_factory()
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
     root = logging.getLogger()
@@ -82,7 +85,7 @@ def setup_logging() -> None:
         # Текстовый формат для dev: время + уровень + логгер + сообщение.
         handler.setFormatter(
             logging.Formatter(
-                "%(asctime)s %(levelname)s %(name)s %(message)s"
+                "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"
             )
         )
     root.addHandler(handler)
@@ -91,6 +94,5 @@ def setup_logging() -> None:
     # Подавляем шум от часто болтливых библиотек на info-уровне.
     # passlib постит deprecation-варнинги bcrypt на DEBUG; sqlalchemy
     # echo управляется отдельно через настройку engine.
-    logging.getLogger("passlib").setLevel(logging.ERROR)
     logging.getLogger("aiormq").setLevel(logging.WARNING)
     logging.getLogger("aio_pika").setLevel(logging.WARNING)

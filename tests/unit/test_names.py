@@ -1,7 +1,8 @@
 # tests/unit/test_names.py
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from app.utils.names import full_name, judge_display
+from app.utils.names import DELETED_USER_LABEL, full_name, judge_display
 
 
 def _user(email, profile=None):
@@ -50,3 +51,14 @@ def test_judge_display_with_country():
 def test_judge_display_without_country():
     u = _user("j@b.c", _profile("Никитина", "Ольга"))
     assert judge_display(u) == "Никитина Ольга"
+
+
+def test_full_name_for_deleted_account_hides_placeholder_email():
+    # Удалённый аккаунт обезличен: служебный адрес *.invalid не должен
+    # попадать в каталоги, дипломы и подписи авторов.
+    u = SimpleNamespace(
+        email="deleted-abc@deleted.invalid",
+        profile=None,
+        deleted_at=datetime(2026, 10, 4, tzinfo=timezone.utc),
+    )
+    assert full_name(u) == DELETED_USER_LABEL

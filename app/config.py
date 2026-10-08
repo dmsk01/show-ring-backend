@@ -14,6 +14,8 @@ _SECRET_PLACEHOLDERS = frozenset(
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env")
     rabbitmq_url: str = "amqp://guest:guest@localhost/"
+    # Не используется с удаления учебного fanout-роутера (ревью 2026-10-06,
+    # BE-35). Оставлено, чтобы существующие .env не падали на extra_forbidden.
     exchange_events: str = "events"
     database_url: str
     secret_key: str
@@ -41,7 +43,8 @@ class Settings(BaseSettings):
     # ИСПРАВЛЕНО: CORS вынесен в конфиг. Пустой список = CORS не включается,
     # чтобы не открывать API случайно. Список доменов задаётся через .env.
     cors_allow_origins: list[str] = []
-    # ИСПРАВЛЕНО: внутренний API key для воркеров (раньше "secret-key" хардкод).
+    # Не используется с удаления legacy /tasks/send и /tasks/{id}/status
+    # (ревью 2026-10-06, BE-35). Оставлено ради совместимости существующих .env.
     internal_api_key: str | None = None
 
     # --- Этап 4: MinIO (S3-совместимое хранилище) ---
@@ -89,6 +92,9 @@ class Settings(BaseSettings):
     # (подтверждение смены email, в будущем — сброс пароля). Письмо
     # ведёт на страницу фронта, та дёргает POST-эндпоинт с токеном.
     frontend_base_url: str = "http://localhost:5173"
+    # Часовой пояс календарных дат сервиса: дедлайны регистрации, даты
+    # кампаний, «сегодня» в cron (ревью 2026-10-06, BE-30). Сервер в UTC.
+    app_timezone: str = "Europe/Moscow"
     # Ключ HMAC-подписи QR-билетов чек-ина (app/utils/checkin_token.py).
     # Пусто → производный ключ из SECRET_KEY с доменным разделением:
     # прод не падает на старте без новой переменной, а подпись билетов
@@ -110,6 +116,53 @@ class Settings(BaseSettings):
     # Потолок SMS на номер в сутки — защита от SMS-pumping (каждое SMS
     # стоит денег; атакующий перебором номеров может сжечь бюджет).
     otp_daily_limit: int = 10
+    # --- Анти SMS pumping (план защиты 2026-10-05, этап 1) ---
+    # Разрешённые префиксы номеров для SMS. Аудитория — РФ: «+7» отсекает
+    # дорогие зарубежные направления, на которых строится накрутка.
+    # Пустой список = любые страны (не рекомендуется).
+    sms_allowed_phone_prefixes: list[str] = ["+7"]
+    # Общий потолок SMS на весь сервис за сутки (UTC). 0 = без потолка.
+    # Подбирать по реальному трафику с запасом ×3–5; на 50/80/100%
+    # в security-лог пишется предупреждение (повод для оповещения).
+    sms_daily_budget: int = 1000
+    # Запросов кода входа с одной подсети (/24 IPv4, /64 IPv6) в час.
+    # Не делать слишком низким: мобильные операторы держат много абонентов
+    # за общими адресами (CGNAT).
+    otp_subnet_limit: int = 60
+
+    # --- Капча ALTCHA и защита входа (план защиты 2026-10-05, этап 2) ---
+    # Капча на /auth/send-code (всегда) и /auth/login (после неудач).
+    # Выключать только для тестов и локальной отладки.
+    captcha_enabled: bool = True
+    # Итераций PBKDF2 на одну попытку перебора. 5000 ≈ 0,5 с решения на
+    # устройстве пользователя; больше — дороже ботам, но медленнее людям.
+    captcha_cost: int = 5000
+    # Сколько живёт задача (и запись о её использовании в Redis).
+    captcha_ttl_seconds: int = 600
+    # Неудачных входов (с IP или для email), после которых нужна капча.
+    login_captcha_after_failures: int = 3
+    # Неудачных входов для email, после которых аккаунт закрыт для входа
+    # по паролю на login_lockout_seconds (это же окно подсчёта неудач).
+    login_lockout_failures: int = 10
+    login_lockout_seconds: int = 900
+
+    # --- Метрики и оповещения (план защиты 2026-10-05, этап 3) ---
+    # Каналы оповещений; пустые — только запись в лог app.security.
+    alert_telegram_bot_token: str | None = None
+    alert_telegram_chat_id: str | None = None
+    alert_email: str | None = None
+    # Одно и то же правило — не чаще раза в N секунд.
+    alert_cooldown_seconds: int = 3600
+    # Пороги правил (app/services/alerts.py).
+    alert_rate_limited_10m: int = 300
+    alert_5xx_10m: int = 20
+    alert_sms_min_sent_1h: int = 30
+    alert_sms_min_conversion: float = 0.3
+    alert_sms_budget_share: float = 0.8
+    alert_account_locked_1h: int = 10
+    alert_captcha_failed_10m: int = 100
+    # Запрос дольше — считается медленным (метрика slow_request).
+    slow_request_seconds: float = 2.0
 
     # --- Способы входа (docs/superpowers/specs/2026-10-01-phone-primary-auth-design.md) ---
     # Телефон (OTP) — основной способ и не отключается. Email — дополнительный:
@@ -175,6 +228,11 @@ class Settings(BaseSettings):
     # = 100 default; даже 3 инстанса по 30 = 90 < 100.
     db_pool_size: int = 20
     db_max_overflow: int = 10
+    # Потолок времени одного SQL-запроса приложения (мс), 0 = без потолка.
+    # Защита от DoS тяжёлыми запросами: зависший запрос не держит
+    # соединение пула бесконечно. Ставится только на движок приложения
+    # (app/database.py) — миграции и pg_dump под той же ролью не задеты.
+    db_statement_timeout_ms: int = 10_000
     # bug_227 audit 2026-05-28: pool_recycle и PgBouncer/PG idle-таймауты.
     # 1800s (30 мин) — дефолт SQLAlchemy после нашего этапа 14, но если
     # сетевая инфра (PgBouncer/HAProxy/managed PG) рвёт idle-соединения
@@ -184,6 +242,9 @@ class Settings(BaseSettings):
     # AWS RDS Proxy idle = 1800 → ставим 1500; managed PG idle = 3600
     # → 1800 норм. Тюнится через .env.
     db_pool_recycle_seconds: int = 1800
+    # true — отказ старта при опасной prod-конфигурации (production_problems).
+    # По умолчанию false: dev-стек тоже живёт с DEBUG=false (BE-38).
+    strict_config: bool = False
 
     # Аудит C1: SECRET_KEY подписывает HS256 access-JWT (app/utils/security.py).
     # Пустой/плейсхолдерный/короткий ключ делает токены подделываемыми
@@ -200,6 +261,9 @@ class Settings(BaseSettings):
         "smtp_password",
         "sms_api_key",
         "internal_api_key",
+        "alert_telegram_bot_token",
+        "alert_telegram_chat_id",
+        "alert_email",
         mode="before",
     )
     @classmethod
@@ -228,6 +292,37 @@ class Settings(BaseSettings):
             )
             return self
         raise ValueError(msg)
+
+
+# Значения по умолчанию для dev, недопустимые в проде (ревью 2026-10-06, BE-38).
+_DEV_S3_SECRETS = frozenset({"", "show_ring_minio", "minioadmin"})
+_LOCAL_HOSTS = frozenset({"", "127.0.0.1", "localhost", "mailpit"})
+
+
+def production_problems(cfg: "Settings") -> list[str]:
+    """
+    Опасные для прода настройки. Пусто — всё в порядке; при DEBUG=True
+    проверки не применяются (dev-окружение).
+
+    Ревью 2026-10-06, BE-38: раньше SMS_PROVIDER=mock при DEBUG=False
+    обнаруживался только на первом /auth/send-code (500 пользователю), а
+    дефолтные учётки S3 и локальный SMTP не проверялись вовсе. Вызывается
+    из lifespan: CRITICAL в лог, а при STRICT_CONFIG=true — отказ старта.
+    """
+    if cfg.debug:
+        return []
+    problems: list[str] = []
+    if cfg.sms_provider == "mock":
+        problems.append("SMS_PROVIDER=mock при DEBUG=false — коды входа уйдут в лог")
+    elif not cfg.sms_api_key:
+        problems.append(f"SMS_API_KEY не задан для SMS_PROVIDER={cfg.sms_provider}")
+    if cfg.s3_secret_key in _DEV_S3_SECRETS or cfg.s3_access_key == "show_ring":
+        problems.append("S3_ACCESS_KEY/S3_SECRET_KEY — значения по умолчанию")
+    if cfg.smtp_host in _LOCAL_HOSTS:
+        problems.append(f"SMTP_HOST={cfg.smtp_host!r} — письма не дойдут до пользователей")
+    if not cfg.captcha_enabled:
+        problems.append("CAPTCHA_ENABLED=false — SMS и вход без защиты от ботов")
+    return problems
 
 
 settings = Settings()  # type: ignore

@@ -4,13 +4,9 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict
 
-# ВНИМАНИЕ. В этом файле сосуществуют две группы схем:
-# 1. Старые (TaskStatus / TaskMessage / TaskStatusResponse) — используются
-#    in-memory storage'ом из этапа учебного примера. Не удалены ради
-#    совместимости с роутером /tasks/* и worker/book_handler.
-# 2. Новые DB-схемы для этапа 8 (DocumentKind, TaskResponse и т.п.) —
-#    предназначены для реальной генерации документов через RabbitMQ
-#    с сохранением статуса в PostgreSQL.
+# Схемы фоновых задач генерации документов и обработки изображений:
+# TaskMessage — сообщение в очередь RabbitMQ, TaskResponse — статус задачи
+# из PostgreSQL. Учебные in-memory схемы удалены (ревью 2026-10-06, BE-35).
 
 
 class TaskStatus(str, Enum):
@@ -31,21 +27,6 @@ class TaskMessage(BaseModel):
     @classmethod
     def from_json(cls, data: str) -> "TaskMessage":
         return cls.model_validate_json(data)
-
-
-class TaskStatusResponse(BaseModel):
-    task_id: uuid.UUID
-    status: TaskStatus
-    result: dict | None = None
-    error: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class StatusUpdateRequest(BaseModel):
-    status: TaskStatus
-    result: dict | None = None
-    error: str | None = None
 
 
 # ---------------------------------------------------------------------

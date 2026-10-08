@@ -23,7 +23,7 @@ async def test_register_login_me_and_refresh_rotation(client):
 
     # 1. Регистрация — единый ответ (без user enumeration).
     r = await client.post(
-        "/auth/register", json={"email": email, "password": PASSWORD}
+        "/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     assert r.status_code == 200, r.text
 
@@ -118,7 +118,7 @@ async def test_register_is_rate_limited(client, monkeypatch):
     statuses = []
     for _ in range(5):
         r = await client.post(
-            "/auth/register", json={"email": _email(), "password": PASSWORD}
+            "/auth/register", json={"email": _email(), "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
         )
         statuses.append(r.status_code)
         if r.status_code == 429:
@@ -133,10 +133,10 @@ async def test_register_user_enumeration_safe(client):
     # новая, — наружу не светим, занят email или нет.
     email = _email()
     first = await client.post(
-        "/auth/register", json={"email": email, "password": PASSWORD}
+        "/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     second = await client.post(
-        "/auth/register", json={"email": email, "password": PASSWORD}
+        "/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     assert first.status_code == 200
     assert second.status_code == 200

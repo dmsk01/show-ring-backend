@@ -1,7 +1,10 @@
 import uuid
 
-from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import Headers, MutableHeaders
+
+from app.request_context import install_log_record_factory, request_id_var
+
+install_log_record_factory()
 
 
 def _parse_or_new_request_id(header_value: str | None) -> str:
@@ -29,16 +32,36 @@ def _parse_or_new_request_id(header_value: str | None) -> str:
         return str(uuid.uuid4())
 
 
-class RequestIdMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+class RequestIdMiddleware:
+    """
+    X-Request-ID для каждого запроса: в request.state, в contextvar (для
+    логов) и в заголовок ответа.
+
+    Чистый ASGI (ревью 2026-10-06, BE-28): у BaseHTTPMiddleware запрос шёл
+    через отдельную задачу и поток памяти — лишние расходы на каждый запрос.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
         request_id = _parse_or_new_request_id(
-            request.headers.get("X-Request-ID")
+            Headers(scope=scope).get("x-request-id")
         )
+        # request.state.request_id — Starlette хранит state в scope["state"].
+        scope.setdefault("state", {})["request_id"] = request_id
 
-        request.state.request_id = request_id
+        async def send_with_id(message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["X-Request-ID"] = request_id
+            await send(message)
 
-        response = await call_next(request)
-
-        response.headers["X-Request-ID"] = request_id
-
-        return response
+        # contextvar → атрибут request_id в каждой записи лога (BE-22).
+        token = request_id_var.set(request_id)
+        try:
+            await self.app(scope, receive, send_with_id)
+        finally:
+            request_id_var.reset(token)

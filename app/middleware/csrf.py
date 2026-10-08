@@ -16,28 +16,33 @@ sandboxed-контекстов — строка "null" в разрешённые
 
 from __future__ import annotations
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 
 from app.config import settings
 
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
-class CSRFMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if request.method in _MUTATING:
+class CSRFMiddleware:
+    """Чистый ASGI (ревью 2026-10-06, BE-28): только читает заголовок Origin
+    и при несовпадении отвечает 403 — BaseHTTPMiddleware тут не нужен.
+    WebSocket проверяется в роутерах (dependencies.ws_origin_allowed)."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope.get("method") in _MUTATING:
+            request = Request(scope)
             origin = request.headers.get("origin")
             if origin is not None and not _origin_allowed(request, origin):
-                # HTTPException тут не годится: exception handlers FastAPI
-                # живут ВНУТРИ middleware-стека и наш 403 превратился бы
-                # в 500. Отвечаем готовым JSONResponse.
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "csrf_origin_mismatch"},
+                response = JSONResponse(
+                    status_code=403, content={"detail": "csrf_origin_mismatch"}
                 )
-        return await call_next(request)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def _origin_allowed(request: Request, origin: str) -> bool:

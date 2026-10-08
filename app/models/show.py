@@ -347,10 +347,10 @@ class ShowEntry(Base, TimestampMixin):
     )
     dog_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        # CASCADE — если собаку удалили из системы, запись на выставку
-        # тоже исчезает. Историю результатов будем хранить в отдельной
-        # таблице result в этапе 7.
-        ForeignKey("dogs.id", ondelete="CASCADE"),
+        # RESTRICT (ревью 2026-10-06, BE-10): запись — часть истории
+        # выставки (каталог, результаты, дипломы). Удалить собаку с
+        # историей нельзя; записи на открытые выставки снимает сервис.
+        ForeignKey("dogs.id", ondelete="RESTRICT"),
         index=True,
     )
     show_class_id: Mapped[uuid.UUID] = mapped_column(

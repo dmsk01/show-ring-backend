@@ -27,6 +27,9 @@ class KennelBase(BaseModel):
     # — конкретный тип, который asyncpg не умеет биндить в VARCHAR.
     # Простая строка с regex-валидацией покрывает наши требования.
     website: str | None = Field(None, max_length=255, pattern=r"^https?://.+")
+    # Согласие на распространение контактов (ст. 10.1 152-ФЗ). Без него
+    # contact_*/website видны только владельцу и админу.
+    contacts_public: bool = False
 
 
 class KennelCreate(KennelBase):
@@ -48,10 +51,15 @@ class KennelUpdate(BaseModel):
     # Простая строка с regex-валидацией покрывает наши требования.
     website: str | None = Field(None, max_length=255, pattern=r"^https?://.+")
     avatar_file_id: uuid.UUID | None = None
+    contacts_public: bool | None = None
 
 
 class KennelResponse(KennelBase):
     model_config = ConfigDict(from_attributes=True)
+
+    # Есть открытые контакты — показать кнопку «Показать контакты».
+    # Сами контакты посторонним в карточке не отдаются (utils/public_contacts).
+    has_public_contacts: bool = False
 
     id: uuid.UUID
     owner_id: uuid.UUID
@@ -73,3 +81,12 @@ class KennelPage(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class KennelContacts(BaseModel):
+    """Ответ «Показать контакты» (GET /kennels/{id}/contacts)."""
+
+    contact_phone: str | None
+    contact_email: str | None
+    website: str | None
+

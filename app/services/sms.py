@@ -72,11 +72,26 @@ class SmsRuProvider(SMSProvider):
             # детали только в лог.
             logger.error("sms.ru request failed: %s", e)
             raise SMSDeliveryError("sms.ru request failed") from e
+        except ValueError as e:
+            # Не-JSON ответ (страница ошибки шлюза) — раньше уходил в 500.
+            logger.error("sms.ru returned non-JSON response")
+            raise SMSDeliveryError("sms.ru invalid response") from e
         if data.get("status") != "OK":
             logger.error("sms.ru rejected: %s", data)
             raise SMSDeliveryError(
                 f"sms.ru status_code={data.get('status_code')}"
             )
+        # Общий status=OK ещё не значит, что SMS ушло на этот номер: у sms.ru
+        # статус по каждому номеру отдельный (ревью 2026-10-06, BE-38).
+        for phone_status in (data.get("sms") or {}).values():
+            if isinstance(phone_status, dict) and phone_status.get("status") != "OK":
+                logger.error(
+                    "sms.ru rejected phone: status_code=%s",
+                    phone_status.get("status_code"),
+                )
+                raise SMSDeliveryError(
+                    f"sms.ru status_code={phone_status.get('status_code')}"
+                )
 
 
 # Singleton: провайдер не хранит состояние запроса, создавать на каждый

@@ -6,11 +6,11 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from contextlib import asynccontextmanager
 from sqlalchemy import text
-from app.config import settings
+from app.config import production_problems, settings
 from app.database import engine
 from app.logging_config import setup_logging
 from app.middleware.csrf import CSRFMiddleware
-from app.middleware.error_handler import register_error_handlers
+from app.middleware.error_handler import UnhandledErrorMiddleware, register_error_handlers
 from app.middleware.idempotency import IdempotencyMiddleware
 from app.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.middleware.request_id import RequestIdMiddleware
@@ -19,6 +19,7 @@ from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.routers import (
     ads,
     auth,
+    captcha,
     checkin,
     classifieds,
     documents,
@@ -42,8 +43,10 @@ from app.routers.admin import references as admin_references
 from app.routers.admin import analytics as admin_analytics
 from app.routers.admin import moderation as admin_moderation
 from app.routers.admin import upload_quotas as admin_upload_quotas
+from app.routers.admin import security as admin_security
 from app.redis import init_redis, close_redis
 from app.services.rabbit import rabbit_service
+from app.middleware.metrics import MetricsMiddleware
 from app.services.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
@@ -55,6 +58,15 @@ async def lifespan(app: FastAPI):
     # log-сообщения уже шли в выбранный формат (JSON в prod, текст в dev).
     # Идемпотентно: переинициализация при reload не дублирует хендлеры.
     setup_logging()
+    # Ревью 2026-10-06, BE-38: опасная prod-конфигурация видна при старте,
+    # а не на первом запросе пользователя.
+    problems = production_problems(settings)
+    for problem in problems:
+        logger.critical("Небезопасная конфигурация: %s", problem)
+    if problems and settings.strict_config:
+        raise RuntimeError(
+            "STRICT_CONFIG=true: исправьте конфигурацию — " + "; ".join(problems)
+        )
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -84,16 +96,26 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Scheduler failed to start: %s", e)
     yield
-    await engine.dispose()
-    await close_redis()
-    try:
-        await rabbit_service.close()
-    except Exception as e:
-        logger.warning("RabbitMQ close failed: %s", e)
+    await shutdown_resources()
+
+
+async def shutdown_resources() -> None:
+    """
+    Остановка в обратном порядке зависимостей (ревью 2026-10-06, BE-31):
+    сначала планировщик — его задачи пользуются БД, Redis и Rabbit; пул БД
+    закрывается последним. Раньше engine.dispose() шёл первым, и cron-задача,
+    работавшая в момент остановки, получала закрытый пул.
+    """
     try:
         await stop_scheduler()
     except Exception as e:
         logger.warning("Scheduler stop failed: %s", e)
+    try:
+        await rabbit_service.close()
+    except Exception as e:
+        logger.warning("RabbitMQ close failed: %s", e)
+    await close_redis()
+    await engine.dispose()
 
 
 def _docs_settings(debug: bool) -> dict[str, str | None]:
@@ -145,7 +167,12 @@ register_error_handlers(app)
 #                       client IP до того, как rate-limit/ad-fraud его
 #                       прочитают.
 #   7. TrustedHost    — тоже сетевой: отбиваем Host injection раньше всех.
+# Самый внутренний: необработанное исключение → JSON 500, который ещё
+# проходит через RequestId/CORS/SecurityHeaders (ревью 2026-10-06, BE-22).
+app.add_middleware(UnhandledErrorMiddleware)
 app.add_middleware(RequestIdMiddleware)
+# Метрики 5xx и медленных запросов — до остальных, чтобы видеть итоговый статус.
+app.add_middleware(MetricsMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(SanitizationMiddleware)
 app.add_middleware(IdempotencyMiddleware)
@@ -183,6 +210,7 @@ if settings.cors_allow_origins:
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(captcha.router)
 # Feature flags: публичный GET для фронта + админ-переключатель. Гейтинг
 # роутов делает require_flag из app.services.feature_flags.
 app.include_router(feature_flags.router)
@@ -218,6 +246,7 @@ app.include_router(ads.router)
 app.include_router(admin_analytics.router)
 app.include_router(admin_analytics.show_report_router)
 app.include_router(admin_moderation.router)
+app.include_router(admin_security.router)
 # Этап 11: онлайн-поддержка (тикеты + WebSocket чат).
 app.include_router(support.router)
 # Этап 17: блог (публичный read + write для admin/organizer).

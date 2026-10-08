@@ -162,6 +162,9 @@ class EmailTaskMessage(BaseModel):
     # text_body — fallback для клиентов без HTML. Заполняется простым
     # текстом из шаблона.
     text_body: str | None = None
+    # Номер повторной попытки (ревью 2026-10-06, BE-20): 0 — первая
+    # отправка; при временной ошибке SMTP воркер ставит повтор с attempt+1.
+    attempt: int = 0
 
     def to_json(self) -> str:
         return self.model_dump_json()

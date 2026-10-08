@@ -260,3 +260,61 @@ async def test_prefix_isolation(fake_redis):
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------
+# Ревью 2026-10-06, BE-21
+# ---------------------------------------------------------------------
+
+
+async def test_listener_resubscribes_after_crash(fake_redis, manager, monkeypatch):
+    """Кратковременный сбой Redis не должен навсегда отключать доставку:
+    раньше упавший listener оставался в _subscriptions мёртвым, и сообщения
+    не доходили, пока все сокеты ключа не переподключатся."""
+    monkeypatch.setattr("app.services.ws_manager.RESUBSCRIBE_DELAY_SECONDS", 0.01, raising=False)
+    ticket = uuid.uuid4()
+    ws = _FakeWS()
+    crashed = {"done": False}
+    original_pubsub = fake_redis.pubsub
+
+    def flaky_pubsub():
+        ps = original_pubsub()
+        if not crashed["done"]:
+            crashed["done"] = True
+
+            def broken_listen():
+                async def _gen():
+                    raise ConnectionError("redis blip")
+                    yield  # pragma: no cover
+
+                return _gen()
+
+            ps.listen = broken_listen  # type: ignore[method-assign]
+        return ps
+
+    fake_redis.pubsub = flaky_pubsub  # type: ignore[method-assign]
+    await manager.connect(ticket, ws)
+    await _wait_for(lambda: fake_redis.subscriber_count(f"support:{ticket}") == 1)
+
+    await manager.publish(ticket, {"body": "после сбоя"})
+    await _wait_for(lambda: ws.sent == [{"body": "после сбоя"}])
+
+
+async def test_slow_socket_does_not_block_others(fake_redis, manager, monkeypatch):
+    """Рассылка параллельная и с таймаутом: зависший клиент не задерживает
+    остальных и отключается."""
+    monkeypatch.setattr("app.services.ws_manager.SEND_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    class _StuckWS(_FakeWS):
+        async def send_json(self, payload):
+            await asyncio.sleep(10)
+
+    ticket = uuid.uuid4()
+    stuck, fast = _StuckWS(), _FakeWS()
+    await manager.connect(ticket, stuck)
+    await manager.connect(ticket, fast)
+    started = asyncio.get_event_loop().time()
+    await manager._broadcast_local(ticket, {"body": "x"})
+    assert asyncio.get_event_loop().time() - started < 1
+    assert fast.sent == [{"body": "x"}]
+    assert stuck not in manager._connections.get(ticket, set())

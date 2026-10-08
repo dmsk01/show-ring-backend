@@ -6,25 +6,33 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, is_admin
+from app.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    is_admin,
+    user_rate_limit,
+)
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.classified import (
     AnimalAvailability,
     ClassifiedCategory,
     ClassifiedStatus,
 )
+from app.models.classified import Classified
 from app.models.dog import SexEnum
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE, cap_per_page
 from app.redis import get_redis
 from app.repositories import classified as repo
 from app.schemas.classified import (
+    ClassifiedContacts,
     ClassifiedCreate,
     ClassifiedImageCreate,
     ClassifiedPage,
@@ -32,6 +40,12 @@ from app.schemas.classified import (
     ClassifiedUpdate,
 )
 from app.services import classified as svc
+from app.services import consent as consent_svc
+from app.utils.public_contacts import (
+    REVEAL_LIMIT_PER_HOUR,
+    contacts_or_none,
+    hide_private_contacts,
+)
 
 router = APIRouter(prefix="/classifieds", tags=["classifieds"])
 
@@ -42,7 +56,7 @@ router = APIRouter(prefix="/classifieds", tags=["classifieds"])
 _is_admin = is_admin
 
 
-def _raise_for_error(err: ValueError) -> None:
+def _raise_for_error(err: ValueError) -> NoReturn:
     code = str(err)
     if code == "not_found":
         raise HTTPException(404, code)
@@ -58,23 +72,53 @@ def _raise_for_error(err: ValueError) -> None:
     raise HTTPException(400, code)
 
 
+def _public(obj: Classified, viewer: User | None) -> ClassifiedResponse:
+    """Ответ для публичных ручек: контакты — только с согласия (ст. 10.1)."""
+    return hide_private_contacts(
+        ClassifiedResponse.model_validate(obj),
+        owner_id=obj.author_id,
+        contacts_public=obj.contacts_public,
+        viewer=viewer,
+    )
+
+
+async def _sync_contacts_consent(
+    db: AsyncSession, request: Request, obj: Classified
+) -> None:
+    await consent_svc.set_publication_consent(
+        db,
+        obj.author_id,
+        consent_svc.ConsentKind.public_classified_contacts,
+        obj.id,
+        obj.contacts_public,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    await db.commit()
+
+
 @router.post(
     "",
     response_model=ClassifiedResponse,
+    dependencies=[Depends(user_rate_limit("create:classified", limit=20, window=3600))],
     status_code=status.HTTP_201_CREATED,
     summary="Создать объявление",
 )
 async def create_classified(
+    request: Request,
     body: ClassifiedCreate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.create_classified(
+    obj = await svc.create_classified(
         db,
         author_id=user.id,
         is_admin=_is_admin(user),
         fields=body.model_dump(),
     )
+    if obj.contacts_public:
+        await _sync_contacts_consent(db, request, obj)
+    return obj
 
 
 # Внимание: /search обязательно ДО /{classified_id}, иначе FastAPI
@@ -96,7 +140,9 @@ async def search_classifieds(
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     # bug_213 audit 2026-05-28: FTS-запрос с 200-символьным q
     # запускает PostgreSQL to_tsquery + GIN-поиск — CPU-стоит. Для
     # анонимного эндпоинта это вектор DoS на каждый запрос.
@@ -111,7 +157,7 @@ async def search_classifieds(
     items = await repo.search_classifieds(db, q, page=page, per_page=per_page)
     total = await repo.count_search_results(db, q)
     return ClassifiedPage(
-        items=[ClassifiedResponse.model_validate(x) for x in items],
+        items=[_public(x, viewer) for x in items],
         total=total,
         page=page,
         per_page=per_page,
@@ -142,7 +188,9 @@ async def list_classifieds(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE)
     items = await repo.list_classifieds(
         db,
         category=category,
@@ -171,7 +219,7 @@ async def list_classifieds(
         price_to=price_to,
     )
     return ClassifiedPage(
-        items=[ClassifiedResponse.model_validate(x) for x in items],
+        items=[_public(x, viewer) for x in items],
         total=total,
         page=page,
         per_page=per_page,
@@ -241,6 +289,7 @@ async def list_my_classifieds(
 async def get_classified(
     classified_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
     obj = await repo.get_classified(db, classified_id, with_images=True)
     if obj is None:
@@ -255,7 +304,33 @@ async def get_classified(
     # images) в async-контексте, как это уже делают create/update.
     obj = await repo.get_classified(db, classified_id, with_images=True)
     assert obj is not None  # invariant: только что инкрементировали — точно есть
-    return obj
+    return _public(obj, viewer)
+
+
+@router.get(
+    "/{classified_id}/contacts",
+    response_model=ClassifiedContacts,
+    summary="Показать контакты автора объявления",
+    description=(
+        "Контакты — отдельным запросом по кнопке, лимит 30 в час с IP. "
+        "404 — автор не дал согласия на распространение или контактов нет."
+    ),
+)
+async def get_classified_contacts(
+    request: Request,
+    classified_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    viewer: User | None = Depends(get_current_user_optional),
+):
+    await check_rate_limit(
+        request, REVEAL_LIMIT_PER_HOUR, 3600, redis, bucket="contacts:reveal"
+    )
+    obj = await repo.get_classified(db, classified_id, with_images=False)
+    data = contacts_or_none(obj, viewer=viewer) if obj is not None else None
+    if data is None:
+        raise HTTPException(404, "contacts_not_found")
+    return ClassifiedContacts(**data)
 
 
 @router.put(
@@ -264,21 +339,33 @@ async def get_classified(
     summary="Обновить объявление",
 )
 async def update_classified(
+    request: Request,
     classified_id: uuid.UUID,
     body: ClassifiedUpdate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    fields = body.model_dump(exclude_unset=True)
+    if fields.get("contacts_public", False) is None:
+        fields.pop("contacts_public")
+    if fields.get("contacts_public") is True:
+        # Согласие на распространение даёт только автор (субъект ПДн).
+        current = await repo.get_classified(db, classified_id)
+        if current is not None and current.author_id != user.id:
+            raise HTTPException(403, "consent_owner_only")
     try:
-        return await svc.update_classified(
+        obj = await svc.update_classified(
             db,
             classified_id=classified_id,
             requester_id=user.id,
             is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
+            fields=fields,
         )
     except ValueError as e:
         _raise_for_error(e)
+    if "contacts_public" in fields:
+        await _sync_contacts_consent(db, request, obj)
+    return obj
 
 
 @router.post(

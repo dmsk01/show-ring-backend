@@ -1,33 +1,24 @@
 """
-Роутер задач (объединённый: legacy учебный + этап 8 DB-tasks).
+Роутер задач генерации документов (этап 8, DB-backed).
 
 Маршруты:
-- POST /tasks/send                — учебный publish в очередь (in-memory storage).
-- PUT  /tasks/{id}/status         — учебный update от воркера (legacy book_handler).
-- GET  /tasks/{id}                — статус задачи. Сначала ищем в БД (этап 8),
-                                    fallback на in-memory (legacy).
-- GET  /tasks/{id}/download       — скачать PDF из MinIO по file_id из task.result.
+- GET  /tasks/{id}           — статус задачи (автор или admin).
+- GET  /tasks/{id}/download  — скачать PDF из MinIO по file_id из task.result.
 
-Зачем смешивать legacy и DB:
-- Старый учебный пример с book_handler работает через in-memory storage.
-- Новые задачи генерации документов — через БД.
-- Один публичный путь /tasks/{id} удобнее для клиента: он не должен знать,
-  какая задача через какой механизм идёт. В коде сначала проверяем БД,
-  если нет — отдаём legacy.
+Ревью 2026-10-06, BE-35: учебные POST /tasks/send и PUT /tasks/{id}/status
+с in-memory хранилищем удалены — состояние в памяти процесса на нескольких
+uvicorn-воркерах было неконсистентным.
 """
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user, is_admin
 from app.models.file import UploadedFile
@@ -35,50 +26,12 @@ from app.models.task import TaskStatusEnum
 from app.models.user import User
 from app.repositories import task as task_repo
 from app.schemas.task import (
-    StatusUpdateRequest,
     TaskResponse,
-    TaskStatusResponse,
 )
 from app.services import file_storage
-from app.services.rabbit import rabbit_service
-from app.services.task_storage import task_storage
-
-
-class TaskSendRequest(BaseModel):
-    message: str
 
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
-
-
-def verify_internal_key(x_api_key: str = Header(default="")):
-    # secrets.compare_digest — защита от timing attack при сравнении ключей.
-    expected = settings.internal_api_key
-    if not expected or not secrets.compare_digest(x_api_key, expected):
-        raise HTTPException(status_code=403, detail="Invalid API key")
-
-
-# ---------------------------------------------------------------------
-# Legacy (учебный пример book_handler)
-# ---------------------------------------------------------------------
-
-
-@router.post("/send", dependencies=[Depends(verify_internal_key)])
-async def send_task(body: TaskSendRequest):
-    # Учебный эндпоинт для книжного хендлера — оставлен ради
-    # совместимости с примером из этапов 1–2.
-    await rabbit_service.publish("tasks", body.message)
-    return {"status": "Message sent to RabbitMQ", "message": body.message}
-
-
-@router.put("/{task_id}/status", dependencies=[Depends(verify_internal_key)])
-def update_task_status(task_id: str, request: StatusUpdateRequest):
-    # Legacy update — пишет в in-memory storage. Новые задачи (этап 8)
-    # обновляют статус сами в БД, через app.repositories.task.
-    response = task_storage.update_status(
-        task_id, request.status, request.result, request.error
-    )
-    return response
 
 
 # ---------------------------------------------------------------------
@@ -90,37 +43,24 @@ def update_task_status(task_id: str, request: StatusUpdateRequest):
     "/{task_id}",
     summary="Статус задачи",
     description=(
-        "Возвращает статус задачи. Сначала ищем в БД (новые задачи генерации "
-        "документов), при отсутствии — fallback на in-memory storage (legacy)."
+        "Возвращает статус задачи генерации документа. Доступно автору "
+        "задачи или admin."
     ),
 )
 async def get_task_status(
-    task_id: str,
+    task_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-) -> TaskResponse | TaskStatusResponse:
-    # 1. БД-задачи (этап 8). UUID-проверка через try/except: если task_id
-    # не UUID, это точно legacy-задача с произвольной строкой ID.
-    try:
-        uid = uuid.UUID(task_id)
-    except ValueError:
-        uid = None
-
-    if uid is not None:
-        db_task = await task_repo.get_task(db, uid)
-        if db_task is not None:
-            # ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #14): ручка была
-            # публичной и отдавала payload/result/created_by любому, кто
-            # знает UUID задачи. ACL — как у /download: автор или admin.
-            if not is_admin(user) and db_task.created_by != user.id:
-                raise HTTPException(403, "forbidden")
-            return TaskResponse.model_validate(db_task)
-
-    # 2. Legacy in-memory.
-    legacy = task_storage.get_status(task_id)
-    if legacy is None:
+) -> TaskResponse:
+    db_task = await task_repo.get_task(db, task_id)
+    if db_task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return legacy
+    # ИСПРАВЛЕНО (ревью безопасности 2026-10-03, #14): ручка была
+    # публичной и отдавала payload/result/created_by любому, кто
+    # знает UUID задачи. ACL — как у /download: автор или admin.
+    if not is_admin(user) and db_task.created_by != user.id:
+        raise HTTPException(403, "forbidden")
+    return TaskResponse.model_validate(db_task)
 
 
 # ИСПРАВЛЕНО (review 2026-05-28): см. routers/classifieds.py.

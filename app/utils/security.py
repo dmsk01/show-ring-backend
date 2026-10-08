@@ -1,12 +1,26 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import secrets
 import hashlib
-from passlib.context import CryptContext
-from jose import jwt
+import bcrypt
+import jwt
 
 from app.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Ревью 2026-10-06, BE-29: python-jose и passlib не поддерживаются (passlib
+# держал bcrypt<4.1). Теперь PyJWT и bcrypt напрямую; хэши $2b$ те же —
+# миграция паролей не нужна. JWTError — единый тип ошибки токена для
+# вызывающего кода (раньше jose.JWTError).
+JWTError = jwt.PyJWTError
+
+# bcrypt хэширует только первые 72 байта. passlib молча обрезал длиннее —
+# так же поступаем и мы, чтобы старые хэши таких паролей проверялись
+# (новые пароли >72 байт отсекает validate_password).
+_BCRYPT_MAX_BYTES = 72
+
+
+def _bcrypt_bytes(plain: str) -> bytes:
+    return plain.encode("utf-8")[:_BCRYPT_MAX_BYTES]
 
 SECRET_KEY = settings.secret_key
 ALGORITHM = "HS256"
@@ -15,7 +29,7 @@ ALGORITHM = "HS256"
 # когда пользователь не найден. Без него длительность ответа выдавала
 # существование email (timing attack → user enumeration).
 #
-# ИСПРАВЛЕНО (review 2026-05-28): раньше pwd_context.hash вычислялся на
+# ИСПРАВЛЕНО (review 2026-05-28): раньше хэш вычислялся на
 # импорте модуля и стоил ~250 мс CPU. Этот файл импортируется из всего
 # app (через app.dependencies, app.services.auth), и налог платился
 # каждым процессом API/worker'а на холодном старте + каждым pytest-
@@ -27,11 +41,15 @@ _DUMMY_BCRYPT_HASH: str | None = None
 
 # Группа 1 — Пароли
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    return bcrypt.hashpw(_bcrypt_bytes(plain), bcrypt.gensalt()).decode("ascii")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(_bcrypt_bytes(plain), hashed.encode("ascii"))
+    except ValueError:
+        # Битый/неизвестный формат хэша — не совпадение, а не 500.
+        return False
 
 
 def dummy_verify_password() -> None:
@@ -39,8 +57,25 @@ def dummy_verify_password() -> None:
     # время ответа с реальной bcrypt-верификацией.
     global _DUMMY_BCRYPT_HASH
     if _DUMMY_BCRYPT_HASH is None:
-        _DUMMY_BCRYPT_HASH = pwd_context.hash("dummy-password-for-timing")
-    pwd_context.verify("dummy-password-for-timing", _DUMMY_BCRYPT_HASH)
+        _DUMMY_BCRYPT_HASH = hash_password("dummy-password-for-timing")
+    verify_password("dummy-password-for-timing", _DUMMY_BCRYPT_HASH)
+
+
+# Async-обёртки (ревью 2026-10-06, BE-08): bcrypt — сотни миллисекунд чистого
+# CPU. Синхронный вызов из async-обработчика замораживал весь процесс
+# uvicorn (другие запросы, WebSocket) на время каждой проверки пароля.
+# В async-коде вызываем только эти обёртки — работа уходит в thread pool
+# (bcrypt отпускает GIL, потоки действительно параллельны).
+async def hash_password_async(plain: str) -> str:
+    return await asyncio.to_thread(hash_password, plain)
+
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    return await asyncio.to_thread(verify_password, plain, hashed)
+
+
+async def dummy_verify_password_async() -> None:
+    await asyncio.to_thread(dummy_verify_password)
 
 
 def validate_password(password: str) -> None:
@@ -78,8 +113,7 @@ def decode_access_token(token: str) -> dict:
         options={
             "verify_signature": True,
             "verify_exp": True,
-            "require_exp": True,
-            "require_sub": True,
+            "require": ["exp", "sub"],
         },
     )
 

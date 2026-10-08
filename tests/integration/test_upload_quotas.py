@@ -17,6 +17,7 @@ from app.models.file import UploadedFile
 from app.models.user import RoleEnum, User, UserRole
 from app.repositories.user import get_user_by_id, get_user_by_phone
 from app.services import otp_auth
+from app.services.consent import ACCOUNT_KINDS
 from app.services.upload_quota import (
     UploadQuotaExceeded,
     check_upload_quota,
@@ -33,7 +34,7 @@ def _auth(token: str) -> dict:
 async def _make_user(client) -> tuple[uuid.UUID, str]:
     """Регистрирует + логинит email-юзера (is_email_verified=False)."""
     email = f"uq_{uuid.uuid4().hex[:10]}@example.com"
-    await client.post("/auth/register", json={"email": email, "password": PASSWORD})
+    await client.post("/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True})
     r = await client.post(
         "/auth/login",
         json={"email": email, "password": PASSWORD},
@@ -60,7 +61,9 @@ async def test_otp_sets_is_phone_verified(db_session, test_redis):
     code = "123456"
     await test_redis.set(f"otp:login:code:{phone}", hash_token(code))
 
-    await otp_auth.verify_otp_code(db_session, test_redis, phone, code)
+    await otp_auth.verify_otp_code(
+        db_session, test_redis, phone, code, consents=ACCOUNT_KINDS
+    )
 
     user = await get_user_by_phone(db_session, phone)
     assert user is not None

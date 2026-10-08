@@ -4,7 +4,7 @@
 Главные операции:
 - enqueue: вставить event в той же транзакции, что и бизнес-операция
   (без commit — он делается вызывающим кодом).
-- fetch_pending: забрать N pending для воркера (SELECT FOR UPDATE
+- claim_pending: «застолбить» N pending для воркера (SELECT FOR UPDATE
   SKIP LOCKED — позволяет нескольким воркерам работать параллельно
   без race condition).
 - mark_sent / mark_failed: терминальные переходы.
@@ -13,10 +13,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.outbox import OutboxEvent, OutboxStatus
@@ -28,6 +28,7 @@ async def enqueue(
     exchange: str | None,
     routing_key: str,
     payload: dict,
+    delay: timedelta | None = None,
 ) -> OutboxEvent:
     """
     Создаёт outbox-запись. БЕЗ commit — вызывающий код коммитит
@@ -39,32 +40,52 @@ async def enqueue(
         exchange=exchange,
         routing_key=routing_key,
         payload=payload,
+        # Отложенная публикация (повторы с backoff): claim_pending не берёт
+        # событие, пока locked_until в будущем.
+        locked_until=(datetime.now(timezone.utc) + delay) if delay else None,
     )
     db.add(obj)
     await db.flush()
     return obj
 
 
-async def fetch_pending(
+# Сколько dispatcher держит застолблённую пачку. С запасом больше времени
+# публикации пачки; после истечения событие снова доступно (dispatcher упал).
+CLAIM_TTL = timedelta(seconds=60)
+
+
+async def claim_pending(
     db: AsyncSession, limit: int = 100
 ) -> Sequence[OutboxEvent]:
     """
-    SELECT FOR UPDATE SKIP LOCKED — берёт строки, минуя те, что
-    залочены другими транзакциями. Так несколько worker-инстансов
-    могут работать параллельно без race condition: каждый возьмёт
-    свой кусок.
+    «Застолбить» пачку pending-событий: проставить locked_until и вернуть
+    их. БЕЗ commit — вызывающий коммитит сразу, до публикации.
 
-    Если воркер один — SKIP LOCKED не вредит, просто работает как
-    обычный SELECT FOR UPDATE.
+    Ревью 2026-10-06, BE-18: FOR UPDATE SKIP LOCKED держал строки только
+    до первого commit'а внутри пачки, и второй dispatcher мог опубликовать
+    остаток повторно. locked_until переживает commit'ы: второй dispatcher
+    такие строки не берёт, пока срок не истёк.
     """
-    stmt = (
-        select(OutboxEvent)
-        .where(OutboxEvent.status == OutboxStatus.pending)
+    now = datetime.now(timezone.utc)
+    candidates = (
+        select(OutboxEvent.id)
+        .where(
+            OutboxEvent.status == OutboxStatus.pending,
+            or_(OutboxEvent.locked_until.is_(None), OutboxEvent.locked_until < now),
+        )
         .order_by(OutboxEvent.created_at.asc())
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
-    return (await db.execute(stmt)).scalars().all()
+    stmt = (
+        update(OutboxEvent)
+        .where(OutboxEvent.id.in_(candidates.scalar_subquery()))
+        .values(locked_until=now + CLAIM_TTL)
+        .returning(OutboxEvent)
+        .execution_options(synchronize_session=False)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return sorted(rows, key=lambda e: e.created_at)
 
 
 async def mark_sent(db: AsyncSession, event_id: uuid.UUID) -> None:
@@ -111,6 +132,8 @@ async def increment_attempts(
         .values(
             attempts=OutboxEvent.attempts + 1,
             last_error=error[:2000],
+            # Снимаем «застолбление» — следующий тик повторит попытку.
+            locked_until=None,
         )
     )
     await db.execute(stmt)

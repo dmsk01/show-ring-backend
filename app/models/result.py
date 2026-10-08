@@ -165,9 +165,9 @@ class DogTitle(Base):
     )
     dog_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        # CASCADE — если собака удалена, её титулы тоже исчезают.
-        # Историческая ценность невелика без самой собаки.
-        ForeignKey("dogs.id", ondelete="CASCADE"),
+        # RESTRICT (ревью 2026-10-06, BE-10): титул — юридически значимая
+        # история выставки; собаку с титулами удалить нельзя.
+        ForeignKey("dogs.id", ondelete="RESTRICT"),
         index=True,
     )
     title_id: Mapped[uuid.UUID] = mapped_column(

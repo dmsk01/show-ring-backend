@@ -15,9 +15,11 @@
   otp:{purpose}:attempts:{subject} — счётчик попыток ввода (INCR атомарен)
   otp:daily:{phone}                — суточный счётчик отправок на номер,
                                      ОБЩИЙ для всех целей (анти SMS-pumping)
+  otp:budget:{YYYY-MM-DD}          — счётчик SMS на весь сервис за сутки (UTC)
 """
 
 import enum
+from datetime import datetime, timezone
 import logging
 import secrets
 
@@ -28,12 +30,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.repositories import user as user_repo
 from app.schemas.user import TokenResponse
+from app.services import consent as consent_svc
+from app.services import security_metrics
 from app.services.auth import issue_token_pair
 from app.services.sms import SMSProvider
+from app.utils.log_mask import mask_phone
 from app.utils.security import hash_token
 
 logger = logging.getLogger(__name__)
 security_logger = logging.getLogger("app.security")
+
+
+def _mask_subject(subject: str) -> str:
+    """subject OTP — номер телефона (вход) или user_id (reauth); номер
+    маскируем (ревью 2026-10-06, BE-12), id оставляем для корреляции."""
+    return mask_phone(subject) if subject.startswith("+") else subject
 
 
 class OTPPurpose(str, enum.Enum):
@@ -51,6 +62,14 @@ _SMS_TEXT = {
 
 class OTPRateLimitedError(Exception):
     """Повторная отправка раньше cooldown / суточный потолок. → 429"""
+
+
+class OTPCountryNotAllowedError(Exception):
+    """Номер вне белого списка стран (sms_allowed_phone_prefixes). → 400"""
+
+
+class SMSBudgetExceededError(Exception):
+    """Исчерпан суточный бюджет SMS на весь сервис. → 503"""
 
 
 class OTPExpiredError(Exception):
@@ -83,6 +102,41 @@ def _daily_key(phone: str) -> str:
     return f"otp:daily:{phone}"
 
 
+def _budget_key() -> str:
+    return f"otp:budget:{datetime.now(timezone.utc):%Y-%m-%d}"
+
+
+# Доли бюджета, на которых пишем предупреждение (сигнал для оповещения).
+_BUDGET_ALERT_SHARES = (0.5, 0.8, 1.0)
+
+
+def _phone_allowed(phone: str) -> bool:
+    prefixes = settings.sms_allowed_phone_prefixes
+    return not prefixes or any(phone.startswith(p) for p in prefixes)
+
+
+async def _spend_budget(redis: Redis) -> None:
+    """Учесть одно SMS в суточном бюджете сервиса; сверх него — отказ."""
+    budget = settings.sms_daily_budget
+    if budget <= 0:
+        return
+    key = _budget_key()
+    used = await redis.incr(key)
+    if used == 1:
+        # Двое суток — ключ гарантированно переживает смену даты.
+        await redis.expire(key, 2 * 86400)
+    for share in _BUDGET_ALERT_SHARES:
+        if used == max(1, int(budget * share)):
+            security_logger.warning(
+                "sms_budget_threshold share=%.0f%% used=%s budget=%s",
+                share * 100,
+                used,
+                budget,
+            )
+    if used > budget:
+        raise SMSBudgetExceededError
+
+
 def _generate_code() -> str:
     # secrets (не random): криптографический RNG. Ведущие нули сохраняем
     # форматированием — код всегда фиксированной длины.
@@ -104,6 +158,11 @@ async def send_otp_code(
     """
     subject = subject or phone
 
+    # 0. Белый список стран — до всех счётчиков: чужой номер ничего не тратит.
+    if not _phone_allowed(phone):
+        security_logger.warning("otp_country_blocked phone=%s", mask_phone(phone))
+        raise OTPCountryNotAllowedError
+
     # 1. Cooldown: SET NX EX атомарен — из двух параллельных запросов
     #    SMS отправит ровно один.
     ok = await redis.set(
@@ -114,7 +173,7 @@ async def send_otp_code(
     )
     if not ok:
         security_logger.info(
-            "otp_send_cooldown purpose=%s phone=%s", purpose.value, phone
+            "otp_send_cooldown purpose=%s phone=%s", purpose.value, mask_phone(phone)
         )
         raise OTPRateLimitedError
 
@@ -124,8 +183,16 @@ async def send_otp_code(
     if daily == 1:
         await redis.expire(_daily_key(phone), 86400)
     if daily > settings.otp_daily_limit:
-        security_logger.warning("otp_daily_limit phone=%s", phone)
+        security_logger.warning("otp_daily_limit phone=%s", mask_phone(phone))
         raise OTPRateLimitedError
+
+    # 2a. Общий бюджет SMS на сервис: последний рубеж, если накрутка идёт
+    #     по множеству номеров с множества IP.
+    try:
+        await _spend_budget(redis)
+    except SMSBudgetExceededError:
+        security_logger.error("sms_budget_exceeded phone=%s", mask_phone(phone))
+        raise
 
     # 3. Новый код перезаписывает старый (валиден только последний),
     #    счётчик попыток обнуляется.
@@ -140,13 +207,14 @@ async def send_otp_code(
     # 4. Отправка. Сбой провайдера пробрасывается (роутер → 502);
     #    cooldown при этом остаётся — клиент не должен долбить ретраями.
     await sms.send(phone, _SMS_TEXT[purpose].format(code=code))
+    await security_metrics.record(security_metrics.SMS_SENT, redis=redis)
 
     if settings.debug:
         # Dev-flow без SMS-шлюза: код в логе. В проде — никогда.
         logger.info("[DEV] OTP %s for %s: %s", purpose.value, phone, code)
     else:
         security_logger.info(
-            "otp_sent purpose=%s phone=%s", purpose.value, phone
+            "otp_sent purpose=%s phone=%s", purpose.value, mask_phone(phone)
         )
 
 
@@ -161,7 +229,7 @@ async def consume_otp_code(
     stored_hash = await redis.get(code_key)
     if stored_hash is None:
         security_logger.info(
-            "otp_verify_no_code purpose=%s subject=%s", purpose.value, subject
+            "otp_verify_no_code purpose=%s subject=%s", purpose.value, _mask_subject(subject)
         )
         raise OTPExpiredError
 
@@ -175,7 +243,7 @@ async def consume_otp_code(
     if attempts > settings.otp_max_attempts:
         await redis.delete(code_key, attempts_key)
         security_logger.warning(
-            "otp_brute_force purpose=%s subject=%s", purpose.value, subject
+            "otp_brute_force purpose=%s subject=%s", purpose.value, _mask_subject(subject)
         )
         raise OTPExpiredError
 
@@ -191,13 +259,13 @@ async def consume_otp_code(
             security_logger.warning(
                 "otp_attempts_exhausted purpose=%s subject=%s",
                 purpose.value,
-                subject,
+                _mask_subject(subject),
             )
         else:
             security_logger.info(
                 "otp_wrong_code purpose=%s subject=%s attempt=%s",
                 purpose.value,
-                subject,
+                _mask_subject(subject),
                 attempts,
             )
         raise OTPInvalidError
@@ -209,21 +277,39 @@ async def consume_otp_code(
     await redis.delete(attempts_key)
     if consumed == 0:
         security_logger.warning(
-            "otp_verify_race purpose=%s subject=%s", purpose.value, subject
+            "otp_verify_race purpose=%s subject=%s", purpose.value, _mask_subject(subject)
         )
         raise OTPExpiredError
+    await security_metrics.record(security_metrics.OTP_VERIFIED, redis=redis)
 
 
 async def verify_otp_code(
-    db: AsyncSession, redis: Redis, phone: str, code: str
+    db: AsyncSession,
+    redis: Redis,
+    phone: str,
+    code: str,
+    *,
+    consents: tuple[consent_svc.ConsentKind, ...] = (),
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> tuple[TokenResponse, bool]:
-    """Вход/регистрация по коду цели login. Возвращает (токены, is_new_user)."""
+    """
+    Вход/регистрация по коду цели login. Возвращает (токены, is_new_user).
+
+    consents — отметки, поставленные в форме входа. Новый аккаунт создаётся
+    только со всеми обязательными (ConsentRequiredError). Проверка — ПОСЛЕ
+    сжигания кода: иначе по ответу без кода можно было бы узнать, занят ли
+    номер (enumeration). Фронт не даёт отправить форму без отметок, так что
+    код сгорает только у нестандартного клиента.
+    """
     await consume_otp_code(redis, code, purpose=OTPPurpose.login, subject=phone)
 
     # Find-or-create: подтверждённый номер = аутентифицированный
     # пользователь; отдельного шага «регистрация» нет.
     is_new_user = False
     user = await user_repo.get_user_by_phone(db, phone)
+    if user is None and not set(consent_svc.ACCOUNT_KINDS) <= set(consents):
+        raise consent_svc.ConsentRequiredError
     if user is None:
         try:
             user = await user_repo.create_user_by_phone(db, phone)
@@ -245,6 +331,9 @@ async def verify_otp_code(
     # Идемпотентно: повторный вход не плодит лишних UPDATE.
     if not user.is_phone_verified:
         user.is_phone_verified = True
+
+    for kind in consents:
+        await consent_svc.grant(db, user.id, kind, ip=ip, user_agent=user_agent)
 
     security_logger.info("otp_login_success user_id=%s", user.id)
     tokens = await issue_token_pair(db, user)

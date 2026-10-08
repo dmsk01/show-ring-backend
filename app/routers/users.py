@@ -15,8 +15,10 @@ from app.repositories.user import (
     get_user_by_id,
     upsert_profile,
 )
+from app.schemas.consent import ConsentGrantRequest, ConsentItem, ConsentsResponse
 from app.schemas.dog import DogPage, DogResponse
 from app.schemas.user import (
+    AccountDeleteRequest,
     EmailLoginCreate,
     PasswordChange,
     PhoneSendCodeRequest,
@@ -35,8 +37,14 @@ from app.services.account_security import (
     send_reauth_code,
     verify_link_phone,
 )
+from app.services import consent as consent_svc
+from app.services.account_deletion import delete_account
 from app.services.auth import change_password, request_email_change
-from app.services.otp_auth import OTPRateLimitedError
+from app.services.otp_auth import (
+    OTPCountryNotAllowedError,
+    OTPRateLimitedError,
+    SMSBudgetExceededError,
+)
 from app.services.sms import SMSDeliveryError, SMSProvider, get_sms_provider
 
 # Отдельный логгер security-событий, чтобы можно было направлять в SIEM
@@ -143,6 +151,10 @@ async def _send_otp_or_http(coro) -> dict:
     # Маппинг ошибок отправки — как у /auth/send-code.
     try:
         await coro
+    except OTPCountryNotAllowedError:
+        raise HTTPException(status_code=400, detail="country_not_supported")
+    except SMSBudgetExceededError:
+        raise HTTPException(status_code=503, detail="sms_unavailable")
     except OTPRateLimitedError:
         raise HTTPException(status_code=429, detail="too_many_requests")
     except SMSDeliveryError:
@@ -344,6 +356,122 @@ async def update_my_socials(
     profile = await upsert_profile(db, current_user.id, **fields)
     await db.commit()
     return UserSocialsResponse.model_validate(profile)
+
+
+@router.post(
+    "/me/delete",
+    summary="Удалить аккаунт",
+    description=(
+        "Обезличивает аккаунт (ст. 21 152-ФЗ): удаляет телефон, email, "
+        "профиль, объявления, обращения, подписки, сканы документов собак, "
+        "контакты питомника; собаки и результаты выставок остаются без "
+        "привязки к человеку. Подтверждение: code из "
+        "/users/me/reauth/send-code (если подтверждён телефон) или password. "
+        "409 active_shows / active_ad_campaigns — сначала завершите или "
+        "передайте выставки и кампании."
+    ),
+)
+async def delete_my_account(
+    request: Request,
+    body: AccountDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    current_user: User = Depends(get_current_user),
+):
+    await check_rate_limit(
+        request, limit=5, window=3600, redis=redis, fail_closed=True
+    )
+    await delete_account(
+        db,
+        redis,
+        current_user,
+        code=body.code,
+        password=body.password,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"message": "Аккаунт удалён"}
+
+
+# ---------------------------------------------------------------------
+# Согласия (152-ФЗ). Журнал — доказательство получения (ч. 3 ст. 9).
+# ---------------------------------------------------------------------
+
+
+async def _consents_response(db: AsyncSession, user: User) -> ConsentsResponse:
+    active = await consent_svc.list_active(db, user.id)
+    return ConsentsResponse(
+        active=[ConsentItem.model_validate(c) for c in active],
+        missing=consent_svc.missing_required(active),
+    )
+
+
+@router.get(
+    "/me/consents",
+    response_model=ConsentsResponse,
+    summary="Мои согласия",
+    description=(
+        "Действующие согласия и список обязательных, которых нет в "
+        "актуальной редакции документов (missing). Непустой missing — "
+        "фронт просит подтвердить согласие (в т.ч. после новой редакции)."
+    ),
+)
+async def get_my_consents(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await _consents_response(db, current_user)
+
+
+@router.post(
+    "/me/consents",
+    response_model=ConsentsResponse,
+    summary="Дать согласие",
+    description="Принятие актуальной редакции Соглашения и/или согласия на обработку ПДн.",
+)
+async def grant_my_consents(
+    request: Request,
+    body: ConsentGrantRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    for kind in dict.fromkeys(body.kinds):
+        await consent_svc.grant(
+            db,
+            current_user.id,
+            consent_svc.ConsentKind(kind),
+            ip=ip,
+            user_agent=user_agent,
+        )
+    await db.commit()
+    return await _consents_response(db, current_user)
+
+
+@router.delete(
+    "/me/consents/{kind}",
+    response_model=ConsentsResponse,
+    summary="Отозвать согласие",
+    description=(
+        "Отзыв согласия на обработку ПДн (ч. 2 ст. 9 152-ФЗ). Соглашение "
+        "отдельно не отзывается — отказ от него = удаление аккаунта "
+        "(400 use_account_deletion)."
+    ),
+)
+async def revoke_my_consent(
+    kind: consent_svc.ConsentKind,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if kind == consent_svc.ConsentKind.terms:
+        raise HTTPException(status_code=400, detail="use_account_deletion")
+    if kind != consent_svc.ConsentKind.personal_data:
+        # Согласия на распространение отзываются переключателем у публикации.
+        raise HTTPException(status_code=400, detail="use_publication_toggle")
+    await consent_svc.revoke(db, current_user.id, kind)
+    await db.commit()
+    return await _consents_response(db, current_user)
 
 
 @router.get(

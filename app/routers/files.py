@@ -12,7 +12,6 @@ GET  /files/{id}    — публичный — браузер сразу мож�
 
 from __future__ import annotations
 
-import logging
 import uuid
 from urllib.parse import quote
 
@@ -25,7 +24,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,40 +33,31 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.file import FileVariant, UploadedFile
 from app.models.user import User
-from app.repositories import task as task_repo
 from app.schemas.file import FileResponse, FileVariantResponse
-from app.schemas.task import TaskMessage
 from app.services import file_storage, upload_quota
-from app.services.rabbit import rabbit_service
+from app.services.task_dispatch import create_and_enqueue_task
+from app.services.task_queues import IMAGE_TASK_TYPE
 
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/files", tags=["files"])
 
-# Очередь и тип задачи обработки изображений (см. worker/main.py run_files).
-IMAGE_TASK_QUEUE = "image_task"
-IMAGE_TASK_TYPE = "process_image"
+# Публичный файл/вариант по id неизменяем — кэш на год (ревью 2026-10-06, BE-24).
+_IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+
 
 
 async def _queue_image_processing(
     db: AsyncSession, file_id: uuid.UUID, user_id: uuid.UUID | None
 ) -> None:
     """
-    Создаёт Task(process_image) и публикует в image_task. Если RabbitMQ
-    недоступен — не валим загрузку: задача осталась в БД (pending), её
-    можно перепубликовать позже.
+    Создаёт Task(process_image) и ставит его в очередь image_task через
+    transactional outbox (ревью 2026-10-06, BE-19): недоступный RabbitMQ
+    не теряет задачу и не валит загрузку.
     """
-    payload = {"file_id": str(file_id)}
-    task = await task_repo.create_task(
-        db, type_=IMAGE_TASK_TYPE, payload=payload, created_by=user_id
+    await create_and_enqueue_task(
+        db, type_=IMAGE_TASK_TYPE, payload={"file_id": str(file_id)},
+        created_by=user_id,
     )
-    message = TaskMessage(
-        task_id=task.id, action=IMAGE_TASK_TYPE, payload=payload
-    ).to_json()
-    try:
-        await rabbit_service.publish(IMAGE_TASK_QUEUE, message)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Failed to publish image task %s: %s", task.id, e)
 
 
 @router.post(
@@ -169,7 +159,7 @@ async def get_file_variant(
     return Response(
         content=body,
         media_type=content_type,
-        headers={"Content-Disposition": "inline"},
+        headers={"Content-Disposition": "inline", "Cache-Control": _IMMUTABLE_CACHE},
     )
 
 
@@ -187,18 +177,22 @@ async def get_file(file_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     # /tasks/{id}/download. См. UploadedFile.is_public (review 2026-06-01).
     if db_file is None or not db_file.is_public:
         raise HTTPException(status_code=404, detail="Файл не найден")
-    body, content_type = await file_storage.get_file_stream(db_file.s3_key)
+    # Ревью 2026-10-06, BE-24: отдаём потоком, а не читаем файл (до 10 МБ)
+    # целиком в память. Существование проверяем ДО ответа: ошибка внутри
+    # генератора всплыла бы уже после отправки статуса 200.
+    await file_storage.stat_file(db_file.s3_key)
     # ИСПРАВЛЕНО (bug_202): см. tasks.py — \r\n или " в original_filename
     # позволяли инжектировать произвольные HTTP-заголовки. RFC 6266
     # filename* = UTF-8''<percent-encoded> закрывает класс ошибки.
     safe_name = quote(db_file.original_filename or "file", safe="")
-    return Response(
-        content=body,
-        media_type=content_type,
-        # Content-Disposition inline — браузер отрендерит картинку.
-        # Если бы было attachment — скачался бы файлом. inline здесь
-        # удобнее для аватаров/фото.
+    return StreamingResponse(
+        file_storage.iter_file(db_file.s3_key),
+        media_type=db_file.content_type,
         headers={
+            # inline — браузер отрендерит картинку (аватары/фото).
             "Content-Disposition": f"inline; filename*=UTF-8''{safe_name}",
+            # Содержимое по id неизменяемо (новая загрузка = новый id) —
+            # кэшируем надолго, браузер и nginx не дёргают MinIO повторно.
+            "Cache-Control": _IMMUTABLE_CACHE,
         },
     )

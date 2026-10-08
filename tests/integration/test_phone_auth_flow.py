@@ -53,7 +53,7 @@ async def test_full_flow_creates_user_and_logs_in(client, sms_capture):
     # X-Token-Delivery: body — «мобильный» режим: токены в теле ответа.
     r = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": code},
+        json={"phone": phone, "code": code, "accept_terms": True, "personal_data_consent": True},
         headers={"X-Token-Delivery": "body"},
     )
     assert r.status_code == 200, r.text
@@ -89,7 +89,7 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     code = sms_capture.last_code()
     r1 = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": code},
+        json={"phone": phone, "code": code, "accept_terms": True, "personal_data_consent": True},
         headers={"X-Token-Delivery": "body"},
     )
     assert r1.status_code == 200
@@ -100,16 +100,19 @@ async def test_second_login_reuses_user(client, sms_capture, test_redis):
     code2 = sms_capture.last_code()
     r2 = await client.post(
         "/auth/verify-code",
-        json={"phone": phone, "code": code2},
+        json={"phone": phone, "code": code2, "accept_terms": True, "personal_data_consent": True},
         headers={"X-Token-Delivery": "body"},
     )
     assert r2.status_code == 200
 
     # Один и тот же пользователь (sub в JWT), а не дубликат.
-    from jose import jwt
+    import jwt
 
-    sub1 = jwt.get_unverified_claims(r1.json()["access_token"])["sub"]
-    sub2 = jwt.get_unverified_claims(r2.json()["access_token"])["sub"]
+    def _sub(token: str) -> str:
+        return jwt.decode(token, options={"verify_signature": False})["sub"]
+
+    sub1 = _sub(r1.json()["access_token"])
+    sub2 = _sub(r2.json()["access_token"])
     assert sub1 == sub2
 
 

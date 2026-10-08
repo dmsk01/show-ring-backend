@@ -71,6 +71,7 @@ async def check_rate_limit(
     *,
     fail_closed: bool = False,
     bucket: str | None = None,
+    client_key: str | None = None,
 ) -> None:
     """
     Проверить rate limit для IP + endpoint.
@@ -98,6 +99,10 @@ async def check_rate_limit(
     endpoint'ов, сохраняя доступность остальных.
     """
     ip = request.client.host if request.client else "unknown"
+    # client_key — чем идентифицировать клиента вместо IP (например,
+    # подсеть /24 из app.utils.net.ip_subnet для лимита на пул прокси).
+    if client_key is not None:
+        ip = client_key
     # bucket — общий счётчик для нескольких путей (например, /auth/login
     # и /auth/token — один и тот же логин). По умолчанию — путь запроса.
     endpoint = bucket or request.scope.get("path", request.url.path)
@@ -129,6 +134,11 @@ async def check_rate_limit(
         # Lua возвращает массив [banned, retry_after]
         banned, retry_after = int(result[0]), int(result[1])
         if banned:
+            # Импорт здесь: security_metrics → app.redis, а этот модуль
+            # грузится очень рано (dependencies) — избегаем циклов.
+            from app.services import security_metrics
+
+            await security_metrics.record(security_metrics.RATE_LIMITED, redis=redis)
             raise HTTPException(
                 status_code=429,
                 detail="Too many requests",

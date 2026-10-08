@@ -144,7 +144,7 @@ def test_ws_rate_limited(monkeypatch):
 async def _make_user(client) -> tuple[uuid.UUID, str]:
     email = f"itest_{uuid.uuid4().hex[:10]}@example.com"
     await client.post(
-        "/auth/register", json={"email": email, "password": PASSWORD}
+        "/auth/register", json={"email": email, "password": PASSWORD, "accept_terms": True, "personal_data_consent": True}
     )
     r = await client.post(
         "/auth/login",

@@ -1,5 +1,14 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from .config import settings
+from .config import Settings, settings
+
+
+def engine_connect_args(cfg: Settings) -> dict:
+    """Параметры подключения asyncpg: таймаут запроса на уровне сессии PG."""
+    if cfg.db_statement_timeout_ms <= 0:
+        return {}
+    return {
+        "server_settings": {"statement_timeout": str(cfg.db_statement_timeout_ms)}
+    }
 
 # 1. Создание асинхронного движка
 # Формат URL: dialect+driver://user:password@host/dbname
@@ -26,6 +35,9 @@ engine = create_async_engine(
     # См. config.db_pool_size для обоснования.
     pool_size=settings.db_pool_size,
     max_overflow=settings.db_max_overflow,
+    # statement_timeout (план защиты 2026-10-05): тяжёлый запрос
+    # обрывается PostgreSQL, а не занимает соединение пула бесконечно.
+    connect_args=engine_connect_args(settings),
 )
 
 # 2. Создание фабрики сессий

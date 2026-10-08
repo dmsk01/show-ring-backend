@@ -1316,7 +1316,18 @@ async def seed(db: AsyncSession) -> None:
                 "budget": budget,
                 "cost_per_impression": Decimal("0.50"),
             },
-            {"date_start": dstart, "date_end": dend, "status": cstatus},
+            {
+                "date_start": dstart,
+                "date_end": dend,
+                "status": cstatus,
+                # Демо-кампании, побывавшие в показе, считаем одобренными
+                # модератором (ревью 2026-10-06, BE-05) — иначе владелец не
+                # сможет вернуть кампанию в показ после паузы.
+                "approved_at": (
+                    None if cstatus == CampaignStatus.draft
+                    else datetime.now(timezone.utc)
+                ),
+            },
         )
         spent = Decimal("0")
         for bi_, (placement, btitle) in enumerate(banners_spec):

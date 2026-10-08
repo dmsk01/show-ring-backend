@@ -136,6 +136,154 @@ sudo ufw status           # проверка: увидишь список раз
 
 ---
 
+## 5.1. Защитить сервер: SSH по ключу, fail2ban, автообновления
+
+Сервер с открытым SSH начинают перебирать боты в первые минуты после создания.
+Пароль root — главная мишень. Ниже — минимум, который закрывает типовые атаки
+(план защиты 2026-10-05).
+
+> ⚠️ **Порядок важен.** Пароли отключаем только после того, как убедились, что вход
+> по ключу работает **в новом окне терминала**. Старую SSH-сессию не закрывай, пока
+> всё не проверено — через неё можно откатить настройки.
+
+### Шаг 1. Отдельный пользователь вместо root
+
+```bash
+adduser deploy                         # спросит пароль — он нужен для sudo
+usermod -aG sudo,docker deploy         # права администратора и Docker
+```
+
+### Шаг 2. Ключ SSH (на **своём** компьютере, не на сервере)
+
+```bash
+ssh-keygen -t ed25519                  # Enter на все вопросы (или задай пароль ключа)
+ssh-copy-id deploy@123.45.67.89        # скопировать публичный ключ на сервер
+ssh deploy@123.45.67.89                # проверка: должен пустить без пароля сервера
+```
+
+На Windows без `ssh-copy-id` — содержимое `~/.ssh/id_ed25519.pub` вставь на сервере
+в `/home/deploy/.ssh/authorized_keys` (права: папка `700`, файл `600`, владелец `deploy`).
+
+### Шаг 3. Запретить вход по паролю и под root
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/99-hardening.conf <<'EOF'
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+MaxAuthTries 3
+EOF
+sudo sshd -t && sudo systemctl reload ssh   # проверка синтаксиса и применение
+```
+
+Открой **новое** окно и зайди `ssh deploy@123.45.67.89`. Если пускает — готово.
+Если нет — в старой сессии удали файл `99-hardening.conf` и снова `reload ssh`.
+
+### Шаг 4. fail2ban — бан IP после неудачных попыток входа
+
+```bash
+sudo apt install -y fail2ban
+sudo tee /etc/fail2ban/jail.local <<'EOF'
+[sshd]
+enabled  = true
+backend  = systemd
+maxretry = 5
+findtime = 10m
+bantime  = 1h
+EOF
+sudo systemctl enable --now fail2ban
+sudo fail2ban-client status sshd       # проверка: jail активен, видно число банов
+```
+
+### Шаг 5. Автоматические обновления безопасности
+
+```bash
+sudo apt install -y unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades   # ответь «Yes»
+cat /etc/apt/apt.conf.d/20auto-upgrades           # должно быть "1" в обеих строках
+```
+
+Обновления ставятся ночью сами. Ядро применяется после перезагрузки — раз в месяц
+стоит делать `sudo reboot` в спокойное время (стек поднимется сам: `restart: unless-stopped`).
+
+### Шаг 6. Лимит логов Docker
+
+В логах nginx и api есть IP посетителей, а по умолчанию Docker не ограничивает их
+размер. В `docker-compose.prod.yml` ротация уже задана для сервисов стека; эта
+настройка — подстраховка для всех остальных контейнеров:
+
+```bash
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "20m", "max-file": "5" }
+}
+EOF
+sudo systemctl restart docker          # действует на контейнеры, созданные после
+```
+
+> Перезапуск Docker на минуту останавливает работающий стек (он поднимется сам).
+> Делай это до первого запуска или в спокойное время.
+
+---
+
+## 5.2. Оповещения о признаках атаки (Telegram или почта)
+
+Сервис сам следит за счётчиками и пишет, если похоже на атаку: всплеск
+отказов 429, ошибки 5xx, накрутка SMS (SMS уходят, а коды никто не вводит),
+расход 80% суточного бюджета SMS, массовые блокировки аккаунтов, отклонённые
+капчи. Одно и то же оповещение — не чаще раза в час. Текущие счётчики админ
+видит в `GET /api/admin/security/metrics`.
+
+**Telegram** (удобнее всего):
+1. Напиши [@BotFather](https://t.me/BotFather) → `/newbot` → получишь токен вида `123456:ABC...`.
+2. Напиши своему боту любое сообщение (или добавь его в рабочий чат).
+3. Узнай id чата: открой `https://api.telegram.org/bot<токен>/getUpdates` —
+   в ответе `"chat":{"id":...}` (у групп id начинается с `-100`).
+4. В `.env`: `ALERT_TELEGRAM_BOT_TOKEN=<токен>`, `ALERT_TELEGRAM_CHAT_ID=<id>`.
+
+**Почта:** `ALERT_EMAIL=you@example.com` (письма идут через настроенный SMTP).
+
+В оповещениях только числа — ни телефонов, ни email, ни IP: Telegram — зарубежный
+сервис, персональные данные туда не передаются.
+
+Нужен включённый планировщик: `SCHEDULER_ENABLED=true` (так и задано в `.env.prod.example`).
+
+---
+
+## 5.3. Защита от DDoS — при публичном запуске
+
+Мощную атаку на канал (L3/L4) не остановить настройками на одном сервере —
+её гасит провайдер с большим каналом, стоящий перед сервером. Варианты: защита
+от DDoS у хостинга или сервис в РФ (DDoS-Guard, Qrator, StormWall, ServicePipe).
+Зарубежные (Cloudflare) не подходят: IP всех посетителей уйдут за границу (ст. 12 152-ФЗ).
+
+Подключение:
+1. В кабинете провайдера добавить домен; провайдер скажет, куда направить DNS
+   (A-запись на его IP или NS-серверы).
+2. **Реальный IP клиентов:** в `deploy/nginx/snippets/real_ip.conf` раскомментировать
+   строки и вписать диапазоны провайдера (`set_real_ip_from`) и заголовок
+   (`real_ip_header`). Без этого все лимиты станут общими на весь сайт.
+3. Перезагрузить nginx: `docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx nginx -s reload`.
+4. **Закрыть обход защиты,** иначе атакующий ударит прямо по IP сервера.
+   Порты, которые публикует Docker (80/443 у nginx), идут **мимо правил ufw** —
+   фильтровать нужно в цепочке `DOCKER-USER`. `-I` вставляет правило в начало,
+   поэтому сначала общий запрет, потом разрешения (они окажутся выше него):
+   ```bash
+   IFACE=eth0   # внешний интерфейс сервера: ip -br addr
+   sudo iptables -I DOCKER-USER -i $IFACE -p tcp -m multiport --dports 80,443 -j DROP
+   # по строке на КАЖДЫЙ диапазон провайдера:
+   sudo iptables -I DOCKER-USER -i $IFACE -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -j RETURN
+   sudo iptables -L DOCKER-USER -n --line-numbers   # проверка порядка: RETURN выше DROP
+   sudo apt install -y iptables-persistent && sudo netfilter-persistent save   # пережить перезагрузку
+   ```
+   Проверь: сайт открывается через домен, а `curl http://<IP сервера>` с другой машины — нет.
+   Откат: `sudo iptables -F DOCKER-USER && sudo iptables -A DOCKER-USER -j RETURN`.
+5. Добавить провайдера в Политику конфиденциальности как лицо, обрабатывающее
+   IP-адреса по поручению (раздел 8, `src/sections/legal/documents/privacy-policy.tsx`).
+
+---
+
 ## 6. Настроить доступ к GitHub
 
 Код лежит в двух репозиториях на GitHub. Как их скачать — зависит от того, открытые

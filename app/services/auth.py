@@ -2,6 +2,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
+from redis import RedisError
+from redis.asyncio import Redis
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,14 +13,16 @@ from app.schemas.user import TokenResponse
 from app.utils.security import (
     create_access_token,
     create_refresh_token_value,
-    dummy_verify_password,
-    hash_password,
+    dummy_verify_password_async,
+    hash_password_async,
     generate_verification_token,
     hash_token,
-    verify_password,
+    verify_password_async,
 )
 from app.repositories import user as user_repo
 from app.repositories import security_audit as audit_repo
+from app.utils.log_mask import mask_email
+from app.services import consent as consent_svc
 from app.services.email_tasks import enqueue_transactional_email
 
 logger = logging.getLogger(__name__)
@@ -66,7 +70,7 @@ async def resend_verification(db: AsyncSession, email: str) -> None:
     """
     user = await user_repo.get_user_by_email(db, email)
     if user is None:
-        security_logger.info("resend_verification_no_user email=%s", email)
+        security_logger.info("resend_verification_no_user email=%s", mask_email(email))
         return
     if user.is_email_verified:
         security_logger.info(
@@ -77,7 +81,21 @@ async def resend_verification(db: AsyncSession, email: str) -> None:
     await db.commit()
 
 
-async def register_user(db: AsyncSession, email: str, password: str):
+async def register_user(
+    db: AsyncSession,
+    email: str,
+    password: str,
+    *,
+    consents: tuple[consent_svc.ConsentKind, ...] = (),
+    ip: str | None = None,
+    user_agent: str | None = None,
+):
+    """
+    Регистрация по email. Пользователь, письмо подтверждения и согласия —
+    одна транзакция (ревью 2026-10-06, BE-17: раньше согласия писались
+    вторым commit'ом из роутера, и сбой между ними оставлял аккаунт без
+    согласий). Наличие обязательных согласий проверяет роутер.
+    """
     # ИСПРАВЛЕНО: убрана явная ошибка "Email уже занят" — раскрывала
     # факт регистрации (user enumeration). Теперь:
     # - если email свободен: создаём юзера + токен подтверждения;
@@ -86,10 +104,10 @@ async def register_user(db: AsyncSession, email: str, password: str):
     #   тот же ответ "проверьте email", что и для нового юзера.
     existing = await user_repo.get_user_by_email(db, email)
     if existing:
-        security_logger.info("register_existing_email email=%s", email)
+        security_logger.info("register_existing_email email=%s", mask_email(email))
         return None
 
-    hashed = hash_password(password)
+    hashed = await hash_password_async(password)
     try:
         user = await user_repo.create_user(db, email, hashed)
 
@@ -98,6 +116,10 @@ async def register_user(db: AsyncSession, email: str, password: str):
         # sensitive: в prod не логируем (только факт внутри хелпера),
         # в debug печатаем для dev-flow без SMTP.
         await _issue_email_verification(db, user)
+        for kind in consents:
+            await consent_svc.grant(
+                db, user.id, kind, ip=ip, user_agent=user_agent
+            )
         await db.commit()
         return user
     except IntegrityError:
@@ -105,7 +127,7 @@ async def register_user(db: AsyncSession, email: str, password: str):
         # ловится через UNIQUE-constraint и возвращает то же поведение,
         # что и существующий email — без 500.
         await db.rollback()
-        security_logger.info("register_race_collision email=%s", email)
+        security_logger.info("register_race_collision email=%s", mask_email(email))
         return None
 
 
@@ -175,18 +197,18 @@ async def login_user(db: AsyncSession, email: str, password: str) -> TokenRespon
     # Теперь при отсутствии юзера выполняем dummy-верификацию и отдаём
     # тот же 401, что при неверном пароле.
     if not user:
-        dummy_verify_password()
-        security_logger.info("login_failed reason=no_user email=%s", email)
+        await dummy_verify_password_async()
+        security_logger.info("login_failed reason=no_user email=%s", mask_email(email))
         raise ValueError("invalid_credentials")
 
     # Phone-OTP: у телефонного пользователя пароля нет — парольный вход
     # для него закрыт. dummy-верификация выравнивает время ответа.
     if not user.hashed_password:
-        dummy_verify_password()
+        await dummy_verify_password_async()
         security_logger.info("login_failed reason=no_password user_id=%s", user.id)
         raise ValueError("invalid_credentials")
 
-    if not verify_password(password, user.hashed_password):
+    if not await verify_password_async(password, user.hashed_password):
         security_logger.info("login_failed reason=bad_password user_id=%s", user.id)
         raise ValueError("invalid_credentials")
 
@@ -205,8 +227,42 @@ async def login_user(db: AsyncSession, email: str, password: str) -> TokenRespon
     return await issue_token_pair(db, user)
 
 
+# Ревью 2026-10-06, BE-27: две вкладки одновременно обновляют токен одной
+# кукой. Первая ротирует, вторая видит уже отозванный токен. Это не
+# reuse-атака, а гонка — в течение короткого окна после ротации отвечаем
+# 401 refresh_superseded, НЕ отзывая все сессии пользователя (иначе он
+# разлогинен везде). Маркер ротации — в Redis с TTL окна.
+REFRESH_SUPERSEDED = "refresh_superseded"
+REFRESH_ROTATION_GRACE_SECONDS = 30
+
+
+def _rotated_key(token_hash: str) -> str:
+    return f"refresh:rotated:{token_hash}"
+
+
+async def _mark_rotated(redis: Redis | None, token_hash: str) -> None:
+    if redis is None:
+        return
+    try:
+        await redis.set(
+            _rotated_key(token_hash), "1", ex=REFRESH_ROTATION_GRACE_SECONDS
+        )
+    except RedisError as e:
+        logger.warning("refresh rotation marker failed: %s", e)
+
+
+async def _recently_rotated(redis: Redis | None, token_hash: str) -> bool:
+    if redis is None:
+        return False
+    try:
+        return bool(await redis.exists(_rotated_key(token_hash)))
+    except RedisError as e:
+        logger.warning("refresh rotation marker check failed: %s", e)
+        return False
+
+
 async def refresh_access_token(
-    db: AsyncSession, raw_refresh_token: str
+    db: AsyncSession, raw_refresh_token: str, *, redis: Redis | None = None
 ) -> TokenResponse:
     # Refresh token rotation + defense-in-depth от reuse-attack:
     #   1) ищем токен по хешу;
@@ -225,6 +281,11 @@ async def refresh_access_token(
         raise ValueError("invalid_or_expired_token")
 
     revoked = await user_repo.revoke_refresh_token(db, token_hash)
+    if revoked == 0 and await _recently_rotated(redis, token_hash):
+        security_logger.info(
+            "refresh_superseded user_id=%s (parallel refresh)", db_token.user_id
+        )
+        raise ValueError(REFRESH_SUPERSEDED)
     if revoked == 0:
         # ИСПРАВЛЕНО (defense-in-depth): токен уже отозван, но повторно
         # предъявлен → reuse-attack. Аннулируем всю refresh-цепочку юзера.
@@ -245,7 +306,9 @@ async def refresh_access_token(
         await db.rollback()
         raise ValueError("user_blocked")
 
-    return await issue_token_pair(db, user)
+    tokens = await issue_token_pair(db, user)
+    await _mark_rotated(redis, token_hash)
+    return tokens
 
 
 async def logout_user(db: AsyncSession, raw_refresh_token: str):
@@ -289,7 +352,7 @@ async def request_email_change(
     if (
         not user.hashed_password
         or not current_password
-        or not verify_password(current_password, user.hashed_password)
+        or not await verify_password_async(current_password, user.hashed_password)
     ):
         security_logger.warning(
             "email_change_bad_password user_id=%s", user.id
@@ -354,7 +417,7 @@ async def request_email_change(
         extra={"old_email": user.email, "new_email": new_email},
     )
     security_logger.info(
-        "email_change_requested user_id=%s new=%s", user.id, new_email
+        "email_change_requested user_id=%s new=%s", user.id, mask_email(new_email)
     )
     if settings.debug:
         logger.info("[DEV] Email-change token for %s: %s", new_email, raw_token)
@@ -421,7 +484,7 @@ async def confirm_email_change(
         await db.rollback()
         raise HTTPException(status_code=409, detail="email_taken")
     security_logger.info(
-        "email_change_confirmed user_id=%s new=%s", user.id, new_email
+        "email_change_confirmed user_id=%s new=%s", user.id, mask_email(new_email)
     )
 
 
@@ -438,17 +501,17 @@ async def change_password(
     Сменить пароль: re-auth, хеширование нового, отзыв всех refresh,
     письмо-уведомление на текущий адрес, аудит. Коммитит сам.
     """
-    if not user.hashed_password or not verify_password(current_password, user.hashed_password):
+    if not user.hashed_password or not await verify_password_async(current_password, user.hashed_password):
         security_logger.warning(
             "password_change_bad_password user_id=%s", user.id
         )
         raise HTTPException(status_code=403, detail="current_password_invalid")
-    if verify_password(new_password, user.hashed_password):
+    if await verify_password_async(new_password, user.hashed_password):
         raise HTTPException(
             status_code=400, detail="password_same_as_current"
         )
 
-    user.hashed_password = hash_password(new_password)
+    user.hashed_password = await hash_password_async(new_password)
     await user_repo.revoke_all_refresh_tokens_for_user(db, user.id)
     # У телефонного пользователя, чья почта ещё не подтверждена, адреса
     # нет — письмо-уведомление некуда слать.

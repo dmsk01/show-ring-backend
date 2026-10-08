@@ -3,8 +3,8 @@
 
 Запуск:
     python -m worker.main                   # обработка documents-очереди (этап 8)
-    python -m worker.main --mode book       # учебная очередь "tasks" (book_handler)
-    python -m worker.main --mode events     # подписка на fanout events
+    python -m worker.main --mode files      # варианты изображений
+    python -m worker.main --mode topic|email|ads|outbox
 
 Что внутри:
 - aio-pika подключается к RabbitMQ через connect_robust — это
@@ -27,6 +27,7 @@ import aio_pika
 
 from app.config import settings
 from app.database import async_session_factory
+from app.logging_config import setup_logging
 from app.redis import close_redis, init_redis
 from app.services.rabbit_dlx import declare_workflow_queue
 from worker.handlers.ad_handler import (
@@ -34,7 +35,6 @@ from worker.handlers.ad_handler import (
     init_accumulator,
     on_ad_event_message,
 )
-from worker.handlers.book_handler import process_book
 from worker.handlers.document_handler import process_document_task
 from worker.handlers.file_handler import process_image_task
 from worker.handlers.email_handler import process_email_task
@@ -45,10 +45,9 @@ from worker.handlers.events_handler import (
 )
 from worker.handlers.outbox_handler import run_loop as outbox_run_loop
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+# Логирование настраивает main() через setup_logging() — тот же формат, что у
+# API (JSON в проде). Ревью 2026-10-06, BE-12: раньше здесь был basicConfig,
+# и логи воркера в проде не разбирались агрегатором.
 logger = logging.getLogger("worker")
 
 
@@ -87,7 +86,7 @@ async def on_document_message(message: aio_pika.abc.AbstractIncomingMessage):
             data = json.loads(body)
             task_id = data["task_id"]
         except (json.JSONDecodeError, KeyError) as e:
-            logger.error("Bad document task message: %s (%s)", body, e)
+            logger.error("Bad document task message (%d bytes): %s", len(body), e)
             return
 
         async with async_session_factory() as db:
@@ -108,7 +107,7 @@ async def on_image_message(message: aio_pika.abc.AbstractIncomingMessage):
             data = json.loads(body)
             task_id = data["task_id"]
         except (json.JSONDecodeError, KeyError) as e:
-            logger.error("Bad image task message: %s (%s)", body, e)
+            logger.error("Bad image task message (%d bytes): %s", len(body), e)
             return
         async with async_session_factory() as db:
             try:
@@ -122,22 +121,9 @@ async def on_image_message(message: aio_pika.abc.AbstractIncomingMessage):
 # ---------------------------------------------------------------------
 
 
-async def on_book_message(message: aio_pika.abc.AbstractIncomingMessage):
-    async with message.process():
-        body = message.body.decode()
-        logger.info("book_task message: %s", body)
-        data = json.loads(body)
-        await process_book(data["task_id"], data["payload"])
-
-
 # ---------------------------------------------------------------------
 # Fanout events
 # ---------------------------------------------------------------------
-
-
-async def on_event(message: aio_pika.abc.AbstractIncomingMessage):
-    async with message.process():
-        logger.info("event: %s", message.body.decode())
 
 
 # ---------------------------------------------------------------------
@@ -166,25 +152,81 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
             logger.debug("Signal handler not supported for %s", sig)
 
 
+# Сколько ждать уже начатые обработчики при остановке. Дольше — значит
+# обработчик завис; Docker всё равно пришлёт SIGKILL (stop_grace_period).
+DRAIN_TIMEOUT_SECONDS = 25.0
+
+
+class InFlight:
+    """Счётчик обработчиков, которые сейчас работают (ревью 2026-10-06, BE-20).
+
+    Нужен для корректной остановки: после снятия consumer'ов ждём, пока
+    начатые сообщения дообработаются и ack'нутся, и только потом закрываем
+    соединение — иначе ack не дойдёт и сообщение придёт повторно.
+    """
+
+    def __init__(self) -> None:
+        self._count = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    def wrap(self, handler):
+        async def tracked(message):
+            self._count += 1
+            self._idle.clear()
+            try:
+                await handler(message)
+            finally:
+                self._count -= 1
+                if self._count == 0:
+                    self._idle.set()
+
+        return tracked
+
+    async def wait_idle(self, timeout: float) -> None:
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Drain timeout: %d message(s) still in flight", self._count
+            )
+
+
+_inflight = InFlight()
+
+
 async def _serve(
-    connection: aio_pika.abc.AbstractRobustConnection,
+    connection,
     queue_name: str,
+    *,
+    consumers: list | tuple = (),
+    inflight: InFlight | None = None,
+    stop: asyncio.Event | None = None,
 ) -> None:
     """
-    Общий "main loop" для всех режимов воркера: ждёт SIGTERM/SIGINT,
-    после чего закрывает соединение. Внутри `message.process()` aio-pika
-    уже взявшее сообщение ack'нет в финале — мы не теряем данные.
+    Общий "main loop" для всех режимов воркера: ждёт SIGTERM/SIGINT, затем
+    останавливается корректно (ревью 2026-10-06, BE-20):
+    1. снимает consumer'ов (queue.cancel) — новые сообщения не приходят;
+    2. ждёт уже начатые обработчики (InFlight) не дольше DRAIN_TIMEOUT;
+    3. закрывает соединение.
+    Раньше соединение закрывалось сразу: работающий обработчик не успевал
+    сделать ack, и сообщение доставлялось повторно.
     """
-    stop = asyncio.Event()
-    _install_signal_handlers(stop)
+    if stop is None:
+        stop = asyncio.Event()
+        _install_signal_handlers(stop)
+    inflight = inflight or _inflight
     try:
         logger.info("Listening on '%s'. Send SIGTERM to stop gracefully.", queue_name)
         await stop.wait()
         logger.info("Shutdown signal received, draining in-flight messages…")
+        for queue, tag in consumers:
+            try:
+                await queue.cancel(tag)
+            except Exception as e:  # noqa: BLE001 — останавливаемся в любом случае
+                logger.warning("Consumer cancel failed: %s", e)
+        await inflight.wait_idle(DRAIN_TIMEOUT_SECONDS)
     finally:
-        # close() ждёт текущие consume-задачи. В aio-pika это означает:
-        # уже запущенные обработчики дойдут до конца, новые сообщения
-        # не примутся.
         await connection.close()
         logger.info("Worker stopped")
 
@@ -205,8 +247,8 @@ async def run_documents() -> None:
     # nack(requeue=False) и истёкшие/maxlen-сообщения уходят в общий
     # DLQ, а не теряются молча. См. app/services/rabbit_dlx.py.
     queue = await declare_workflow_queue(channel, DOCUMENT_TASK_QUEUE)
-    await queue.consume(on_document_message)
-    await _serve(connection, DOCUMENT_TASK_QUEUE)
+    tag = await queue.consume(_inflight.wrap(on_document_message))
+    await _serve(connection, DOCUMENT_TASK_QUEUE, consumers=[(queue, tag)])
 
 
 async def run_files() -> None:
@@ -216,31 +258,8 @@ async def run_files() -> None:
     # prefetch=1: ресайз — CPU-bound, не забираем пачку сообщений под себя.
     await channel.set_qos(prefetch_count=1)
     queue = await declare_workflow_queue(channel, IMAGE_TASK_QUEUE)
-    await queue.consume(on_image_message)
-    await _serve(connection, IMAGE_TASK_QUEUE)
-
-
-async def run_book() -> None:
-    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-    channel = await connection.channel()
-    await channel.set_qos(prefetch_count=1)
-    # bug_239: см. run_documents.
-    queue = await declare_workflow_queue(channel, "tasks")
-    await queue.consume(on_book_message)
-    await _serve(connection, "tasks (legacy book worker)")
-
-
-async def run_events() -> None:
-    """Legacy fanout-режим (учебный пример, не используется в этапе 9)."""
-    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-    channel = await connection.channel()
-    exchange = await channel.declare_exchange(
-        "events", aio_pika.ExchangeType.FANOUT, durable=True
-    )
-    queue = await channel.declare_queue("", exclusive=True, auto_delete=True)
-    await queue.bind(exchange)
-    await queue.consume(on_event)
-    await _serve(connection, "events (fanout)")
+    tag = await queue.consume(_inflight.wrap(on_image_message))
+    await _serve(connection, IMAGE_TASK_QUEUE, consumers=[(queue, tag)])
 
 
 # ---------------------------------------------------------------------
@@ -270,7 +289,7 @@ async def on_topic_event(message: aio_pika.abc.AbstractIncomingMessage):
             try:
                 await process_event(db, _topic_publish_channel, body)
             except Exception:
-                logger.exception("Event processing failed: %s", body)
+                logger.exception("Event processing failed (%d bytes)", len(body))
 
 
 async def on_email_task(message: aio_pika.abc.AbstractIncomingMessage):
@@ -280,7 +299,9 @@ async def on_email_task(message: aio_pika.abc.AbstractIncomingMessage):
             try:
                 await process_email_task(db, body)
             except Exception:
-                logger.exception("Email task failed: %s", body)
+                # Тело НЕ логируем: в нём HTML письма со ссылками-токенами
+                # (verify-email, confirm-email-change) и адрес получателя.
+                logger.exception("Email task failed (%d bytes)", len(body))
 
 
 async def run_topic_events() -> None:
@@ -311,9 +332,9 @@ async def run_topic_events() -> None:
     _topic_publish_channel = await connection.channel()
 
     queue = await bind_topic_queue(consume_ch, pattern="#")
-    await queue.consume(on_topic_event)
+    tag = await queue.consume(_inflight.wrap(on_topic_event))
     try:
-        await _serve(connection, f"topic '{settings.exchange_topic}' (#)")
+        await _serve(connection, f"topic '{settings.exchange_topic}' (#)", consumers=[(queue, tag)])
     finally:
         await close_redis()
 
@@ -325,7 +346,7 @@ async def on_ad_event(message: aio_pika.abc.AbstractIncomingMessage):
         try:
             await on_ad_event_message(body)
         except Exception:
-            logger.exception("ad_event processing failed: %s", body)
+            logger.exception("ad_event processing failed (%d bytes)", len(body))
 
 
 async def run_ad_events() -> None:
@@ -343,13 +364,13 @@ async def run_ad_events() -> None:
     queue = await declare_workflow_queue(channel, AD_EVENTS_QUEUE)
     # Стартуем аккумулятор: периодический flush уходит в фоновую задачу.
     accumulator = init_accumulator(async_session_factory)
-    await queue.consume(on_ad_event)
+    tag = await queue.consume(_inflight.wrap(on_ad_event))
     # bug_235 audit 2026-05-28: после _serve (он закрывает connection
     # и дожидается завершения in-flight consume-tasks) явно
     # останавливаем accumulator. Иначе фоновый _periodic_flush был бы
     # убит вместе с event loop'ом, и батч в памяти терялся бы.
     try:
-        await _serve(connection, f"{AD_EVENTS_QUEUE} (ads batch)")
+        await _serve(connection, f"{AD_EVENTS_QUEUE} (ads batch)", consumers=[(queue, tag)])
     finally:
         await accumulator.stop()
 
@@ -388,30 +409,29 @@ async def run_email() -> None:
     await channel.set_qos(prefetch_count=1)
     # bug_239: см. run_documents.
     queue = await declare_workflow_queue(channel, EMAIL_TASK_QUEUE)
-    await queue.consume(on_email_task)
-    await _serve(connection, f"{EMAIL_TASK_QUEUE} (SMTP sender)")
+    tag = await queue.consume(_inflight.wrap(on_email_task))
+    await _serve(connection, f"{EMAIL_TASK_QUEUE} (SMTP sender)", consumers=[(queue, tag)])
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["documents", "files", "book", "events", "topic", "email", "ads", "outbox"],
+        choices=["documents", "files", "topic", "email", "ads", "outbox"],
         default="documents",
         help=(
             "documents — генерация документов; files — обработка изображений "
-            "(варианты/watermark); book — учебный пример; events — fanout-демо; "
+            "(варианты/watermark); "
             "topic — диспатчер событий этапа 9; email — SMTP-воркер этапа 9; "
             "ads — batch-воркер рекламных событий этапа 14; outbox — dispatcher "
             "outbox_events → RabbitMQ (transactional outbox)."
         ),
     )
     args = parser.parse_args()
+    setup_logging()
     coro = {
         "documents": run_documents,
         "files": run_files,
-        "book": run_book,
-        "events": run_events,
         "topic": run_topic_events,
         "email": run_email,
         "ads": run_ad_events,

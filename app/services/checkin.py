@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
@@ -119,7 +120,7 @@ async def add_staff(
     show = await get_show(db, show_id)
     ensure_organizer(show, requester_id, is_admin)
     if email is not None:
-        user = await repo.get_user_by_email_ci(db, email)
+        user = await user_repo.get_user_by_email(db, email)
     else:
         user = await user_repo.get_user_by_phone(db, phone or "")
     if user is None:
@@ -178,16 +179,24 @@ async def build_entry_cards(
     dogs, classes, users, avatars, doc_rows, checks = await repo.load_card_context(db, entries)
     performers = await repo.load_users(db, [c.performed_by for c in checks if c.performed_by])
     ref = rules.reference_date(show.date_start, show.date_end)
+    # Группировка заранее (ревью 2026-10-06, BE-36): раньше для каждой записи
+    # перебирались ВСЕ документы и проверки — O(записи × документы) на
+    # каждый запрос очереди предпроверки крупной выставки.
+    rows_by_dog: dict[uuid.UUID, list] = defaultdict(list)
+    for d, f in doc_rows:
+        rows_by_dog[d.dog_id].append((d, f))
+    checks_by_entry: dict[uuid.UUID, list[EntryCheck]] = defaultdict(list)
+    for c in checks:  # порядок по времени сохраняется внутри группы
+        checks_by_entry[c.entry_id].append(c)
     cards: list[EntryCard] = []
     for e in entries:
         dog = dogs[e.dog_id]
         cls = classes[e.show_class_id]
-        dog_rows = [(d, f) for d, f in doc_rows if d.dog_id == dog.id]
+        dog_rows = rows_by_dog.get(dog.id, [])
         current = rules.current_documents([d for d, _ in dog_rows])
         latest: dict[EntryCheckKind, EntryCheckResponse] = {}
-        for c in checks:  # отсортированы по времени — последняя перезаписывает
-            if c.entry_id == e.id:
-                latest[c.kind] = _check_response(c, performers)
+        for c in checks_by_entry.get(e.id, []):  # последняя перезаписывает
+            latest[c.kind] = _check_response(c, performers)
         # Предпроверка относится к сканам, загруженным ДО неё: после нового
         # документа старая отметка (особенно «одобрено») вводила бы стойку
         # в заблуждение.

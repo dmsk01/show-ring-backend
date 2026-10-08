@@ -231,6 +231,10 @@ class Classified(Base, TimestampMixin):
     contact_email: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
+    # Согласие автора на распространение контактов (ст. 10.1 152-ФЗ).
+    contacts_public: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
 
     # Генерируется PostgreSQL автоматически из title и description.
     # coalesce защищает от NULL — description обязателен, но на всякий

@@ -20,7 +20,8 @@ from typing import Iterable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.reference import ShowClass, ShowRank
+from app.models.dog import Dog
+from app.models.reference import Breed, ShowClass, ShowRank
 from app.models.result import DogTitle, ShowResult
 from app.models.show import AttendanceStatus, Show, ShowEntry, ShowStatus
 from app.repositories import result as repo
@@ -33,24 +34,80 @@ from app.services import show_rules
 # ---------------------------------------------------------------------
 
 
+def _judge_covers(j, breed: Breed | None) -> bool:
+    """Назначение судьи покрывает породу: без породы/группы — все породы
+    выставки; иначе совпадение породы или её группы FCI."""
+    if j.breed_id is None and j.breed_group_id is None:
+        return True
+    if breed is None:
+        return True
+    return j.breed_id == breed.id or (
+        j.breed_group_id is not None and j.breed_group_id == breed.breed_group_id
+    )
+
+
 def _can_modify_results(
-    show: Show, user_id: uuid.UUID, is_admin: bool
+    show: Show, user_id: uuid.UUID, is_admin: bool, breed: Breed | None = None
 ) -> bool:
     """
     Право ввода/правки результатов:
-    - admin всегда может,
-    - организатор выставки может,
-    - судьи (любой из назначенных) могут — но на этом этапе детальную
-      проверку "именно этот судья назначен на этот ринг" не делаем.
-      Достаточно "пользователь — судья, назначенный хоть куда".
-
-    Полная "правильный судья на правильном ринге" проверка — TODO,
-    нужна модель ring↔entry (этап 8/9 при разработке расписания).
+    - admin и организатор выставки — всегда;
+    - судья — только по своим породам/группам (ревью 2026-10-06, BE-26:
+      раньше любой назначенный судья правил результаты любого ринга).
+      breed=None — проверка уровня выставки (BIG/BIS): достаточно любого
+      назначения.
     """
     if is_admin or show.organizer_id == user_id:
         return True
-    # Любой судья этой выставки.
-    return any(j.judge_id == user_id for j in show.judges)
+    return any(
+        j.judge_id == user_id and _judge_covers(j, breed) for j in show.judges
+    )
+
+
+def _resolve_judge_id(
+    show: Show, user_id: uuid.UUID, breed: Breed
+) -> uuid.UUID | None:
+    """
+    Судья результата (ревью 2026-10-06, BE-26): тот, кто судит породу, а не
+    тот, кто вводит оценку. Раньше секретарь/организатор, вносящий
+    результаты за судью, записывался судьёй в результат и в титулы (а
+    оттуда — в дипломы и сертификаты). Приоритет: сам пользователь, если
+    он назначен на породу; затем судья породы, группы, всех пород.
+    Нет назначения — None.
+    """
+    covering = [j for j in show.judges if _judge_covers(j, breed)]
+    if any(j.judge_id == user_id for j in covering):
+        return user_id
+    for match in (
+        lambda j: j.breed_id == breed.id,
+        lambda j: j.breed_group_id is not None
+        and j.breed_group_id == breed.breed_group_id,
+        lambda j: j.breed_id is None and j.breed_group_id is None,
+    ):
+        for j in covering:
+            if match(j):
+                return j.judge_id
+    return None
+
+
+# Окно ввода результатов: регистрация закрыта или выставка идёт. До этого —
+# рано, после публикации (completed) — поздно.
+_RESULTS_EDITABLE_STATUSES = (ShowStatus.in_progress, ShowStatus.registration_closed)
+
+
+def _ensure_results_window(show: Show) -> None:
+    if show.status not in _RESULTS_EDITABLE_STATUSES:
+        raise ValueError("show_not_in_progress")
+
+
+def _ensure_admitted(show: Show, entry: ShowEntry) -> None:
+    """Чек-ин: не явившимся и не допущенным результат/титул не вносится.
+    registered/arrived допустимы — опоздавших отмечают по ходу выставки."""
+    if show.checkin_enabled and entry.attendance_status in (
+        AttendanceStatus.absent,
+        AttendanceStatus.rejected,
+    ):
+        raise ValueError("entry_not_admitted")
 
 
 async def _ensure_can_edit(
@@ -58,34 +115,25 @@ async def _ensure_can_edit(
     show_entry_id: uuid.UUID,
     user_id: uuid.UUID,
     is_admin: bool,
-) -> tuple[Show, ShowEntry]:
+) -> tuple[Show, ShowEntry, Dog, Breed]:
     """
     Проверки контекста: запись существует, выставка в правильном статусе,
     пользователь имеет право вводить результаты.
-    Возвращает (show, entry).
+    Возвращает (show, entry, dog, breed).
     """
     ctx = await repo.get_entry_context(db, show_entry_id)
     if ctx is None:
         raise ValueError("entry_not_found")
-    entry, _dog, _breed = ctx
+    entry, dog, breed = ctx
     # Подгружаем выставку с judges (нужно для _can_modify_results).
     show = await show_repo.get_show_with_relations(db, entry.show_id)
     if show is None:
         raise ValueError("not_found")
-    if show.status not in (ShowStatus.in_progress, ShowStatus.registration_closed):
-        # Результаты можно вводить, когда регистрация закрыта или
-        # выставка идёт. До этого — рано, после publish — поздно.
-        raise ValueError("show_not_in_progress")
-    if not _can_modify_results(show, user_id, is_admin):
+    _ensure_results_window(show)
+    if not _can_modify_results(show, user_id, is_admin, breed):
         raise ValueError("forbidden")
-    # Чек-ин: не явившимся и не допущенным результат не вносится.
-    # registered/arrived допустимы — опоздавших отмечают по ходу выставки.
-    if show.checkin_enabled and entry.attendance_status in (
-        AttendanceStatus.absent,
-        AttendanceStatus.rejected,
-    ):
-        raise ValueError("entry_not_admitted")
-    return show, entry
+    _ensure_admitted(show, entry)
+    return show, entry, dog, breed
 
 
 # ---------------------------------------------------------------------
@@ -102,6 +150,50 @@ _CLASS_TITLE_CODES = (
     show_rules.TITLE_R_CAC,
     show_rules.TITLE_JUW,
 )
+
+
+# Титулы уровней best-of (ревью 2026-10-06, BE-04). CACIB выдаётся только
+# BOB-победителю (get_best_of_breed_titles вызывается для победителя),
+# поэтому живёт на уровне BOB. При снятии флага уровня его титулы
+# отзываются — иначе после перевыбора у двух собак породы оставалось по BOB.
+_BOB_TITLE_CODES = (show_rules.TITLE_BOB, show_rules.TITLE_CACIB)
+_BIG_TITLE_CODES = (show_rules.TITLE_BIG,)
+_BIS_TITLE_CODES = (show_rules.TITLE_BIS,)
+
+
+def _level_codes(result: ShowResult, *, bob: bool, big: bool, bis: bool) -> list[str]:
+    """Коды титулов, которые держат текущие флаги результата (по уровням)."""
+    codes: list[str] = []
+    if bob and result.is_best_of_breed:
+        codes += _BOB_TITLE_CODES
+    if big and result.is_best_in_group:
+        codes += _BIG_TITLE_CODES
+    if bis and result.is_best_in_show:
+        codes += _BIS_TITLE_CODES
+    return codes
+
+
+async def _revoke_titles(
+    db: AsyncSession,
+    *,
+    result: ShowResult,
+    show_id: uuid.UUID,
+    codes: list[str],
+) -> None:
+    """Отзывает у собаки результата титулы с кодами codes на этой выставке:
+    строки dog_titles и записи titles_cache."""
+    if not codes:
+        return
+    entry = await db.get(ShowEntry, result.show_entry_id)
+    if entry is None:
+        return
+    await repo.delete_dog_titles_by_codes(
+        db, dog_id=entry.dog_id, show_id=show_id, codes=codes
+    )
+    if result.titles_cache:
+        result.titles_cache = [
+            item for item in result.titles_cache if item["code"] not in codes
+        ]
 
 
 async def _revoke_stale_class_titles(
@@ -209,6 +301,7 @@ async def upsert_class_result(
     grade_id: uuid.UUID | None,
     placement: int | None,
     critique: str | None,
+    clear: frozenset[str] | set[str] = frozenset(),
 ) -> ShowResult:
     """
     Создаёт или обновляет результат в ринге класса.
@@ -222,7 +315,10 @@ async def upsert_class_result(
 
     Возвращает обновлённый ShowResult.
     """
-    show, entry = await _ensure_can_edit(db, show_entry_id, user_id, is_admin)
+    show, entry, dog, breed = await _ensure_can_edit(
+        db, show_entry_id, user_id, is_admin
+    )
+    judge_id = _resolve_judge_id(show, user_id, breed)
 
     # Подгрузим контекст ринга: класс, ранг, оценка, animal_type.
     cls = await db.get(ShowClass, entry.show_class_id)
@@ -237,29 +333,45 @@ async def upsert_class_result(
     if grade_id is not None and grade is None:
         raise ValueError("grade_not_found")
 
+    # Одно место в классе (с учётом пола) — у одной собаки (BE-26): два
+    # «первых места» давали два CW/CAC.
+    if placement is not None and await repo.placement_taken(
+        db,
+        show_id=show.id,
+        show_class_id=entry.show_class_id,
+        breed_id=dog.breed_id,
+        sex=dog.sex,
+        placement=placement,
+        exclude_entry_id=entry.id,
+    ):
+        raise ValueError("placement_taken")
+
     # UPSERT — если результат уже был, обновляем поля; иначе создаём.
     result = await repo.get_result_by_entry(db, show_entry_id)
     if result is None:
         result = await repo.create_result(
             db,
             show_entry_id=show_entry_id,
-            judge_id=user_id,
+            judge_id=judge_id,
             grade_id=grade_id,
             placement=placement,
             critique=critique,
         )
     else:
-        # Только не-None поля обновляем — позволяет частичный update
-        # из роутера.
-        if grade_id is not None:
+        # None = «не менять» (частичный update), кроме полей из clear —
+        # их клиент явно передал как null (BE-26: сброс оценки/места).
+        if grade_id is not None or "grade_id" in clear:
             result.grade_id = grade_id
-        if placement is not None:
+        if placement is not None or "placement" in clear:
             result.placement = placement
-        if critique is not None:
+        if critique is not None or "critique" in clear:
             result.critique = critique
-        result.judge_id = user_id
+        result.judge_id = judge_id
 
-    # Вычисляем титулы класса.
+    # Вычисляем титулы класса по ИТОГОВЫМ значениям результата: оценка
+    # могла не передаваться в этом запросе.
+    if grade is None and result.grade_id is not None:
+        grade = await repo.get_grade(db, result.grade_id)
     awards = await show_rules.compute_class_titles(
         db,
         animal_type_id=cls.animal_type_id,
@@ -322,12 +434,11 @@ async def delete_result(
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
         raise ValueError("not_found")
-    if show.status not in (
-        ShowStatus.in_progress,
-        ShowStatus.registration_closed,
-    ):
-        raise ValueError("show_not_in_progress")
-    if not _can_modify_results(show, user_id, is_admin):
+    _ensure_results_window(show)
+    # Судья удаляет результаты только своих пород (как и вводит, BE-26).
+    ctx = await repo.get_entry_context(db, entry.id)
+    breed = ctx[2] if ctx is not None else None
+    if not _can_modify_results(show, user_id, is_admin, breed):
         raise ValueError("forbidden")
 
     # Сначала отзываем титулы, потом удаляем сам результат — порядок не
@@ -366,6 +477,8 @@ async def set_best_of_breed(
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
         raise ValueError("not_found")
+    # BE-03: тот же статус-гейт, что у ввода результата ринга.
+    _ensure_results_window(show)
     if not _can_modify_results(show, user_id, is_admin):
         raise ValueError("forbidden")
 
@@ -395,6 +508,11 @@ async def set_best_of_breed(
         db, show_id, breed_id, for_update=True
     )
     for r in existing:
+        # BE-04: вместе с флагами отзываем титулы их уровней.
+        await _revoke_titles(
+            db, result=r, show_id=show_id,
+            codes=_level_codes(r, bob=True, big=True, bis=True),
+        )
         r.is_best_of_breed = False
         r.is_best_male = False
         r.is_best_female = False
@@ -417,6 +535,7 @@ async def set_best_of_breed(
         entry, dog, breed = ctx
         if entry.show_id != show_id or dog.breed_id != breed_id:
             raise ValueError("entry_breed_mismatch")
+        _ensure_admitted(show, entry)
         result = await repo.get_result_by_entry(db, entry_id)
         if result is None:
             raise ValueError("result_not_found")
@@ -487,6 +606,7 @@ async def set_best_in_group(
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
         raise ValueError("not_found")
+    _ensure_results_window(show)
     if not _can_modify_results(show, user_id, is_admin):
         raise ValueError("forbidden")
 
@@ -504,6 +624,10 @@ async def set_best_in_group(
         db, show_id, breed_group_id, for_update=True
     )
     for r in prev:
+        await _revoke_titles(
+            db, result=r, show_id=show_id,
+            codes=_level_codes(r, bob=False, big=True, bis=True),
+        )
         r.is_best_in_group = False
         r.is_best_in_show = False
 
@@ -515,6 +639,7 @@ async def set_best_in_group(
         raise ValueError("entry_show_mismatch")
     if breed.breed_group_id != breed_group_id:
         raise ValueError("entry_group_mismatch")
+    _ensure_admitted(show, entry)
 
     winner = await repo.get_result_by_entry(db, winner_entry_id)
     if winner is None:
@@ -554,6 +679,7 @@ async def set_best_in_show(
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
         raise ValueError("not_found")
+    _ensure_results_window(show)
     if not _can_modify_results(show, user_id, is_admin):
         raise ValueError("forbidden")
 
@@ -564,6 +690,10 @@ async def set_best_in_show(
         db, show_id, for_update=True
     )
     for r in prev:
+        await _revoke_titles(
+            db, result=r, show_id=show_id,
+            codes=_level_codes(r, bob=False, big=False, bis=True),
+        )
         r.is_best_in_show = False
 
     ctx = await repo.get_entry_context(db, winner_entry_id)
@@ -572,6 +702,7 @@ async def set_best_in_show(
     entry, _dog, breed = ctx
     if entry.show_id != show_id:
         raise ValueError("entry_show_mismatch")
+    _ensure_admitted(show, entry)
 
     winner = await repo.get_result_by_entry(db, winner_entry_id)
     if winner is None:

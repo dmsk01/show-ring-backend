@@ -12,9 +12,9 @@ from __future__ import annotations
 import time
 
 import pytest
-from jose import JWTError
 
 from app.utils.security import (
+    JWTError,
     create_access_token,
     create_refresh_token_value,
     decode_access_token,
@@ -184,3 +184,92 @@ def test_dummy_verify_similar_time_to_real():
     # 5x допуск: bcrypt-cost иногда вариативен на CI/dev-машинах.
     assert real / fake < 5
     assert fake / real < 5
+
+
+# ---------------------------------------------------------------------
+# BE-08: bcrypt не блокирует event loop
+# ---------------------------------------------------------------------
+
+
+async def test_async_password_helpers_do_not_block_event_loop():
+    """Пока идёт bcrypt (~сотни мс CPU), loop обязан обслуживать другие
+    корутины — иначе один логин замораживает весь API и WebSocket."""
+    import asyncio
+
+    from app.utils.security import (
+        dummy_verify_password_async,
+        hash_password_async,
+        verify_password_async,
+    )
+
+    hashed = hash_password("Correct-Pass-1")
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def ticker():
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0.001)
+
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    before = ticks
+    assert await verify_password_async("Correct-Pass-1", hashed) is True
+    assert await verify_password_async("wrong", hashed) is False
+    new_hash = await hash_password_async("Other-Pass-2")
+    await dummy_verify_password_async()
+    stop.set()
+    await task
+
+    assert verify_password("Other-Pass-2", new_hash)
+    # За 4 операции bcrypt тикер должен был проснуться много раз.
+    assert ticks - before > 10
+
+
+# ---------------------------------------------------------------------
+# BE-29: замена python-jose/passlib/bleach
+# ---------------------------------------------------------------------
+
+# Хэши, выпущенные прежней реализацией (passlib + bcrypt<4.1). Новая
+# реализация обязана их проверять — иначе после выкатки никто не войдёт.
+_LEGACY_HASH = "$2b$12$pqvVzSHrdMZrJ.Y4LqytZ.8AWEDa0opQHet0/4e6acDsu4MQXaf1."
+# Пароль длиннее 72 байт: passlib молча обрезал его до 72 при хэшировании.
+_LEGACY_LONG_HASH = "$2b$12$BSxrs7E0FgZDeblwEHtX2eboYnxYSAwG5JxE7i4hptuwjmWil9ug6"
+
+
+def test_legacy_passlib_hash_still_verifies():
+    assert verify_password("Legacy-Pass-1", _LEGACY_HASH)
+    assert not verify_password("wrong", _LEGACY_HASH)
+
+
+def test_legacy_long_password_verifies_without_error():
+    assert verify_password("Ж" * 40, _LEGACY_LONG_HASH)
+
+
+def test_deprecated_libraries_not_imported():
+    import pathlib
+    import re
+
+    pattern = re.compile(r"^\s*(from|import)\s+(jose|passlib|bleach|structlog)\b", re.M)
+    offenders = [
+        str(p)
+        for base in ("app", "worker", "scripts")
+        for p in pathlib.Path(base).rglob("*.py")
+        if pattern.search(p.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []
+
+
+def test_jwt_alg_none_rejected():
+    import base64
+    import json
+
+    def b64(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+
+    token = b64({"alg": "none", "typ": "JWT"}) + "." + b64(
+        {"sub": "x", "type": "access", "exp": int(time.time()) + 60}
+    ) + "."
+    with pytest.raises(JWTError):
+        decode_access_token(token)

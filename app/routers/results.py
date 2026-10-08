@@ -15,9 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_user_optional
 from app.models.show import ShowEntry
 from app.models.user import User
+from app.utils.pagination import ANON_MAX_PER_PAGE_LARGE, cap_per_page
 from app.repositories import result as repo
 from app.schemas.result import (
     BestInGroupRequest,
@@ -35,6 +36,11 @@ router = APIRouter(prefix="/shows/{show_id}/results", tags=["results"])
 
 def _is_admin(user: User) -> bool:
     return any(r.role.value == "admin" for r in user.roles)
+
+
+def _explicit_nulls(body) -> set[str]:
+    """Поля, явно переданные как null (а не просто не переданные)."""
+    return {f for f in body.model_fields_set if getattr(body, f) is None}
 
 
 def _raise_for_error(err: ValueError) -> NoReturn:
@@ -61,7 +67,7 @@ def _raise_for_error(err: ValueError) -> NoReturn:
         "winner_must_be_big",
     ):
         raise HTTPException(422, code)
-    if code == "entry_not_admitted":
+    if code in ("entry_not_admitted", "placement_taken"):
         raise HTTPException(409, code)
     raise HTTPException(400, code)
 
@@ -97,6 +103,8 @@ async def upsert_result(
             grade_id=body.grade_id,
             placement=body.placement,
             critique=body.critique,
+            # Явный null в теле = сбросить поле (BE-26).
+            clear=_explicit_nulls(body),
         )
     except ValueError as e:
         _raise_for_error(e)
@@ -139,6 +147,8 @@ async def update_result(
             grade_id=body.grade_id,
             placement=body.placement,
             critique=body.critique,
+            # Явный null в теле = сбросить поле (BE-26).
+            clear=_explicit_nulls(body),
         )
     except ValueError as e:
         _raise_for_error(e)
@@ -177,7 +187,9 @@ async def list_results(
     page: int = Query(1, ge=1),
     per_page: int = Query(200, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
 ):
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE_LARGE)
     items = await repo.list_results_for_show(
         db, show_id, page=page, per_page=per_page
     )

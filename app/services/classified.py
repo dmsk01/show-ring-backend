@@ -171,7 +171,9 @@ async def update_classified(
     # объявление (active → closed), приоритет у withdraw — в модерацию не
     # уходим. content_changed отсекает «пустой» PUT, где меняется только
     # status (например, эхо текущего статуса) без правки контента.
-    content_changed = any(k != "status" for k in fields)
+    # contacts_public — видимость контактов (согласие ст. 10.1), а не
+    # правка контента: повторная модерация из-за него не нужна.
+    content_changed = any(k not in ("status", "contacts_public") for k in fields)
     if (
         not is_admin
         and content_changed
