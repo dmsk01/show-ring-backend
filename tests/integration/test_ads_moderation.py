@@ -126,3 +126,18 @@ async def test_free_impressions_rejected(client, db_session):
     _, owner = await _login(client, db_session, RoleEnum.organizer)
     r = await _create(client, owner, cost_per_impression="0")
     assert r.status_code == 422, r.text
+
+
+async def test_campaign_response_exposes_approved_at(client, db_session):
+    """Ревью фронтенда 2026-10-09, FE-13: без approved_at в ответе фронт не мог
+    показать, что кампания ждёт модерации."""
+    _, owner = await _login(client, db_session, RoleEnum.organizer)
+    _, admin = await _login(client, db_session, RoleEnum.admin)
+    created = (await _create(client, owner)).json()
+    assert "approved_at" in created
+    assert created["approved_at"] is None
+    r = await client.put(
+        f"/ads/campaigns/{created['id']}", json={"status": "active"}, headers=_auth(admin)
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["approved_at"] is not None

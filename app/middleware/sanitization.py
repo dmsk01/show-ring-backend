@@ -87,7 +87,12 @@ def _strip_tags(text: str) -> str:
         if cleaned == current:
             return cleaned
         current = cleaned
-    return current
+    # ИСПРАВЛЕНО (ревью фронтенда 2026-10-09, FE-01): неподвижная точка не
+    # достигнута — последний unescape мог «проявить» тег из многократно
+    # экранированной строки (5 уровней → сырой <meta http-equiv="refresh">).
+    # Финальная очистка БЕЗ раскодирования: в данных остаются только
+    # сущности (&lt;meta…), которые React/Jinja выводят как текст.
+    return nh3.clean(current, tags=set())
 
 
 def _sanitize(

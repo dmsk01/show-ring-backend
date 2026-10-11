@@ -21,6 +21,7 @@ from app.database import get_db
 from app.dependencies import get_current_user, is_admin, require_any_role, get_current_user_optional
 from app.models.show import ShowStatus
 from app.models.user import User
+from app.utils.locale import Locale, get_locale
 from app.utils.pagination import ANON_MAX_PER_PAGE, ANON_MAX_PER_PAGE_LARGE, cap_per_page
 from app.repositories import show as repo
 from app.schemas.show import (
@@ -33,6 +34,8 @@ from app.schemas.show import (
     ShowEntryCreate,
     ShowEntryPage,
     ShowEntryResponse,
+    ShowEntryRow,
+    ShowEntryRowPage,
     ShowEntryUpdate,
     ShowJudgeCreate,
     ShowJudgeResponse,
@@ -491,6 +494,45 @@ async def list_my_entries(
         )
         for entry, dog_name, class_code, class_name in rows
     ]
+
+
+def _localized(name: str | None, name_en: str | None, locale: Locale) -> str | None:
+    return name_en if locale == "en" and name_en else name
+
+
+@router.get(
+    "/{show_id}/entries/table",
+    response_model=ShowEntryRowPage,
+    summary="Записи для таблицы результатов (с кличками, породами, питомниками)",
+)
+async def list_entry_rows(
+    show_id: uuid.UUID,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(200, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
+    locale: Locale = Depends(get_locale),
+):
+    # Те же правила видимости и лимит гостя, что у /entries (FE-08).
+    await _get_visible_show(db, show_id, viewer)
+    per_page = cap_per_page(per_page, viewer, ANON_MAX_PER_PAGE_LARGE)
+    rows = await repo.list_show_entry_rows(db, show_id, page=page, per_page=per_page)
+    total = await repo.count_show_entries(db, show_id)
+    items = [
+        ShowEntryRow(
+            **ShowEntryResponse.model_validate(entry).model_dump(),
+            dog_name=dog.name,
+            breed_id=dog.breed_id,
+            breed_name=_localized(breed.name, breed.name_en, locale) if breed else None,
+            breed_group_id=breed.breed_group_id if breed else None,
+            kennel_id=dog.kennel_id,
+            kennel_name=kennel.name if kennel else None,
+            kennel_prefix=kennel.kennel_prefix if kennel else None,
+            class_name=_localized(cls.name, cls.name_en, locale) if cls else None,
+        )
+        for entry, dog, breed, kennel, cls in rows
+    ]
+    return ShowEntryRowPage(items=items, total=total, page=page, per_page=per_page)
 
 
 @router.get(

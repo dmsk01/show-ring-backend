@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.dog import Dog
+from app.models.kennel import Kennel
 from app.models.reference import Breed, ShowClass
 from app.models.show import (
     Show,
@@ -275,6 +276,32 @@ async def is_dog_registered(
         ShowEntry.show_id == show_id, ShowEntry.dog_id == dog_id
     )
     return int((await db.execute(stmt)).scalar_one()) > 0
+
+
+async def list_show_entry_rows(
+    db: AsyncSession,
+    show_id: uuid.UUID,
+    *,
+    page: int = 1,
+    per_page: int = 200,
+) -> Sequence[Row]:
+    """Записи выставки с собакой, породой, питомником и классом одним
+    запросом (FE-08). Порядок — как в каталоге (см. list_show_entries)."""
+    stmt = (
+        select(ShowEntry, Dog, Breed, Kennel, ShowClass)
+        .join(Dog, Dog.id == ShowEntry.dog_id)
+        .outerjoin(Breed, Breed.id == Dog.breed_id)
+        .outerjoin(Kennel, Kennel.id == Dog.kennel_id)
+        .outerjoin(ShowClass, ShowClass.id == ShowEntry.show_class_id)
+        .where(ShowEntry.show_id == show_id)
+        .order_by(
+            ShowEntry.catalog_number.asc().nullslast(),
+            ShowEntry.created_at.asc(),
+        )
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    return (await db.execute(stmt)).all()
 
 
 async def list_show_entries(

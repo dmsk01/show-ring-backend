@@ -15,9 +15,10 @@ from typing import Any
 DELETED_USER_LABEL = "Удалённый пользователь"
 
 
-def full_name(user: Any | None) -> str:
+def full_name(user: Any | None, *, email_fallback: bool = True) -> str:
     """«Фамилия Имя Отчество», пустые части опускаются. Если профиль пуст —
-    fallback на email. None → пустая строка."""
+    fallback на email (email_fallback=False — пустая строка: для публичных
+    мест вроде автора поста). None → пустая строка."""
     if user is None:
         return ""
     if getattr(user, "deleted_at", None) is not None:
@@ -33,7 +34,9 @@ def full_name(user: Any | None) -> str:
         if joined:
             return joined
     # Телефон сюда НЕ подставляем: имя попадает в публичные документы
-    # (каталоги, дипломы) и авторов блога, а номер — логин для SMS-входа.
+    # (каталоги, дипломы), а номер — логин для SMS-входа.
+    if not email_fallback:
+        return ""
     return getattr(user, "email", "") or ""
 
 

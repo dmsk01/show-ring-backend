@@ -146,3 +146,18 @@ def test_repair_script_decodes_bleach_entities():
     assert decode_entities_once("a &lt;3 &gt; b") == "a <3 > b"
     # Двойное экранирование снимается за два прохода, а не одним «перескоком».
     assert decode_entities_once("&amp;amp;") == "&amp;"
+
+
+def test_multiply_encoded_tags_do_not_survive():
+    """Ревью фронтенда 2026-10-09, FE-01: строка, экранированная ровно столько
+    раз, сколько проходов очистки (5), раньше возвращалась сырым тегом —
+    <meta http-equiv="refresh"> уводил гостей со страницы собаки."""
+    import html
+
+    payload = '<meta http-equiv="refresh" content="0;url=https://evil.example/">'
+    for times in (5, 8):
+        encoded = payload
+        for _ in range(times):
+            encoded = html.escape(encoded, quote=False)
+        cleaned = _sanitize({"description": encoded})["description"]
+        assert "<meta" not in cleaned.lower(), times

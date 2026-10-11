@@ -441,6 +441,12 @@ async def refresh(
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> TokenResponse | JSONResponse:
+    # Без refresh-куки/тела — заведомо «сессии нет»: отвечаем 401 ДО лимитера.
+    # Такой запрос не трогает БД, а 429 на нём не давал фронту отличить
+    # «сессия жива, но лимит» от «сессии нет» (ревью фронтенда 2026-10-09, FE-03).
+    raw = _extract_refresh(request, body)
+    if not raw:
+        return _auth_error("missing_refresh_token", clear_cookies=True)
     await check_rate_limit(
         request,
         limit=5,
@@ -448,9 +454,6 @@ async def refresh(
         redis=redis,
         fail_closed=True,  # bug_247: см. /register
     )
-    raw = _extract_refresh(request, body)
-    if not raw:
-        return _auth_error("missing_refresh_token", clear_cookies=True)
     try:
         # ИСПРАВЛЕНО: возвращаем TokenResponse целиком — клиент обязан
         # заменить refresh-токен. См. rotation в services.auth.refresh_access_token.
@@ -476,13 +479,25 @@ async def logout(
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
-    await check_rate_limit(
-        request,
-        limit=5,
-        window=60,
-        redis=redis,
-        fail_closed=True,  # bug_247: см. /register
-    )
+    try:
+        await check_rate_limit(
+            request,
+            limit=5,
+            window=60,
+            redis=redis,
+            fail_closed=True,  # bug_247: см. /register
+        )
+    except HTTPException as exc:
+        # Лимит защищает отзыв токена в БД, но «выйти» должно срабатывать
+        # всегда: раньше 429 оставлял куки, и пользователь после «Выйти»
+        # оставался в аккаунте (ревью фронтенда 2026-10-09, живой прогон).
+        if exc.status_code != 429:
+            raise
+        limited = JSONResponse(
+            {"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers
+        )
+        _clear_auth_cookies(limited)
+        return limited
     # Куки чистим всегда, даже если токен уже отозван — иначе браузер
     # остаётся с невалидными куками и получает 401 на каждом запросе.
     # Logout идемпотентен (BE-13): отсутствующий или уже отозванный

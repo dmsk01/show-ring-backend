@@ -88,6 +88,9 @@ class CampaignResponse(CampaignBase):
     advertiser_id: uuid.UUID
     spent: Decimal
     status: CampaignStatus
+    # Модерация (ревью фронтенда 2026-10-09, FE-13): null — ещё не одобрена;
+    # без поля фронт не мог показать статус «на модерации».
+    approved_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
