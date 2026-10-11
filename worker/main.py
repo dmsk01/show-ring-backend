@@ -347,6 +347,10 @@ async def on_ad_event(message: aio_pika.abc.AbstractIncomingMessage):
             await on_ad_event_message(body)
         except Exception:
             logger.exception("ad_event processing failed (%d bytes)", len(body))
+            # Событие не записано (например, вытеснено из буфера при долгом
+            # сбое БД): не подтверждаем — process(requeue=False) отправит
+            # сообщение в DLQ, а не потеряет молча (BE-06).
+            raise
 
 
 async def run_ad_events() -> None:
