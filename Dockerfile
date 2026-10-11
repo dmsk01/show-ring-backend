@@ -37,9 +37,10 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # не меняется. Код в этот слой не попадает, чтобы не инвалидировать
 # кэш при каждом git pull.
 WORKDIR /build
-COPY requirements.txt ./
+# constraints.txt — точные проверенные версии (BE-29): сборка повторяема.
+COPY requirements.txt constraints.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # ---------------------------------------------------------------------
 # Stage 2: runtime

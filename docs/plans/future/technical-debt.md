@@ -230,8 +230,9 @@ Prometheus, логика сбора не меняется.
 - **BE-28 — Sanitization и Idempotency** остались на `BaseHTTPMiddleware`
   (переписывают тело запроса); остальные middleware переведены на ASGI.
   Долгосрочно — idempotency на уровне зависимости после аутентификации.
-- **BE-29 — lock-файл зависимостей** не создан; офлайн-каталог `packages/`
-  устарел — перезапустить `scripts/download_packages.sh`.
+- **BE-29 — офлайн-каталог `packages/`** устарел: перезапустить
+  `scripts/download_packages.sh`. Точные версии зафиксированы в
+  `constraints.txt` (обновление — `scripts/update_constraints.sh`).
 - **BE-32 — доменные исключения** (`app/errors.py`): переведён модуль
   выставок, остальные модули — по образцу, по одному.
 - **BE-33 — политики доступа:** `app/policies` есть, объект `Actor` не
