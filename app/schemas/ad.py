@@ -174,6 +174,9 @@ class ServeResponse(BaseModel):
     erid: str
     advertiser_name: str | None
     advertiser_inn: str | None
+    # Подписанный токен показа (BE-25): фронт передаёт его в /ads/events,
+    # без него событие не учитывается.
+    impression_token: str
 
 
 # ---------------------------------------------------------------------
@@ -190,6 +193,9 @@ class AdEventCreate(BaseModel):
     banner_id: uuid.UUID
     event_type: AdEventType
     page_url: str | None = Field(None, max_length=2048)
+    # Токен из /ads/serve (BE-25): подтверждает, что баннер действительно
+    # был выдан, и засчитывается один раз на тип события.
+    impression_token: str = Field(..., max_length=200)
 
 
 # ---------------------------------------------------------------------
