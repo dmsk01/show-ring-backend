@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
+from app.models.ad import CampaignStatus
 from app.models.classified import ClassifiedStatus
 from app.models.user import RoleEnum
 
@@ -109,6 +110,18 @@ class ClassifiedModerationDecision(BaseModel):
     reason: str | None = Field(None, max_length=500)
 
 
+class CampaignModerationDecision(BaseModel):
+    """
+    Решение модератора по рекламной кампании (ревью фронтенда 2026-10-09,
+    FE-37). approve=True — одобрить и запустить в показ (status=active,
+    approved_at); approve=False — отменить (status=cancelled). Причина
+    отказа уходит в moderation_logs.
+    """
+
+    approve: bool
+    reason: str | None = Field(None, max_length=500)
+
+
 class KennelVerifyRequest(BaseModel):
     is_verified: bool
 
@@ -126,6 +139,23 @@ class UserBlockRequest(BaseModel):
 # ---------------------------------------------------------------------
 # Списки на модерацию
 # ---------------------------------------------------------------------
+
+
+class CampaignModerationItem(BaseModel):
+    """Кампания, ожидающая модерации: ещё не одобрена и не завершена."""
+
+    id: uuid.UUID
+    advertiser_id: uuid.UUID
+    # Пользователи, вошедшие по телефону, могут быть без email.
+    advertiser_email: str | None
+    advertiser_name: str | None
+    name: str
+    budget: Decimal
+    cost_per_impression: Decimal
+    date_start: date
+    date_end: date
+    status: CampaignStatus
+    created_at: datetime
 
 
 class ClassifiedModerationItem(BaseModel):

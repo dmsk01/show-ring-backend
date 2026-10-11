@@ -141,3 +141,73 @@ async def test_campaign_response_exposes_approved_at(client, db_session):
     )
     assert r.status_code == 200, r.text
     assert r.json()["approved_at"] is not None
+
+
+# ---------------------------------------------------------------------
+# Очередь модерации кампаний для админа (ревью фронтенда 2026-10-09, FE-37):
+# страница правки ищет кампанию среди «моих», и чужую админ не находил —
+# одобрить кампанию организатора можно было только запросом к API.
+# ---------------------------------------------------------------------
+
+
+async def _pending_ids(client, admin) -> list[str]:
+    r = await client.get("/admin/moderation/campaigns", headers=_auth(admin))
+    assert r.status_code == 200, r.text
+    return [c["id"] for c in r.json()]
+
+
+async def test_moderation_queue_lists_unapproved_campaigns(client, db_session):
+    _, owner = await _login(client, db_session, RoleEnum.organizer)
+    _, admin = await _login(client, db_session, RoleEnum.admin)
+    cid = (await _create(client, owner, name="На проверку")).json()["id"]
+
+    r = await client.get("/admin/moderation/campaigns", headers=_auth(admin))
+    assert r.status_code == 200, r.text
+    item = next(c for c in r.json() if c["id"] == cid)
+    assert item["name"] == "На проверку"
+    assert item["status"] == "draft"
+    assert item["advertiser_email"].startswith("ads_")
+
+
+async def test_moderation_queue_is_admin_only(client, db_session):
+    _, owner = await _login(client, db_session, RoleEnum.organizer)
+    r = await client.get("/admin/moderation/campaigns", headers=_auth(owner))
+    assert r.status_code == 403, r.text
+
+
+async def test_admin_approves_campaign_from_queue(client, db_session):
+    _, owner = await _login(client, db_session, RoleEnum.organizer)
+    _, admin = await _login(client, db_session, RoleEnum.admin)
+    cid = (await _create(client, owner)).json()["id"]
+
+    r = await client.put(
+        f"/admin/moderation/campaigns/{cid}", json={"approve": True}, headers=_auth(admin)
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "active"
+    assert r.json()["approved_at"] is not None
+    assert cid not in await _pending_ids(client, admin)
+
+
+async def test_admin_rejects_campaign_from_queue(client, db_session):
+    _, owner = await _login(client, db_session, RoleEnum.organizer)
+    _, admin = await _login(client, db_session, RoleEnum.admin)
+    cid = (await _create(client, owner)).json()["id"]
+
+    r = await client.put(
+        f"/admin/moderation/campaigns/{cid}",
+        json={"approve": False, "reason": "Ссылка ведёт на чужой сайт"},
+        headers=_auth(admin),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "cancelled"
+    assert r.json()["approved_at"] is None
+    assert cid not in await _pending_ids(client, admin)
+
+
+async def test_moderation_decision_on_unknown_campaign(client, db_session):
+    _, admin = await _login(client, db_session, RoleEnum.admin)
+    r = await client.put(
+        f"/admin/moderation/campaigns/{uuid.uuid4()}", json={"approve": True}, headers=_auth(admin)
+    )
+    assert r.status_code == 404, r.text
