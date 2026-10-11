@@ -33,7 +33,7 @@ jobs:
           cache: pip
       # Зависимости проекта нужны pyright (иначе reportMissingImports на
       # каждый fastapi/sqlalchemy); ruff/pyright закреплены в requirements-dev.
-      - run: pip install -r requirements-dev.txt
+      - run: pip install -r requirements-dev.txt -c constraints.txt
       - run: ruff check .
       - run: pyright app worker
 
@@ -71,7 +71,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       # pytest и плагины — в requirements-dev.txt (он включает requirements.txt).
-      - run: pip install -r requirements-dev.txt
+      - run: pip install -r requirements-dev.txt -c constraints.txt
       # Таблицы должны существовать ДО тестов — conftest их не создаёт.
       - name: Apply migrations
         run: alembic upgrade head

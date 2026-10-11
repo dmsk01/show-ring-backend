@@ -26,7 +26,7 @@ lint:
   stage: lint
   script:
     # ruff/pyright не в requirements.txt — dev-tools ставим отдельно.
-    - pip install ruff pyright
+    - pip install ruff pyright -c constraints.txt
     - ruff check .
     - pyright app worker
 
@@ -47,7 +47,7 @@ test:
     # ≥32 символов и не плейсхолдер (app/config.py). CI-значение, не для прода.
     SECRET_KEY: "ci-secret-key-not-for-production-0123456789abcdef"
   script:
-    - pip install -r requirements.txt
+    - pip install -r requirements.txt -c constraints.txt
     - alembic upgrade head      # таблицы должны существовать ДО тестов
     - python -m scripts.seed_references  # справочники, иначе часть тестов skip
     - pytest -q -rs

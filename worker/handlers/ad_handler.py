@@ -150,10 +150,19 @@ class BatchAccumulator:
 
     Реализация: фоновая задача periodic_flush + флаш по count в add().
     Lock защищает от race condition между add и periodic_flush.
+
+    Ревью 2026-10-06, BE-06: add() возвращает future, который завершается
+    после коммита батча с этим событием. Обработчик сообщения ждёт его, и
+    message.process() подтверждает сообщение в RabbitMQ только после записи
+    в БД. Падение воркера до записи → сообщения не подтверждены, брокер
+    отдаст их заново. Цена — at-least-once: при падении между COMMIT и ack
+    событие может посчитаться дважды (дедупликация повторов — на стороне API).
+    Поэтому prefetch очереди (100) должен быть не меньше BATCH_SIZE (50):
+    иначе неподтверждённые сообщения не дадут набрать батч.
     """
 
     def __init__(self, session_factory):
-        self._buffer: list[dict] = []
+        self._buffer: list[tuple[dict, asyncio.Future]] = []
         self._lock = asyncio.Lock()
         self._session_factory = session_factory
         self._flush_task: asyncio.Task | None = None
@@ -190,9 +199,10 @@ class BatchAccumulator:
         if batch:
             await self._flush(batch)
 
-    async def add(self, event: dict) -> None:
+    async def add(self, event: dict) -> asyncio.Future:
+        done: asyncio.Future = asyncio.get_running_loop().create_future()
         async with self._lock:
-            self._buffer.append(event)
+            self._buffer.append((event, done))
             if len(self._buffer) >= BATCH_SIZE:
                 batch, self._buffer = self._buffer, []
             else:
@@ -201,6 +211,7 @@ class BatchAccumulator:
         # блокировать новые add().
         if batch:
             await self._flush(batch)
+        return done
 
     async def _periodic_flush(self) -> None:
         while True:
@@ -213,7 +224,7 @@ class BatchAccumulator:
             if batch:
                 await self._flush(batch)
 
-    async def _flush(self, batch: list[dict]) -> None:
+    async def _flush(self, batch: list[tuple[dict, asyncio.Future]]) -> None:
         """
         ИСПРАВЛЕНО (bug_240 audit 2026-05-28): при ошибке process_batch
         возвращаем события в начало буфера, чтобы следующий тик
@@ -226,27 +237,40 @@ class BatchAccumulator:
         """
         async with self._session_factory() as db:
             try:
-                await process_batch(db, batch)
+                await process_batch(db, [event for event, _ in batch])
             except Exception:
                 logger.exception(
                     "ad_events batch flush failed (size=%d) — "
                     "returning to buffer for retry",
                     len(batch),
                 )
-                async with self._lock:
-                    # Кладём в НАЧАЛО — сохраняем хронологию.
-                    self._buffer[:0] = batch
-                    if len(self._buffer) > _MAX_BUFFER_SIZE:
-                        # Растущий бесконтрольно буфер = OOM. Дропаем
-                        # самые старые (FIFO retention) после порога —
-                        # лучше потерять часть, чем уронить воркер.
-                        drop = len(self._buffer) - _MAX_BUFFER_SIZE
-                        del self._buffer[:drop]
-                        logger.error(
-                            "ad_events buffer overflow: dropped %d "
-                            "oldest events (cap=%d)",
-                            drop, _MAX_BUFFER_SIZE,
-                        )
+                await self._requeue(batch)
+                return
+        for _event, done in batch:
+            if not done.done():
+                done.set_result(None)
+
+    async def _requeue(self, batch: list[tuple[dict, asyncio.Future]]) -> None:
+        """Вернуть батч в начало буфера для повтора (bug_240)."""
+        async with self._lock:
+            # Кладём в НАЧАЛО — сохраняем хронологию.
+            self._buffer[:0] = batch
+            if len(self._buffer) > _MAX_BUFFER_SIZE:
+                # Растущий бесконтрольно буфер = OOM. Дропаем самые старые
+                # (FIFO retention) после порога — лучше потерять часть, чем
+                # уронить воркер.
+                drop = len(self._buffer) - _MAX_BUFFER_SIZE
+                for _event, lost in self._buffer[:drop]:
+                    # Сообщение не «успешно»: обработчик получит ошибку →
+                    # nack в DLQ, а не тихий ack без записи.
+                    if not lost.done():
+                        lost.set_exception(RuntimeError("ad_event dropped: buffer overflow"))
+                del self._buffer[:drop]
+                logger.error(
+                    "ad_events buffer overflow: dropped %d oldest events (cap=%d)",
+                    drop,
+                    _MAX_BUFFER_SIZE,
+                )
 
 
 # Глобальный аккумулятор — стартует в worker/main.py.
@@ -271,4 +295,7 @@ async def on_ad_event_message(body: str) -> None:
     except ValueError as e:
         logger.warning("Bad ad_event payload: %s (%s)", body, e)
         return
-    await _accumulator.add(data)
+    # Ждём записи батча: обёртка message.process() подтвердит сообщение
+    # только после этого (BE-06).
+    done = await _accumulator.add(data)
+    await done
