@@ -39,6 +39,7 @@ from app.schemas.ad import (
     ServeResponse,
 )
 from app.services import ad as svc
+from app.utils import ad_token
 
 router = APIRouter(prefix="/ads", tags=["ads"])
 
@@ -263,6 +264,7 @@ async def serve_banner(
         erid=banner.erid,
         advertiser_name=campaign.advertiser_name,
         advertiser_inn=campaign.advertiser_inn,
+        impression_token=ad_token.make_token(banner.id),
     )
 
 
@@ -294,6 +296,24 @@ async def record_event(
         window=60,
         redis=redis,
     )
+    # BE-25: событие учитывается только с подписанным токеном этого баннера
+    # из /ads/serve, не старше ad_token.TTL_SECONDS.
+    try:
+        token_banner_id, nonce = ad_token.parse_token(body.impression_token)
+    except ad_token.InvalidAdToken:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_impression_token") from None
+    if token_banner_id != body.banner_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_impression_token")
+    # Один токен — одно событие каждого типа, с любого IP/UA. Повтор не
+    # учитывается (как дубль).
+    first_use = await redis.set(
+        f"ad_token:{nonce}:{body.event_type.value}",
+        "1",
+        nx=True,
+        ex=ad_token.TTL_SECONDS,
+    )
+    if not first_use:
+        return {"accepted": False}
     # ip и user_agent — из заголовков HTTP. Клиент не может подделать
     # (для X-Forwarded-For нужно доверять только реверс-прокси, что мы
     # настроим на этапе 15 при выкатке за nginx).
