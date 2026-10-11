@@ -16,10 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user, require_any_role  # noqa: F401
+from app.models.ad import AdCampaign, CampaignStatus
 from app.models.classified import Classified, ClassifiedStatus
 from app.models.kennel import Kennel
 from app.models.user import User, UserRole
+from app.schemas.ad import CampaignResponse
 from app.schemas.admin import (
+    CampaignModerationDecision,
+    CampaignModerationItem,
     ClassifiedModerationDecision,
     ClassifiedModerationItem,
     KennelModerationItem,
@@ -114,6 +118,77 @@ async def moderate_classified(
     except ValueError as e:
         _raise_for_error(e)
     return {"id": obj.id, "status": obj.status.value}
+
+
+# ---------------------------------------------------------------------
+# Campaigns (ревью фронтенда 2026-10-09, FE-37)
+# ---------------------------------------------------------------------
+
+
+@router.get(
+    "/moderation/campaigns",
+    response_model=list[CampaignModerationItem],
+    summary="Рекламные кампании на модерации",
+    description=(
+        "Кампании, которые ещё ни разу не одобрял админ (approved_at пуст) и "
+        "которые не завершены и не отменены. Старые — первыми."
+    ),
+)
+async def list_campaigns_on_moderation(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(AdCampaign, User.email)
+        .join(User, User.id == AdCampaign.advertiser_id)
+        .where(
+            AdCampaign.approved_at.is_(None),
+            AdCampaign.status.notin_(
+                [CampaignStatus.completed, CampaignStatus.cancelled]
+            ),
+        )
+        .order_by(AdCampaign.created_at.asc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        CampaignModerationItem(
+            id=c.id,
+            advertiser_id=c.advertiser_id,
+            advertiser_email=email,
+            advertiser_name=c.advertiser_name,
+            name=c.name,
+            budget=c.budget,
+            cost_per_impression=c.cost_per_impression,
+            date_start=c.date_start,
+            date_end=c.date_end,
+            status=c.status,
+            created_at=c.created_at,
+        )
+        for c, email in rows
+    ]
+
+
+@router.put(
+    "/moderation/campaigns/{campaign_id}",
+    response_model=CampaignResponse,
+    summary="Одобрить или отклонить рекламную кампанию",
+)
+async def moderate_campaign(
+    campaign_id: uuid.UUID,
+    body: CampaignModerationDecision,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+):
+    try:
+        obj = await svc.moderate_campaign(
+            db, campaign_id, body.approve, body.reason, actor_id=actor.id
+        )
+    except ValueError as e:
+        _raise_for_error(e)
+    return CampaignResponse.model_validate(obj)
 
 
 # ---------------------------------------------------------------------

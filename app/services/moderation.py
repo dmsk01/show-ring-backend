@@ -14,10 +14,12 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.ad import AdCampaign, CampaignStatus
 from app.models.audit import ModerationLog
 from app.models.classified import Classified, ClassifiedStatus
 from app.models.kennel import Kennel
@@ -77,6 +79,47 @@ async def moderate_classified(
         action="classified.approve" if approve else "classified.reject",
         target_type="classified",
         target_id=classified_id,
+        reason=reason,
+        extra={
+            "prev_status": prev_status.value,
+            "new_status": obj.status.value,
+        },
+    )
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+async def moderate_campaign(
+    db: AsyncSession,
+    campaign_id: uuid.UUID,
+    approve: bool,
+    reason: str | None = None,
+    *,
+    actor_id: uuid.UUID | None = None,
+) -> AdCampaign:
+    """
+    Одобрить или отклонить кампанию (FE-37). Одобрение — первый запуск в
+    показ: status=active и approved_at (как при ручной активации админом в
+    services/ad.py). Отказ — cancelled: кампания уходит из очереди, данные
+    остаются. Причина — в moderation_logs.
+    """
+    obj = await db.get(AdCampaign, campaign_id)
+    if obj is None:
+        raise ValueError("not_found")
+    prev_status = obj.status
+    if approve:
+        obj.status = CampaignStatus.active
+        if obj.approved_at is None:
+            obj.approved_at = datetime.now(timezone.utc)
+    else:
+        obj.status = CampaignStatus.cancelled
+    await _log_action(
+        db,
+        actor_id=actor_id,
+        action="campaign.approve" if approve else "campaign.reject",
+        target_type="campaign",
+        target_id=campaign_id,
         reason=reason,
         extra={
             "prev_status": prev_status.value,
