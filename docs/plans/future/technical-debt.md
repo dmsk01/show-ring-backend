@@ -4,48 +4,15 @@
 Сгруппированы по приоритету. Каждая задача содержит: **что**,
 **зачем**, **как делать (эскиз)**, **зависимости**.
 
-Сделанное (для контекста) — стадии 1–15 + follow-up'ы этапа 14:
-outbox-pattern, bootstrap admin, RBAC-decorator на support,
-`POST /classifieds/{id}/images`, requeue_stuck_tasks с re-publish.
+Сделанное (для контекста): этапы 1–20, интеграционные тесты API (через
+`httpx.AsyncClient`, транзакция с откатом), полный сценарий смены email,
+публикация задач документов через outbox, выдача ролей (включая operator)
+в админке, правки по ревью бэкенда 2026-10-06 и фронтенда 2026-10-09.
+Сами отчёты ревью удалены, незакрытое из них перенесено сюда.
 
 ---
 
 ## Среднее (требует решений или ~30–60 мин работы)
-
-### Integration-тесты API через httpx.AsyncClient
-
-**Что:** Покрытие всех роутеров end-to-end тестами через
-`httpx.AsyncClient` + `ASGITransport`.
-
-**Зачем:** Unit-тесты этапа 13 (`tests/unit/`) проверяют чистую логику
-(правила РКФ, security, хелперы). Бизнес-сценарии (создать выставку →
-записать собаку → ввести результаты → опубликовать) тестировать
-unit'ами нельзя — слишком много integration-точек.
-
-**Как делать:**
-1. `tests/conftest.py`:
-   - Фикстура `engine` сессионного scope: отдельная база
-     `showtail_test` (создаём в `pytest_configure`, дропаем после).
-   - Фикстура `migrate` (autouse, session): `alembic upgrade head`.
-   - Фикстура `db` (function scope): открыть транзакцию, передать
-     сессию, rollback в teardown — изоляция тестов.
-   - Фикстура `client`: `AsyncClient(transport=ASGITransport(app=app))`.
-   - `dependency_overrides` для `get_db` → тестовая сессия;
-     для `rabbit_service` → mock с in-memory queue.
-2. `tests/factories.py`: `factory-boy` фабрики User, Kennel, Dog,
-   Show. Минимум обязательных полей + sensible defaults.
-3. `tests/integration/`:
-   - `test_auth.py`: POST /auth/register, login, refresh, logout.
-   - `test_shows.py`: полный цикл create → judges → rings →
-     entries → results → publish.
-   - `test_classifieds.py`: CRUD + FTS-поиск.
-   - `test_documents.py`: POST /catalog/generate → mock RabbitMQ
-     proxy капчурит сообщение → тест проверяет содержимое payload.
-
-**Зависимости:** Pytest-postgresql (или ручной create/drop), сама
-БД должна быть доступна на CI.
-
----
 
 ### CPC (cost-per-click) тарификация рекламы
 
@@ -246,6 +213,45 @@ Prometheus, логика сбора не меняется.
 
 ---
 
+## Остаток ревью 2026-10-06 (бэкенд) и 2026-10-09 (фронтенд)
+
+Частично сделанные тикеты. Номера — по удалённым отчётам ревью, для поиска
+по истории коммитов.
+
+- **BE-06 — ack после записи батча событий.** Воркер событий подтверждает
+  сообщения до записи батча в БД: при падении теряется буфер (до 50 событий
+  или 2 с).
+- **BE-11 — уборка «осиротевших» файлов.** Не сделана сознательно: блог
+  ссылается на картинки по URL в HTML, задачи документов — через JSON,
+  автоудаление снесло бы живые файлы. Сначала — явная модель ссылок на файлы.
+- **BE-21 — WebSocket.** Один PubSub на namespace вместо соединения Redis на
+  пользователя (переписать менеджер). Остальное сделано.
+- **BE-24 — оригиналы фото публичны** по `/files/{id}`. Приватность закрыта
+  удалением EXIF; закрыть оригиналы — вместе с выдачей превью.
+- **BE-25 — подписанный `impression_token`** для показов рекламы (меняет
+  контракт с фронтом). Сейчас — дедупликация без User-Agent.
+- **BE-28 — Sanitization и Idempotency** остались на `BaseHTTPMiddleware`
+  (переписывают тело запроса); остальные middleware переведены на ASGI.
+  Долгосрочно — idempotency на уровне зависимости после аутентификации.
+- **BE-29 — lock-файл зависимостей** не создан; офлайн-каталог `packages/`
+  устарел — перезапустить `scripts/download_packages.sh`.
+- **BE-32 — доменные исключения** (`app/errors.py`): переведён модуль
+  выставок, остальные модули — по образцу, по одному.
+- **BE-33 — политики доступа:** `app/policies` есть, объект `Actor` не
+  вводился.
+- **BE-36 — долгоживущий S3-клиент** (aiobotocore привязан к event loop).
+- **Данные:** `scripts/unescape_sanitized_text.py` — починка испорченных
+  `&amp;` в старых данных; на dev/prod не запускался (сначала без `--apply`).
+- **CI:** сделать проверки `lint`/`test` (бэкенд) и `lint`/`typecheck`/`test`
+  (фронт) обязательными для `main`; тогда `ignoreBuildErrors` во фронтовом
+  `next.config.ts` можно оставить или убрать при сервере с запасом памяти.
+- **Деплой:** self-hosted раннер с меткой `show-ring` не зарегистрирован —
+  job `deploy` висит в очереди и отменяется через 24 ч.
+- **FE-35 — чат поддержки** обновляется опросом, но вживую не проверен:
+  раздел выключен флагом `support`.
+
+---
+
 ## Не код, а бизнес/деплой
 
 Эти пункты — config-only или вне приложения. Перечислены, чтобы не
@@ -276,7 +282,7 @@ nginx/k8s ingress. Cloudflare даёт публичные IP-диапазоны 
 
 ### RabbitMQ deploy: пересоздание очередей под DLX (follow-up bug_239)
 
-В рамках bug_239 (deep-audit 2026-05-28) добавлен общий DLX/DLQ и
+В рамках bug_239 добавлен общий DLX/DLQ и
 все workflow-очереди (`document_task`, `email_tasks`, `ad_events`,
 `tasks`, `showtail.events.dispatcher`) теперь декларируются с
 `x-dead-letter-exchange` / `x-dead-letter-routing-key`.
@@ -317,52 +323,9 @@ bootstrap_admin, проверка end-to-end (создать выставку �
 
 ## Меньшее (одна-две строки или мелкий рефакторинг)
 
-### Grant operator-роли через UI/админку
-
-Эндпоинт `PUT /admin/users/{id}/role` уже принимает любую роль
-включая operator (после follow-up'а этапа 11). Не хватает
-admin-UI «список кандидатов» (всех breeder/judge без operator-роли).
-Минорный QoL.
-
 ### Cleanup старых failed outbox-записей
 
 Outbox-таблица будет расти на failed строках при долгой проблеме
 с Rabbit. Добавить в scheduler: `DELETE FROM outbox_events WHERE
 status='failed' AND created_at < now() - interval '30 days'`.
 Раз в неделю.
-
-### Полный flow подтверждения смены email (follow-up bug_203)
-
-Текущий фикс bug_203 (`app/routers/users.py:32`) делает минимум:
-требует current_password, помечает email как неподтверждённый и
-отзывает все refresh-токены. Но новый адрес НЕ верифицируется
-письмом — атакующий мог ввести любой email (включая опечатанный),
-и пользователь получит is_email_verified=false с непроверенным
-значением в колонке email.
-
-**Полный flow (отдельный PR):**
-1. PUT /users/me со сменой email НЕ применяет email сразу. Вместо
-   этого создаёт запись в `email_change_tokens` (новая таблица или
-   расширение `email_verification_tokens` колонкой `new_email`).
-2. На СТАРЫЙ email шлётся уведомление «была попытка смены, если
-   это не вы — нажмите undo (одноразовый токен на восстановление)».
-3. На НОВЫЙ email шлётся подтверждение со ссылкой
-   `/users/me/email-change/confirm?token=...`. Применение email
-   только после клика на эту ссылку.
-4. До подтверждения старый email остаётся активным; в БД ничего
-   не меняется кроме новой строки в email_change_tokens.
-
-**Зависимости:** email-worker уже шлёт письма; нужна миграция
-под таблицу/колонку.
-
-### Re-publish stuck task на `/documents` (bug_207)
-
-`app/routers/documents._publish_task` пишет Task в БД и
-публикует в RabbitMQ. При сбое publish задача остаётся `pending`
-без шанса исполниться. Комментарий в коде обещает admin-эндпоинт.
-
-Решение: использовать существующий outbox-pattern (`app/models/
-outbox.py`) — публикация в Rabbit идёт через outbox, fallback'ный
-`outbox_publisher_worker` догоняет недоставленные строки.
-Конкретно для document-задач — переключить `_publish_task` с
-прямого `rabbit_service.publish` на запись в outbox.
