@@ -230,6 +230,31 @@ class ShowEntryPage(BaseModel):
     per_page: int
 
 
+class ShowEntryRow(ShowEntryResponse):
+    """Запись + кличка, порода, питомник и класс — для таблицы результатов.
+
+    Ревью фронтенда 2026-10-09, FE-08: фронт склеивал записи с первой
+    страницей /dogs (гостю — 50 собак всей базы), и гости видели «—».
+    Названия справочников — по Accept-Language.
+    """
+
+    dog_name: str
+    breed_id: uuid.UUID | None = None
+    breed_name: str | None = None
+    breed_group_id: uuid.UUID | None = None
+    kennel_id: uuid.UUID | None = None
+    kennel_name: str | None = None
+    kennel_prefix: str | None = None
+    class_name: str | None = None
+
+
+class ShowEntryRowPage(BaseModel):
+    items: list[ShowEntryRow]
+    total: int
+    page: int
+    per_page: int
+
+
 class MyShowEntryResponse(ShowEntryResponse):
     """Запись + имена собаки и класса (для страницы «мои записи»)."""
     dog_name: str

@@ -212,3 +212,37 @@ async def test_csrf_allows_same_origin(client):
         headers={"Origin": "http://test"},
     )
     assert r.status_code == 200, r.text
+
+
+async def test_refresh_without_cookie_is_not_rate_limited(client):
+    """Ревью фронтенда 2026-10-09 (FE-03, живой прогон): запрос без
+    refresh-куки — заведомо «сессии нет». Раньше лимитер срабатывал раньше
+    проверки куки, и после выхода фронт получал 429 вместо 401 — не мог
+    отличить «сессия жива, но лимит» от «сессии нет»."""
+    for _ in range(7):
+        r = await client.post("/auth/refresh", json={})
+        assert r.status_code == 401, r.text
+        assert r.json()["detail"] == "missing_refresh_token"
+
+
+async def test_refresh_with_cookie_is_still_rate_limited(client):
+    statuses = []
+    for _ in range(7):
+        r = await client.post(
+            "/auth/refresh", json={}, headers={"Cookie": "refresh_token=bogus"}
+        )
+        statuses.append(r.status_code)
+    assert 429 in statuses, statuses
+
+
+async def test_rate_limited_logout_still_clears_cookies(client):
+    """Ревью фронтенда 2026-10-09 (живой прогон): при 429 на /auth/logout
+    куки не стирались, фронт игнорировал ошибку — пользователь нажимал
+    «Выйти» и оставался в аккаунте (опасно на общем компьютере стойки)."""
+    last = None
+    for _ in range(7):
+        last = await client.post("/auth/logout", json={})
+    assert last.status_code == 429, last.text
+    cleared = _set_cookies(last)
+    assert cleared.get("access_token") == ""
+    assert cleared.get("refresh_token") == ""

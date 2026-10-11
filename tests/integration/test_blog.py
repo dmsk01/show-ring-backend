@@ -113,8 +113,10 @@ async def test_list_shape_is_postpage_snake_case(client, db_session):
     for key in ("cover_url", "total_views", "created_at", "author"):
         assert key in card
     assert "coverUrl" not in card
-    # author — непустой объект, не null.
-    assert card["author"]["name"]
+    # author — объект, не null (имя может быть пустым: без ФИО email не
+    # публикуем — см. test_author_email_is_not_public).
+    assert isinstance(card["author"], dict)
+    assert isinstance(card["author"]["name"], str)
 
 
 async def test_detail_returns_object_by_slug(client, db_session):
@@ -180,7 +182,8 @@ async def test_create_as_admin_201_with_slug(client, db_session):
     body = r.json()
     # slug сгенерён транслитом кириллицы.
     assert body["slug"] == "novosti-vystavki"
-    assert body["author"]["name"]
+    # Без ФИО имя автора пустое — email не публикуем (test_author_email_is_not_public).
+    assert isinstance(body["author"]["name"], str)
 
 
 async def test_slug_collision_suffix(client, db_session):
@@ -306,3 +309,17 @@ async def test_admin_can_edit_any_post(client, db_session):
     # Админ может удалить любой пост.
     r = await client.delete(f"/posts/{post_id}", headers=_auth(admin_tok))
     assert r.status_code == 204, r.text
+
+
+async def test_author_email_is_not_public(client, db_session):
+    """Ревью фронтенда 2026-10-09: у автора без ФИО публичный список постов
+    отдавал email в author.name — персональные данные (152-ФЗ) любому гостю.
+    Номер телефона уже не показывали; email — по тому же правилу."""
+    author = await _author(db_session)
+    post = await _post(db_session, author)
+
+    listing = (await client.get("/posts")).json()
+    detail = (await client.get(f"/posts/{post.slug}")).json()
+
+    for author_obj in (listing["items"][0]["author"], detail["author"]):
+        assert author.email not in author_obj["name"]
