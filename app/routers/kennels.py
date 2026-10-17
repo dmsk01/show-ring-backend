@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.policies import Actor
 from app.database import get_db
 from app.dependencies import (
     get_current_user,
@@ -40,10 +41,6 @@ from app.utils.public_contacts import (
 )
 
 router = APIRouter(prefix="/kennels", tags=["kennels"])
-
-
-def _is_admin(user: User) -> bool:
-    return any(r.role.value == "admin" for r in user.roles)
 
 
 def _kennel_response(
@@ -212,8 +209,7 @@ async def update_kennel(
     kennel = await svc.update_kennel(
         db,
         kennel_id=kennel_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=fields,
     )
     if "contacts_public" in fields:
@@ -235,6 +231,5 @@ async def delete_kennel(
     await svc.delete_kennel(
         db,
         kennel_id=kennel_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )

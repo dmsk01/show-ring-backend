@@ -29,12 +29,9 @@ from app.schemas.result import (
 )
 from app.schemas.show import ShowResponse
 from app.services import result as svc
+from app.policies import Actor
 
 router = APIRouter(prefix="/shows/{show_id}/results", tags=["results"])
-
-
-def _is_admin(user: User) -> bool:
-    return any(r.role.value == "admin" for r in user.roles)
 
 
 def _explicit_nulls(body) -> set[str]:
@@ -67,8 +64,7 @@ async def upsert_result(
     return await svc.upsert_class_result(
         db,
         show_entry_id=body.show_entry_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         grade_id=body.grade_id,
         placement=body.placement,
         critique=body.critique,
@@ -108,8 +104,7 @@ async def update_result(
     return await svc.upsert_class_result(
         db,
         show_entry_id=result.show_entry_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         grade_id=body.grade_id,
         placement=body.placement,
         critique=body.critique,
@@ -133,8 +128,7 @@ async def delete_result(
         db,
         show_id=show_id,
         result_id=result_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -207,8 +201,7 @@ async def best_of_breed(
     return await svc.set_best_of_breed(
         db,
         show_id=show_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         breed_id=body.breed_id,
         winner_entry_id=body.winner_entry_id,
         best_male_entry_id=body.best_male_entry_id,
@@ -232,8 +225,7 @@ async def best_in_group(
     return await svc.set_best_in_group(
         db,
         show_id=show_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         breed_group_id=body.breed_group_id,
         winner_entry_id=body.winner_entry_id,
     )
@@ -253,8 +245,7 @@ async def best_in_show(
     return await svc.set_best_in_show(
         db,
         show_id=show_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         winner_entry_id=body.winner_entry_id,
     )
 
@@ -282,6 +273,5 @@ async def publish(
     return await svc.publish_results(
         db,
         show_id=show_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )

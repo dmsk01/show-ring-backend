@@ -23,6 +23,7 @@ from app.repositories import dog as dog_repo
 from app.schemas.checkin import DogDocumentResponse
 from app.services import checkin_rules
 from app.services.dog import _check_can_manage_dog
+from app.policies import Actor
 
 
 async def get_dog_or_404(db: AsyncSession, dog_id: uuid.UUID) -> Dog:
@@ -33,17 +34,16 @@ async def get_dog_or_404(db: AsyncSession, dog_id: uuid.UUID) -> Dog:
 
 
 async def ensure_can_manage(
-    db: AsyncSession, dog: Dog, user_id: uuid.UUID, is_admin: bool
-) -> None:
-    await _check_can_manage_dog(db, dog, user_id, is_admin)
+    db: AsyncSession, dog: Dog, actor: Actor, ) -> None:
+    await _check_can_manage_dog(db, dog, actor)
 
 
-async def can_view(db: AsyncSession, dog: Dog, user_id: uuid.UUID, is_admin: bool) -> bool:
+async def can_view(db: AsyncSession, dog: Dog, actor: Actor, ) -> bool:
     try:
-        await _check_can_manage_dog(db, dog, user_id, is_admin)
+        await _check_can_manage_dog(db, dog, actor)
         return True
     except ValueError:
-        return await checkin_repo.user_has_show_access_to_dog(db, dog.id, user_id)
+        return await checkin_repo.user_has_show_access_to_dog(db, dog.id, actor.user_id)
 
 
 def to_responses(rows: list[tuple[DogDocument, UploadedFile]]) -> list[DogDocumentResponse]:

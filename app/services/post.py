@@ -27,6 +27,7 @@ from app.models.user import User
 from app.repositories import post as repo
 from app.utils.html_sanitize import sanitize_post_html
 from app.utils.slug import make_slug
+from app.policies import Actor
 
 
 async def _unique_slug(
@@ -61,14 +62,13 @@ async def update_post(
     post_id: uuid.UUID,
     fields: dict,
     *,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> Post:
+    actor: Actor,
+    ) -> Post:
     obj = await repo.get_by_id(db, post_id)
     if obj is None:
         raise ValueError("not_found")
     # Аудит L1: organizer правит только свои посты; admin — любые.
-    if obj.author_id != requester_id and not is_admin:
+    if obj.author_id != actor.user_id and not actor.is_admin:
         raise ValueError("forbidden")
 
     data = dict(fields)
@@ -93,14 +93,13 @@ async def delete_post(
     db: AsyncSession,
     post_id: uuid.UUID,
     *,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     obj = await repo.get_by_id(db, post_id)
     if obj is None:
         raise ValueError("not_found")
     # Аудит L1: organizer удаляет только свои посты; admin — любые.
-    if obj.author_id != requester_id and not is_admin:
+    if obj.author_id != actor.user_id and not actor.is_admin:
         raise ValueError("forbidden")
     await db.delete(obj)
     await db.commit()

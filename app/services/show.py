@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Conflict, Forbidden, NotFound, Unprocessable
 from app.models.dog import Dog
-from app.policies import can_manage_dog
+from app.policies import Actor, can_manage_dog
 from app.models.reference import Breed, ShowClass
 from app.models.show import (
     Show,
@@ -50,18 +50,16 @@ from app.services import show_rules
 
 
 def _ensure_organizer_owner(
-    show: Show, requester_id: uuid.UUID, is_admin: bool
-) -> None:
-    if show.organizer_id != requester_id and not is_admin:
+    show: Show, actor: Actor, ) -> None:
+    if show.organizer_id != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
 
 
 async def _get_owned_show(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    *,
+    actor: Actor,
+        *,
     for_update: bool = False,
 ) -> Show:
     """Выставка + проверка «организатор или admin» (ревью 2026-10-06, BE-33:
@@ -73,7 +71,7 @@ async def _get_owned_show(
     )
     if show is None:
         raise NotFound("not_found")
-    _ensure_organizer_owner(show, requester_id, is_admin)
+    _ensure_organizer_owner(show, actor)
     return show
 
 
@@ -94,11 +92,10 @@ async def create_show(
 async def update_show(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Show:
-    obj = await _get_owned_show(db, show_id, requester_id, is_admin)
+    obj = await _get_owned_show(db, show_id, actor)
     # Менять название/город/даты можно только в draft и registration_open.
     # После закрытия регистрации это уже зафиксированные данные каталога.
     if obj.status not in (ShowStatus.draft, ShowStatus.registration_open):
@@ -153,10 +150,9 @@ async def _ensure_entries_fit_date(
 async def delete_show(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
-    obj = await _get_owned_show(db, show_id, requester_id, is_admin)
+    actor: Actor,
+    ) -> None:
+    obj = await _get_owned_show(db, show_id, actor)
     # Жёсткое удаление разрешено только для draft и cancelled. Активные и
     # завершённые выставки несут записи/результаты/титулы — это история,
     # которую нельзя терять. Для боевых выставок есть статус cancelled
@@ -173,9 +169,8 @@ async def delete_show(
 async def change_status(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    target: ShowStatus,
+    actor: Actor,
+        target: ShowStatus,
 ) -> Show:
     # SELECT FOR UPDATE (review 2026-06-10): комментарий в
     # next_catalog_number полагается на лок строки show, но раньше его
@@ -183,7 +178,7 @@ async def change_status(
     # закрытие регистрации» мог оставить запись без номера или словить
     # нарушение uq_show_entry_catalog (500). Лок сериализует переход
     # статуса с конкурентными записями.
-    obj = await _get_owned_show(db, show_id, requester_id, is_admin, for_update=True)
+    obj = await _get_owned_show(db, show_id, actor, for_update=True)
 
     if not show_rules.is_transition_allowed(obj.status, target):
         raise Unprocessable("invalid_status_transition")
@@ -212,7 +207,7 @@ async def change_status(
             EventMessage(
                 event_type="show.registration_opened",
                 routing_key="show.registration_opened",
-                actor_id=requester_id,
+                actor_id=actor.user_id,
                 payload={
                     "show_id": str(obj.id),
                     "show_name": obj.name,
@@ -233,7 +228,7 @@ async def change_status(
             EventMessage(
                 event_type="show.results_published",
                 routing_key="show.results_published",
-                actor_id=requester_id,
+                actor_id=actor.user_id,
                 payload={
                     "show_id": str(obj.id),
                     "show_name": obj.name,
@@ -274,14 +269,13 @@ async def _assign_catalog_numbers(
 async def add_judge(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    *,
+    actor: Actor,
+        *,
     judge_id: uuid.UUID,
     breed_id: uuid.UUID | None,
     breed_group_id: uuid.UUID | None,
 ) -> ShowJudge:
-    show = await _get_owned_show(db, show_id, requester_id, is_admin)
+    show = await _get_owned_show(db, show_id, actor)
     if show.status not in (ShowStatus.draft, ShowStatus.registration_open):
         raise Unprocessable("show_locked")
     obj = await repo.add_show_judge(
@@ -299,10 +293,9 @@ async def remove_judge(
     db: AsyncSession,
     show_id: uuid.UUID,
     judge_record_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
-    await _get_owned_show(db, show_id, requester_id, is_admin)
+    actor: Actor,
+    ) -> None:
+    await _get_owned_show(db, show_id, actor)
     judge = await repo.get_show_judge(db, judge_record_id)
     if judge is None or judge.show_id != show_id:
         raise NotFound("judge_assignment_not_found")
@@ -318,11 +311,10 @@ async def remove_judge(
 async def add_ring(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> ShowRing:
-    await _get_owned_show(db, show_id, requester_id, is_admin)
+    await _get_owned_show(db, show_id, actor)
     obj = await repo.create_show_ring(db, show_id=show_id, **fields)
     await db.commit()
     return obj
@@ -332,11 +324,10 @@ async def update_ring(
     db: AsyncSession,
     show_id: uuid.UUID,
     ring_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> ShowRing:
-    await _get_owned_show(db, show_id, requester_id, is_admin)
+    await _get_owned_show(db, show_id, actor)
     ring = await repo.get_show_ring(db, ring_id)
     if ring is None or ring.show_id != show_id:
         raise NotFound("ring_not_found")
@@ -350,10 +341,9 @@ async def delete_ring(
     db: AsyncSession,
     show_id: uuid.UUID,
     ring_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
-    await _get_owned_show(db, show_id, requester_id, is_admin)
+    actor: Actor,
+    ) -> None:
+    await _get_owned_show(db, show_id, actor)
     ring = await repo.get_show_ring(db, ring_id)
     if ring is None or ring.show_id != show_id:
         raise NotFound("ring_not_found")
@@ -411,9 +401,8 @@ async def _check_can_register_dog(
     db: AsyncSession,
     show: Show,
     dog: Dog,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    today: date,
+    actor: Actor,
+        today: date,
 ) -> None:
     """Проверки правил записи. Бросает ValueError при провале."""
     if show.status != ShowStatus.registration_open:
@@ -432,7 +421,7 @@ async def _check_can_register_dog(
     # управляет своими собаками (review 2026-06-10 — поведение признано
     # намеренным, комментарий синхронизирован с кодом). Без права на
     # собаку — forbidden.
-    if not await can_manage_dog(db, dog, requester_id, is_admin=is_admin):
+    if not await can_manage_dog(db, dog, actor):
         raise Forbidden("forbidden")
 
     allowed = await repo.is_breed_allowed(db, show.id, dog.breed_id)
@@ -467,9 +456,8 @@ async def _validate_class_for_dog(
 async def register_entry(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    *,
+    actor: Actor,
+        *,
     dog_id: uuid.UUID,
     show_class_id: uuid.UUID,
     handler_id: uuid.UUID | None,
@@ -491,7 +479,7 @@ async def register_entry(
         raise Unprocessable("dog_birth_date_missing")
 
     await _check_can_register_dog(
-        db, show, dog, requester_id, is_admin, today
+        db, show, dog, actor, today
     )
 
     if await repo.is_dog_registered(db, show_id, dog_id):
@@ -513,7 +501,7 @@ async def register_entry(
         dog_id=dog_id,
         show_class_id=show_class_id,
         handler_id=handler_id,
-        registered_by=requester_id,
+        registered_by=actor.user_id,
         notes=notes,
     )
     await db.commit()
@@ -524,9 +512,8 @@ async def cancel_entry(
     db: AsyncSession,
     show_id: uuid.UUID,
     entry_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     entry = await repo.get_show_entry(db, entry_id)
     if entry is None or entry.show_id != show_id:
         raise NotFound("entry_not_found")
@@ -536,8 +523,8 @@ async def cancel_entry(
     # Отменить запись может её автор, организатор выставки или admin.
     # ИСПРАВЛЕНО (ревью 2026-10-06, BE-14): проверка «только автор» шла
     # раньше ветки организатора, и организатор не мог отменить чужую запись.
-    is_manager = is_admin or show.organizer_id == requester_id
-    if entry.registered_by != requester_id and not is_manager:
+    is_manager = actor.is_admin or show.organizer_id == actor.user_id
+    if entry.registered_by != actor.user_id and not is_manager:
         raise Forbidden("forbidden")
     # После закрытия регистрации отмену делает только организатор/admin.
     if (
@@ -553,9 +540,8 @@ async def update_entry(
     db: AsyncSession,
     show_id: uuid.UUID,
     entry_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    *,
+    actor: Actor,
+        *,
     show_class_id: uuid.UUID | None,
     handler_id: uuid.UUID | None,
     notes: str | None,
@@ -569,13 +555,13 @@ async def update_entry(
     entry = await repo.get_show_entry(db, entry_id)
     if entry is None or entry.show_id != show_id:
         raise NotFound("entry_not_found")
-    if entry.registered_by != requester_id and not is_admin:
+    if entry.registered_by != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
 
     show = await repo.get_show(db, show_id)
     if show is None:
         raise NotFound("not_found")
-    if show.status != ShowStatus.registration_open and not is_admin:
+    if show.status != ShowStatus.registration_open and not actor.is_admin:
         raise Unprocessable("registration_locked")
 
     # Смена класса — валидируем по возрасту собаки (как в register_entry).

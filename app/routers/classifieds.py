@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.policies import Actor
 from app.database import get_db
 from app.dependencies import (
     get_current_user,
@@ -96,8 +97,7 @@ async def create_classified(
 ):
     obj = await svc.create_classified(
         db,
-        author_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(),
     )
     if obj.contacts_public:
@@ -340,8 +340,7 @@ async def update_classified(
     obj = await svc.update_classified(
         db,
         classified_id=classified_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=fields,
     )
     if "contacts_public" in fields:
@@ -370,8 +369,7 @@ async def add_images(
     return await svc.add_images(
         db,
         classified_id=classified_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         images=[img.model_dump() for img in body],
     )
 
@@ -396,7 +394,6 @@ async def close_classified(
     await svc.close_classified(
         db,
         classified_id=classified_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         hard=hard,
     )

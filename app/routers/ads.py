@@ -39,6 +39,7 @@ from app.schemas.ad import (
 )
 from app.services import ad as svc
 from app.utils import ad_token
+from app.policies import Actor
 
 router = APIRouter(prefix="/ads", tags=["ads"])
 
@@ -100,8 +101,7 @@ async def update_campaign(
     obj = await svc.update_campaign(
         db,
         campaign_id=campaign_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(exclude_unset=True),
     )
     return CampaignResponse.model_validate(obj)
@@ -120,8 +120,7 @@ async def delete_campaign(
     await svc.delete_campaign(
         db,
         campaign_id=campaign_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -145,8 +144,7 @@ async def create_banner(
     obj = await svc.create_banner(
         db,
         campaign_id=campaign_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(),
     )
     return BannerResponse.model_validate(obj)
@@ -166,8 +164,7 @@ async def update_banner(
     obj = await svc.update_banner(
         db,
         banner_id=banner_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(exclude_unset=True),
     )
     return BannerResponse.model_validate(obj)
@@ -186,8 +183,7 @@ async def delete_banner(
     await svc.delete_banner(
         db,
         banner_id=banner_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -326,8 +322,7 @@ async def campaign_stats(
     data = await svc.stats_for_campaign(
         db,
         campaign_id=campaign_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
     return CampaignStats(**data)
 
@@ -346,8 +341,7 @@ async def campaign_daily_stats(
     rows = await svc.daily_stats(
         db,
         campaign_id=campaign_id,
-        user_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         days=days,
     )
     return [DailyStat(**r) for r in rows]

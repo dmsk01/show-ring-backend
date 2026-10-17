@@ -12,6 +12,7 @@ from app.database import get_db
 from app.redis import get_redis
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
+from app.policies import Actor
 from app.repositories.user import get_user_by_id
 from app.utils.security import JWTError, decode_access_token
 
@@ -238,6 +239,11 @@ def require_any_role(*roles: str):
 # появится super_admin), правка в одном месте.
 def is_admin(user: User) -> bool:
     return any(r.role.value == "admin" for r in user.roles)
+
+
+async def get_actor(user: User = Depends(get_current_user)) -> Actor:
+    """Зависимость: текущий пользователь как Actor (BE-33, app/policies.py)."""
+    return Actor.of(user)
 
 
 def user_rate_limit(bucket: str, *, limit: int, window: int):

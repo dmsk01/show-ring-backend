@@ -30,6 +30,7 @@ from app.schemas.dog import (
 )
 from app.schemas.result import DogTitleResponse
 from app.services import dog as svc
+from app.policies import Actor
 
 router = APIRouter(prefix="/dogs", tags=["dogs"])
 
@@ -59,8 +60,7 @@ async def create_dog(
 ):
     dog = await svc.create_dog(
         db,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(),
     )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
@@ -138,8 +138,7 @@ async def update_dog(
     dog = await svc.update_dog(
         db,
         dog_id=dog_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(exclude_unset=True),
     )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
@@ -158,8 +157,7 @@ async def delete_dog(
     await svc.delete_dog(
         db,
         dog_id=dog_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -183,8 +181,7 @@ async def add_dog_images(
     dog = await svc.add_images(
         db,
         dog_id=dog_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         images=[img.model_dump() for img in body],
     )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
@@ -211,8 +208,7 @@ async def delete_dog_image(
         db,
         dog_id=dog_id,
         file_id=file_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
 
@@ -268,8 +264,7 @@ async def add_descendant(
         db,
         parent_id=dog_id,
         child_id=body.child_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -289,8 +284,7 @@ async def remove_descendant(
         db,
         parent_id=dog_id,
         child_id=child_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 

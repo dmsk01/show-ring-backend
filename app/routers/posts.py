@@ -25,7 +25,6 @@ from app.redis import get_redis
 from app.dependencies import (
     get_current_user,
     get_current_user_optional,
-    is_admin,
     is_writer,
     require_any_role,
 )
@@ -42,6 +41,7 @@ from app.schemas.post import (
     to_response,
 )
 from app.services import post as svc
+from app.policies import Actor
 
 router = APIRouter(prefix="/posts", tags=["posts"])
 
@@ -160,8 +160,7 @@ async def update_post(
             db,
             post_id,
             body.model_dump(exclude_unset=True),
-            requester_id=user.id,
-            is_admin=is_admin(user),
+            actor=Actor.of(user),
         )
     except ValueError as e:
         raise HTTPException(_error_status(str(e)), str(e))
@@ -181,7 +180,7 @@ async def delete_post(
 ):
     try:
         await svc.delete_post(
-            db, post_id, requester_id=user.id, is_admin=is_admin(user)
+            db, post_id, actor=Actor.of(user)
         )
     except ValueError as e:
         raise HTTPException(_error_status(str(e)), str(e))

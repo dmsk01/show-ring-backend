@@ -24,6 +24,7 @@ from app.models.show import Show, ShowEntry, ShowStatus
 from app.models.user import User
 from app.services import result as result_svc
 from app.services import show as show_svc
+from app.policies import Actor
 
 
 async def _breed(db_session) -> Breed:
@@ -68,7 +69,7 @@ async def test_publish_results_emits_outbox_event(db_session):
     await db_session.commit()
 
     await result_svc.publish_results(
-        db_session, show_id=show.id, user_id=organizer.id, is_admin=False
+        db_session, show_id=show.id, actor=Actor(organizer.id)
     )
 
     rows = (
@@ -105,8 +106,7 @@ async def test_register_entry_unknown_handler_rejected(db_session):
         await show_svc.register_entry(
             db_session,
             show_id=show.id,
-            requester_id=owner.id,
-            is_admin=False,
+            actor=Actor(owner.id),
             dog_id=dog.id,
             show_class_id=cls.id,
             handler_id=uuid.uuid4(),  # несуществующий пользователь
@@ -145,8 +145,7 @@ async def test_update_entry_unknown_handler_rejected(db_session):
             db_session,
             show_id=show.id,
             entry_id=entry.id,
-            requester_id=owner.id,
-            is_admin=False,
+            actor=Actor(owner.id),
             show_class_id=None,
             handler_id=uuid.uuid4(),
             notes=None,

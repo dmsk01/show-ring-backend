@@ -18,13 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.dependencies import get_current_user, is_admin
+from app.dependencies import get_current_user
 from app.models.dog import DogDocumentKind
 from app.models.user import User
 from app.repositories import checkin as checkin_repo
 from app.schemas.checkin import DogDocumentResponse
 from app.services import dog_document as svc
 from app.services import file_storage, upload_quota
+from app.policies import Actor
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ async def upload_document(
     user: User = Depends(get_current_user),
 ):
     dog = await svc.get_dog_or_404(db, dog_id)
-    await svc.ensure_can_manage(db, dog, user.id, is_admin(user))
+    await svc.ensure_can_manage(db, dog, Actor.of(user))
     try:
         await upload_quota.check_upload_quota(
             db, user, declared_size_bytes=file.size or settings.max_upload_size_bytes
@@ -73,7 +74,7 @@ async def list_documents(
     user: User = Depends(get_current_user),
 ):
     dog = await svc.get_dog_or_404(db, dog_id)
-    if not await svc.can_view(db, dog, user.id, is_admin(user)):
+    if not await svc.can_view(db, dog, Actor.of(user)):
         raise HTTPException(403, "forbidden")
     return svc.to_responses(await checkin_repo.list_dog_documents(db, [dog.id]))
 
@@ -90,7 +91,7 @@ async def delete_document(
     user: User = Depends(get_current_user),
 ):
     dog = await svc.get_dog_or_404(db, dog_id)
-    await svc.ensure_can_manage(db, dog, user.id, is_admin(user))
+    await svc.ensure_can_manage(db, dog, Actor.of(user))
     row = await checkin_repo.get_dog_document(db, dog_id, doc_id)
     if row is None:
         raise HTTPException(404, "document_not_found")
@@ -119,7 +120,7 @@ async def download_document(
 ):
     dog = await svc.get_dog_or_404(db, dog_id)
     # 404, а не 403: не раскрываем существование документа постороннему.
-    if not await svc.can_view(db, dog, user.id, is_admin(user)):
+    if not await svc.can_view(db, dog, Actor.of(user)):
         raise HTTPException(404, "document_not_found")
     row = await checkin_repo.get_dog_document(db, dog_id, doc_id)
     if row is None:
