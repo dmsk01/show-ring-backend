@@ -1,0 +1,32 @@
+# Обновления зависимостей (аудит безопасности 03.10.2026, № 12).
+# Python-пакеты и образы — раз в неделю, GitHub Actions — раз в месяц.
+# Минорные и патч-версии сгруппированы в один PR.
+#
+# Версии Python-пакетов закреплены в constraints.txt
+# (scripts/update_constraints.sh): Dependabot предлагает обновления по нему.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # Образы в docker-compose*.yml (minio/mc/certbot закреплены по digest).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directories: [/, /deploy/backup]
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
