@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.errors import DomainError, NotFound
 from app.models.dog import Dog
 from app.models.kennel import Kennel
 from app.models.reference import Breed, BreedGroup, ShowClass, ShowRank
@@ -149,7 +150,7 @@ async def build_catalog_data(
     """
     show = await db.get(Show, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
 
     rank = await db.get(ShowRank, show.rank_id)
 
@@ -374,14 +375,14 @@ async def build_diploma_data(
     """Собирает данные диплома для одной записи."""
     entry = await db.get(ShowEntry, entry_id)
     if entry is None:
-        raise ValueError("entry_not_found")
+        raise DomainError("entry_not_found")
     show = await db.get(Show, entry.show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     rank = await db.get(ShowRank, show.rank_id)
     dog = await db.get(Dog, entry.dog_id)
     if dog is None:
-        raise ValueError("dog_not_found")
+        raise DomainError("dog_not_found")
     breed = await db.get(Breed, dog.breed_id)
     cls = await db.get(ShowClass, entry.show_class_id)
 

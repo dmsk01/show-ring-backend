@@ -9,7 +9,6 @@ shows.py.
 from __future__ import annotations
 
 import uuid
-from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,35 +42,6 @@ def _explicit_nulls(body) -> set[str]:
     return {f for f in body.model_fields_set if getattr(body, f) is None}
 
 
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    not_found = {
-        "not_found",
-        "entry_not_found",
-        "result_not_found",
-        "show_class_not_found",
-        "show_rank_not_found",
-        "grade_not_found",
-    }
-    if code in not_found:
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    if code in (
-        "show_not_in_progress",
-        "invalid_status_transition",
-        "entry_breed_mismatch",
-        "entry_show_mismatch",
-        "entry_group_mismatch",
-        "winner_must_be_bob",
-        "winner_must_be_big",
-    ):
-        raise HTTPException(422, code)
-    if code in ("entry_not_admitted", "placement_taken"):
-        raise HTTPException(409, code)
-    raise HTTPException(400, code)
-
-
 # ---------------------------------------------------------------------
 # Базовые результаты
 # ---------------------------------------------------------------------
@@ -94,20 +64,17 @@ async def upsert_result(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.upsert_class_result(
-            db,
-            show_entry_id=body.show_entry_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            grade_id=body.grade_id,
-            placement=body.placement,
-            critique=body.critique,
-            # Явный null в теле = сбросить поле (BE-26).
-            clear=_explicit_nulls(body),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.upsert_class_result(
+        db,
+        show_entry_id=body.show_entry_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        grade_id=body.grade_id,
+        placement=body.placement,
+        critique=body.critique,
+        # Явный null в теле = сбросить поле (BE-26).
+        clear=_explicit_nulls(body),
+    )
 
 
 @router.put(
@@ -138,20 +105,17 @@ async def update_result(
     entry = await db.get(ShowEntry, result.show_entry_id)
     if entry is None or entry.show_id != show_id:
         raise HTTPException(404, "result_not_found")
-    try:
-        return await svc.upsert_class_result(
-            db,
-            show_entry_id=result.show_entry_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            grade_id=body.grade_id,
-            placement=body.placement,
-            critique=body.critique,
-            # Явный null в теле = сбросить поле (BE-26).
-            clear=_explicit_nulls(body),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.upsert_class_result(
+        db,
+        show_entry_id=result.show_entry_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        grade_id=body.grade_id,
+        placement=body.placement,
+        critique=body.critique,
+        # Явный null в теле = сбросить поле (BE-26).
+        clear=_explicit_nulls(body),
+    )
 
 
 @router.delete(
@@ -165,16 +129,13 @@ async def delete_result(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_result(
-            db,
-            show_id=show_id,
-            result_id=result_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_result(
+        db,
+        show_id=show_id,
+        result_id=result_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 @router.get(
@@ -243,21 +204,18 @@ async def best_of_breed(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.set_best_of_breed(
-            db,
-            show_id=show_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            breed_id=body.breed_id,
-            winner_entry_id=body.winner_entry_id,
-            best_male_entry_id=body.best_male_entry_id,
-            best_female_entry_id=body.best_female_entry_id,
-            best_junior_entry_id=body.best_junior_entry_id,
-            best_veteran_entry_id=body.best_veteran_entry_id,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.set_best_of_breed(
+        db,
+        show_id=show_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        breed_id=body.breed_id,
+        winner_entry_id=body.winner_entry_id,
+        best_male_entry_id=body.best_male_entry_id,
+        best_female_entry_id=body.best_female_entry_id,
+        best_junior_entry_id=body.best_junior_entry_id,
+        best_veteran_entry_id=body.best_veteran_entry_id,
+    )
 
 
 @router.post(
@@ -271,17 +229,14 @@ async def best_in_group(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.set_best_in_group(
-            db,
-            show_id=show_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            breed_group_id=body.breed_group_id,
-            winner_entry_id=body.winner_entry_id,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.set_best_in_group(
+        db,
+        show_id=show_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        breed_group_id=body.breed_group_id,
+        winner_entry_id=body.winner_entry_id,
+    )
 
 
 @router.post(
@@ -295,16 +250,13 @@ async def best_in_show(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.set_best_in_show(
-            db,
-            show_id=show_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            winner_entry_id=body.winner_entry_id,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.set_best_in_show(
+        db,
+        show_id=show_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        winner_entry_id=body.winner_entry_id,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -327,12 +279,9 @@ async def publish(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.publish_results(
-            db,
-            show_id=show_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.publish_results(
+        db,
+        show_id=show_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+    )

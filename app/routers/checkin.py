@@ -9,9 +9,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,27 +36,6 @@ from app.services import checkin as svc
 
 router = APIRouter(prefix="/shows", tags=["checkin"])
 
-_NOT_FOUND = {
-    "not_found", "entry_not_found", "user_not_found", "staff_not_found",
-    "document_not_found", "token_other_show", "no_entries",
-}
-_CONFLICT = {"checkin_disabled", "invalid_show_status", "already_staff", "show_locked"}
-
-
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code in _NOT_FOUND:
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    if code in _CONFLICT:
-        raise HTTPException(409, code)
-    if code == "invalid_token":
-        raise HTTPException(400, code)
-    if code == "document_mismatch":
-        raise HTTPException(422, code)
-    raise HTTPException(400, code)
-
 
 @router.put(
     "/{show_id}/checkin/settings",
@@ -70,10 +48,7 @@ async def update_checkin_settings(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.set_enabled(db, show_id, user.id, is_admin(user), body.enabled)
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.set_enabled(db, show_id, user.id, is_admin(user), body.enabled)
 
 
 @router.get("/staff/my", response_model=list[ShowResponse], summary="Выставки, где я регистратор")
@@ -90,10 +65,7 @@ async def list_staff(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.list_staff(db, show_id, user.id, is_admin(user))
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.list_staff(db, show_id, user.id, is_admin(user))
 
 
 @router.post(
@@ -108,13 +80,10 @@ async def add_staff(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.add_staff(
-            db, show_id, user.id, is_admin(user),
-            email=str(body.email) if body.email else None, phone=body.phone,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.add_staff(
+        db, show_id, user.id, is_admin(user),
+        email=str(body.email) if body.email else None, phone=body.phone,
+    )
 
 
 @router.delete(
@@ -128,10 +97,7 @@ async def remove_staff(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.remove_staff(db, show_id, user.id, is_admin(user), user_id)
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.remove_staff(db, show_id, user.id, is_admin(user), user_id)
 
 
 _SEARCH_RATE_LIMIT = 60
@@ -144,10 +110,7 @@ async def my_ticket(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.get_ticket(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.get_ticket(db, show_id, user)
 
 
 @router.post("/{show_id}/checkin/scan", response_model=ParticipantCard, summary="Скан QR на стойке")
@@ -157,10 +120,7 @@ async def scan(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.scan(db, show_id, user, is_admin(user), body.token)
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.scan(db, show_id, user, is_admin(user), body.token)
 
 
 @router.get("/{show_id}/checkin/search", response_model=list[EntryCard], summary="Поиск на стойке")
@@ -174,10 +134,7 @@ async def search(
 ):
     # Перебор ПДн (телефоны, чипы) — ограничиваем частоту.
     await check_rate_limit(request, _SEARCH_RATE_LIMIT, _SEARCH_RATE_WINDOW, redis)
-    try:
-        return await svc.search(db, show_id, user, is_admin(user), q)
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.search(db, show_id, user, is_admin(user), q)
 
 
 @router.post(
@@ -192,10 +149,7 @@ async def add_checks(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.add_checks(db, show_id, entry_id, user, is_admin(user), body.checks)
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.add_checks(db, show_id, entry_id, user, is_admin(user), body.checks)
 
 
 @router.get(
@@ -209,10 +163,7 @@ async def list_checks(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.list_entry_checks(db, show_id, entry_id, user, is_admin(user))
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.list_entry_checks(db, show_id, entry_id, user, is_admin(user))
 
 
 @router.get("/{show_id}/checkin/summary", response_model=CheckinSummary, summary="Сводка стойки")
@@ -221,10 +172,7 @@ async def summary(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.summary(db, show_id, user, is_admin(user))
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.summary(db, show_id, user, is_admin(user))
 
 
 @router.get(
@@ -237,7 +185,4 @@ async def precheck_queue(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.precheck_queue(db, show_id, user, is_admin(user))
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.precheck_queue(db, show_id, user, is_admin(user))

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, DomainError, Forbidden, NotFound, Unprocessable
 from app.models.dog import DogDocumentKind
 from app.models.show import (
     AttendanceStatus,
@@ -56,13 +57,13 @@ def display_name(user: User | None) -> str:
 async def get_show(db: AsyncSession, show_id: uuid.UUID) -> Show:
     show = await show_repo.get_show(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     return show
 
 
 def ensure_organizer(show: Show, user_id: uuid.UUID, is_admin: bool) -> None:
     if not is_admin and show.organizer_id != user_id:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
 
 async def ensure_desk_access(
@@ -72,12 +73,12 @@ async def ensure_desk_access(
         return
     if await repo.is_staff(db, show.id, user_id):
         return
-    raise ValueError("forbidden")
+    raise Forbidden("forbidden")
 
 
 def ensure_enabled(show: Show) -> None:
     if not show.checkin_enabled:
-        raise ValueError("checkin_disabled")
+        raise Conflict("checkin_disabled")
 
 
 async def set_enabled(
@@ -86,7 +87,7 @@ async def set_enabled(
     show = await get_show(db, show_id)
     ensure_organizer(show, user_id, is_admin)
     if show.status in (ShowStatus.completed, ShowStatus.cancelled):
-        raise ValueError("show_locked")
+        raise Conflict("show_locked")
     show.checkin_enabled = enabled
     await db.commit()
     await db.refresh(show)
@@ -124,11 +125,11 @@ async def add_staff(
     else:
         user = await user_repo.get_user_by_phone(db, phone or "")
     if user is None:
-        raise ValueError("user_not_found")
+        raise NotFound("user_not_found")
     # Явная проверка — обычный путь; IntegrityError ниже — страховка от
     # гонки двух одновременных добавлений.
     if await repo.is_staff(db, show.id, user.id):
-        raise ValueError("already_staff")
+        raise Conflict("already_staff")
     staff = ShowStaff(
         show_id=show.id, user_id=user.id, role=ShowStaffRole.registrar,
         added_by=requester_id,
@@ -138,12 +139,12 @@ async def add_staff(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise ValueError("already_staff") from None
+        raise Conflict("already_staff") from None
     await db.refresh(staff)
     for s, u in await repo.list_staff(db, show.id):
         if s.id == staff.id:
             return _staff_response(s, u)
-    raise ValueError("not_found")  # недостижимо: строку только что вставили
+    raise NotFound("not_found")  # недостижимо: строку только что вставили
 
 
 async def remove_staff(
@@ -153,7 +154,7 @@ async def remove_staff(
     show = await get_show(db, show_id)
     ensure_organizer(show, requester_id, is_admin)
     if await repo.delete_staff(db, show_id, user_id) == 0:
-        raise ValueError("staff_not_found")
+        raise NotFound("staff_not_found")
     await db.commit()
 
 
@@ -229,10 +230,10 @@ async def get_ticket(db: AsyncSession, show_id: uuid.UUID, user: User) -> Ticket
     show = await get_show(db, show_id)
     ensure_enabled(show)
     if show.status not in rules.TICKET_STATUSES:
-        raise ValueError("invalid_show_status")
+        raise Conflict("invalid_show_status")
     entries = await repo.list_participant_entries(db, show.id, user.id)
     if not entries:
-        raise ValueError("no_entries")
+        raise NotFound("no_entries")
     cards = await build_entry_cards(db, show, entries)
     return TicketResponse(
         show_id=show.id,
@@ -255,7 +256,7 @@ async def _desk_show(
     await ensure_desk_access(db, show, user.id, is_admin)
     ensure_enabled(show)
     if onsite and show.status not in rules.ONSITE_STATUSES:
-        raise ValueError("invalid_show_status")
+        raise Conflict("invalid_show_status")
     return show
 
 
@@ -266,12 +267,12 @@ async def scan(
     try:
         token_show_id, participant_id = checkin_token.parse_token(token)
     except checkin_token.InvalidCheckinToken:
-        raise ValueError("invalid_token") from None
+        raise DomainError("invalid_token") from None
     if token_show_id != show.id:
-        raise ValueError("token_other_show")
+        raise NotFound("token_other_show")
     entries = await repo.list_participant_entries(db, show.id, participant_id)
     if not entries:
-        raise ValueError("no_entries")
+        raise NotFound("no_entries")
     participant = (await repo.load_users(db, [participant_id])).get(participant_id)
     return ParticipantCard(
         user_id=participant_id,
@@ -302,17 +303,17 @@ async def add_checks(
     show = await _desk_show(db, show_id, user, is_admin, onsite=False)
     for c in checks:
         if show.status not in rules.allowed_statuses_for(c.kind):
-            raise ValueError("invalid_show_status")
+            raise Conflict("invalid_show_status")
     # FOR UPDATE: две стойки на одну собаку сериализуются, статус
     # пересчитывается по полной истории, а не по «своей» половине.
     entry = await repo.get_entry_for_update(db, show.id, entry_id)
     if entry is None:
-        raise ValueError("entry_not_found")
+        raise NotFound("entry_not_found")
     doc_ids = {c.document_id for c in checks if c.document_id}
     if doc_ids:
         own = {d.id for d, _ in await repo.list_dog_documents(db, [entry.dog_id])}
         if not doc_ids <= own:
-            raise ValueError("document_mismatch")
+            raise Unprocessable("document_mismatch")
     for c in checks:
         db.add(EntryCheck(
             entry_id=entry.id, kind=c.kind, result=c.result,
@@ -337,7 +338,7 @@ async def list_entry_checks(
     await ensure_desk_access(db, show, user.id, is_admin)
     entry = await show_repo.get_show_entry(db, entry_id)
     if entry is None or entry.show_id != show.id:
-        raise ValueError("entry_not_found")
+        raise NotFound("entry_not_found")
     checks = await repo.list_checks(db, [entry.id])
     performers = await repo.load_users(db, [c.performed_by for c in checks if c.performed_by])
     return [_check_response(c, performers) for c in reversed(checks)]
