@@ -46,7 +46,7 @@ check_env() {
         echo "!! Нет $env_file — скопируй .env.prod.example и заполни" >&2
         exit 1
     fi
-    for var in SECRET_KEY POSTGRES_PASSWORD RABBITMQ_PASSWORD S3_SECRET_KEY; do
+    for var in SECRET_KEY POSTGRES_PASSWORD RABBITMQ_PASSWORD REDIS_PASSWORD S3_SECRET_KEY; do
         # Последнее присваивание в файле (как у compose); кавычки срезаем.
         val="$(grep -E "^${var}=" "$env_file" | tail -n 1 | cut -d= -f2- \
                | sed -e 's/^["'\'']//' -e 's/["'\'']$//')"
