@@ -4,8 +4,14 @@ from email.message import Message
 from typing import Any
 import nh3
 from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+
+from app.middleware.asgi_body import (
+    ClientDisconnected,
+    read_body,
+    replay_receive,
+    with_content_length,
+)
 
 # ИСПРАВЛЕНО: bleach менял значения чувствительных полей (пароль "ab<x>cd"
 # превращался в "abcd"), из-за чего хеш при регистрации не совпадал с хешем
@@ -120,44 +126,47 @@ def _sanitize(
     return value
 
 
-class SanitizationMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        content_type = request.headers.get("content-type", "")
-        if not _is_json_content_type(content_type):
-            return await call_next(request)
+class SanitizationMiddleware:
+    """
+    Чистый ASGI (ревью 2026-10-06, BE-28): читает JSON-тело, вычищает HTML
+    и передаёт приложению новое тело через свой receive — без приватных
+    полей Request и без буферизации ответа (см. app/middleware/asgi_body.py).
+    """
 
-        body = await request.body()
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
+        if not _is_json_content_type(request.headers.get("content-type", "")):
+            await self.app(scope, receive, send)
+            return
+
+        try:
+            body = await read_body(receive)
+        except ClientDisconnected:
+            return
         if not body:
-            return await call_next(request)
+            await self.app(scope, replay_receive(body, receive), send)
+            return
 
         try:
             data = json.loads(body.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return JSONResponse(
-                {"detail": "Invalid JSON"}, status_code=400
-            )
+            response = JSONResponse({"detail": "Invalid JSON"}, status_code=400)
+            await response(scope, receive, send)
+            return
 
         # content пропускаем сырым ТОЛЬКО на write-ручках блога (L3).
         raw_fields = (
             RAW_HTML_FIELDS if _is_raw_html_route(request) else frozenset()
         )
-        sanitized = _sanitize(data, raw_fields=raw_fields)
-        new_body = json.dumps(sanitized).encode("utf-8")
-
-        # ИСПРАВЛЕНО (bug_001 ultrareview): подмены только `_receive`
-        # недостаточно. BaseHTTPMiddleware оборачивает request в
-        # _CachedRequest, чей `wrapped_receive` сначала проверяет
-        # `self._body` и возвращает кэш (заполненный нашим
-        # `await request.body()` выше), и только при отсутствии кэша
-        # обращается к `_receive`. Поэтому downstream получал ОРИГИНАЛЬНОЕ
-        # тело, а bleach.clean был молчаливым no-op.
-        # Перезаписываем _body — этим починили санитизацию вообще; replace
-        # _receive оставляем «belt-and-braces» для случая, если кто-то
-        # downstream вручную сбросит _body.
-        request._body = new_body  # type: ignore[attr-defined]
-
-        async def receive():
-            return {"type": "http.request", "body": new_body, "more_body": False}
-
-        request._receive = receive
-        return await call_next(request)
+        new_body = json.dumps(_sanitize(data, raw_fields=raw_fields)).encode("utf-8")
+        await self.app(
+            with_content_length(scope, len(new_body)),
+            replay_receive(new_body, receive),
+            send,
+        )

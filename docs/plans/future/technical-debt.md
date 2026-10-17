@@ -216,9 +216,10 @@ Prometheus, логика сбора не меняется.
   старых фото. **Отложено до утверждения торговой марки:** текст знака
   (`WATERMARK_TEXT` в `app/utils/image_processing.py`, сейчас «Show Ring»)
   зависит от названия.
-- **BE-28 — Sanitization и Idempotency** остались на `BaseHTTPMiddleware`
-  (переписывают тело запроса); остальные middleware переведены на ASGI.
-  Долгосрочно — idempotency на уровне зависимости после аутентификации.
+- **BE-28 — idempotency как зависимость.** Все middleware на чистом ASGI.
+  Долгосрочно idempotency лучше перенести в зависимость ПОСЛЕ аутентификации
+  (сейчас identity — хеш токена/куки, а не проверенный user_id) — когда
+  появятся эндпоинты, где это важно (платежи).
 - **BE-29 — офлайн-каталог `packages/`** устарел: перезапустить
   `scripts/download_packages.sh`. Точные версии зафиксированы в
   `constraints.txt` (обновление — `scripts/update_constraints.sh`).
