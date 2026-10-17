@@ -12,7 +12,8 @@ FROM pgsty/mc:RELEASE.2026-09-16T00-00-00Z@sha256:cfc83108c3abb371f8fb84d99c1fdc
 
 FROM postgres:17-alpine
 
-RUN apk add --no-cache bash
+# age — шифрование дампов (BACKUP_AGE_RECIPIENT, аудит 03.10.2026, № 11).
+RUN apk add --no-cache bash age
 COPY --from=mc /usr/bin/mc /usr/local/bin/mc
 
 COPY backup.sh restore.sh entrypoint.sh /usr/local/bin/
