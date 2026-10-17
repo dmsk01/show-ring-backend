@@ -34,11 +34,11 @@ import hashlib
 import json
 import logging
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from app.config import settings
+from app.middleware.asgi_body import ClientDisconnected, read_body, replay_receive
 
 # Импортируем МОДУЛЬ, а не значение: init_redis() пере-присваивает
 # app.redis.redis_client уже после импорта этого файла. Value-импорт
@@ -151,39 +151,79 @@ def _unavailable() -> JSONResponse:
     )
 
 
-class IdempotencyMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if request.method not in _UNSAFE_METHODS:
-            return await call_next(request)
+def _replay(snapshot: dict) -> Response:
+    """
+    Ответ из кэша. headers — список пар [имя, значение] (повторяющиеся
+    заголовки сохраняются); снимки, записанные до BE-28, хранили словарь —
+    они живут в Redis до суток, поэтому читаем оба формата.
+    """
+    response = Response(
+        content=snapshot["body"].encode(snapshot["encoding"]),
+        status_code=snapshot["status"],
+        media_type=snapshot.get("media_type"),
+    )
+    headers = snapshot["headers"]
+    pairs = headers.items() if isinstance(headers, dict) else headers
+    cached = [
+        (k.lower().encode("latin-1"), v.encode("latin-1"))
+        for k, v in pairs
+        if k.lower() not in _UNCACHEABLE_HEADERS
+    ]
+    names = {k for k, _ in cached}
+    # Content-Length — от тела, которое реально отдаём; Content-Type из
+    # снимка (если был) важнее дефолта Response.
+    own = [(k, v) for k, v in response.raw_headers if k not in names]
+    response.raw_headers = own + cached
+    return response
 
+
+class IdempotencyMiddleware:
+    """
+    Чистый ASGI (ревью 2026-10-06, BE-28). Раньше — BaseHTTPMiddleware: тело
+    подменялось через приватные поля Request, а ответ буферизовался целиком
+    и пересобирался заново. Теперь тело читается из receive и отдаётся
+    приложению своим receive, а ответ уходит клиенту как есть — копия для
+    кэша собирается параллельно (до _MAX_CACHED_BODY_BYTES).
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope["method"] not in _UNSAFE_METHODS:
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
         # Читаем клиента через модуль (см. комментарий у импорта) и
         # фиксируем в локальную переменную — единый снимок на весь запрос.
         redis_client = redis_state.redis_client
         key = request.headers.get(_HEADER)
-        if not key:
-            return await call_next(request)
-        if request.url.path.startswith(_EXCLUDED_PATH_PREFIXES):
-            return await call_next(request)
-        fail_closed = _fail_closed(request.url.path)
+        path = scope["path"]
+        if not key or path.startswith(_EXCLUDED_PATH_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+        fail_closed = _fail_closed(path)
         if redis_client is None:
             if fail_closed:
                 logger.warning("idempotency fail-closed: Redis client missing")
-                return _unavailable()
-            return await call_next(request)
+                await _unavailable()(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > _MAX_REQUEST_BODY_BYTES:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        # Читаем тело и кладём обратно для нижестоящего обработчика —
-        # body() в Starlette кэширует, но мы пересоздаём request.scope
-        # на всякий случай: для POST'ов с большими телами повторное
-        # чтение возможно.
-        body = await request.body()
+        try:
+            body = await read_body(receive)
+        except ClientDisconnected:
+            return
+        app_receive = replay_receive(body, receive)
         body_hash = hashlib.sha256(body).hexdigest()
         identity = _caller_identity(request)
-        cache_key = _cache_key(
-            request.method, request.url.path, key, body_hash, identity
-        )
+        cache_key = _cache_key(scope["method"], path, key, body_hash, identity)
 
         # 1. Пробуем достать готовый ответ.
         try:
@@ -191,33 +231,25 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         except Exception as e:  # noqa: BLE001 — fail-open при сбое Redis
             logger.warning("idempotency cache GET failed: %s", e)
             if fail_closed:
-                return _unavailable()
+                await _unavailable()(scope, receive, send)
+                return
             cached = None
 
         if cached is not None:
             try:
-                snapshot = json.loads(cached)
-                logger.info(
-                    "idempotency hit", extra={"key": key, "path": request.url.path}
-                )
-                return Response(
-                    content=snapshot["body"].encode(snapshot["encoding"]),
-                    status_code=snapshot["status"],
-                    headers=snapshot["headers"],
-                    media_type=snapshot.get("media_type"),
-                )
-            except (ValueError, KeyError) as e:
+                replay = _replay(json.loads(cached))
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
                 # Битый кэш — пропускаем мимо, обработаем заново.
                 logger.warning("idempotency cache corrupt: %s", e)
+            else:
+                logger.info("idempotency hit", extra={"key": key, "path": path})
+                await replay(scope, receive, send)
+                return
 
         # 2. Кэша нет — проверяем in-flight lock. SETNX гарантирует
         # атомарность: только ОДИН одновременный запрос с таким ключом
         # пройдёт дальше, остальные получат 409 (Conflict).
-        # Без lock'а оба параллельных запроса дошли бы до handler'а
-        # и сделали бы операцию дважды.
-        lock_key = _lock_key(
-            request.method, request.url.path, key, body_hash, identity
-        )
+        lock_key = _lock_key(scope["method"], path, key, body_hash, identity)
         try:
             acquired = await redis_client.set(
                 lock_key, "1", nx=True, ex=_IN_FLIGHT_TTL_SECONDS
@@ -225,78 +257,71 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         except Exception as e:  # noqa: BLE001 — fail-open
             logger.warning("idempotency lock SETNX failed: %s", e)
             if fail_closed:
-                return _unavailable()
+                await _unavailable()(scope, receive, send)
+                return
             acquired = True  # без Redis работаем как раньше
 
         if not acquired:
             logger.info(
-                "idempotency in-flight conflict",
-                extra={"key": key, "path": request.url.path},
+                "idempotency in-flight conflict", extra={"key": key, "path": path}
             )
-            return JSONResponse(
+            conflict = JSONResponse(
                 status_code=409,
                 content={
                     "detail": "Request with this Idempotency-Key is already in progress",
                 },
             )
+            await conflict(scope, receive, send)
+            return
 
-        # 3. Lock взят — выполняем запрос и сохраняем ответ.
-        # ИСПРАВЛЕНО (bug_001 ultrareview): подмены только `_receive`
-        # недостаточно — Starlette `_CachedRequest.wrapped_receive`
-        # возвращает кэшированный `_body` ДО обращения к `_receive`.
-        # В idempotency body не меняется (читаем — и оригинальное тело
-        # должно дойти до handler'а), но `_body` уже заполнен через
-        # `await request.body()` выше — фактически дубль присваивания.
-        # Закрепляем явно ради консистентности с sanitization.py и
-        # как защиту от регрессии при будущей правке.
-        request._body = body  # type: ignore[attr-defined]
+        # 3. Lock взят — выполняем запрос, параллельно копируя ответ.
+        status_code = 0
+        headers: list[list[str]] = []
+        chunks: list[bytes] = []
+        size = 0
+        oversized = False
 
-        async def receive():
-            return {"type": "http.request", "body": body, "more_body": False}
-
-        # Тип параметра receive в Starlette шире, чем наш callback —
-        # подменяем напрямую.
-        request._receive = receive  # type: ignore[attr-defined]
+        async def capture_send(message) -> None:
+            nonlocal status_code, size, oversized
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                for k, v in message.get("headers", []):
+                    name = k.decode("latin-1")
+                    if name.lower() not in _UNCACHEABLE_HEADERS:
+                        headers.append([name, v.decode("latin-1")])
+            elif message["type"] == "http.response.body" and not oversized:
+                chunk = message.get("body", b"")
+                size += len(chunk)
+                if size > _MAX_CACHED_BODY_BYTES:
+                    # Большой ответ клиент получает как есть, но в Redis его
+                    # не пишем (см. обоснование на константе).
+                    oversized = True
+                    chunks.clear()
+                else:
+                    chunks.append(chunk)
+            await send(message)
 
         try:
-            response = await call_next(request)
+            await self.app(scope, app_receive, capture_send)
         except Exception:
-            # На исключении lock освобождаем сразу, чтобы повторная попытка
-            # клиента не упёрлась в "409 уже выполняется" пока TTL не истёк.
-            try:
-                await redis_client.delete(lock_key)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("idempotency lock DEL on error failed: %s", e)
+            # Lock освобождаем сразу, чтобы повторная попытка клиента не
+            # упёрлась в «409 уже выполняется», пока не истёк TTL.
+            await _release(redis_client, lock_key, "on error")
             raise
 
         # Кэшируем ТОЛЬКО успешные ответы 2xx — иначе при 400 закэшируем
         # ошибку, и клиент не сможет переотправить корректный запрос.
-        if 200 <= response.status_code < 300:
-            # body_iterator есть на StreamingResponse (FastAPI оборачивает
-            # любой handler-ответ в него), но pyright видит общий тип
-            # Response — берём через getattr с safe-fallback.
-            body_iterator = getattr(response, "body_iterator", None)
-            body_chunks: list[bytes] = []
-            if body_iterator is not None:
-                async for chunk in body_iterator:
-                    body_chunks.append(chunk)
-            full_body = b"".join(body_chunks)
-
-            # ИСПРАВЛЕНО (review 2026-05-28): кешируем только если тело
-            # вписывается в _MAX_CACHED_BODY_BYTES. Большие ответы
-            # отдаём клиенту как есть, но в Redis не пишем — см.
-            # обоснование на константе.
-            if len(full_body) <= _MAX_CACHED_BODY_BYTES:
+        if 200 <= status_code < 300:
+            if oversized:
+                logger.info(
+                    "idempotency cache skip: body > limit %d", _MAX_CACHED_BODY_BYTES
+                )
+            else:
                 snapshot = {
-                    "body": full_body.decode("utf-8", errors="replace"),
+                    "body": b"".join(chunks).decode("utf-8", errors="replace"),
                     "encoding": "utf-8",
-                    "status": response.status_code,
-                    "headers": {
-                        k: v
-                        for k, v in response.headers.items()
-                        if k.lower() not in _UNCACHEABLE_HEADERS
-                    },
-                    "media_type": response.media_type,
+                    "status": status_code,
+                    "headers": headers,
                 }
                 try:
                     await redis_client.set(
@@ -306,39 +331,13 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.warning("idempotency cache SET failed: %s", e)
-            else:
-                logger.info(
-                    "idempotency cache skip: body %d bytes > limit %d",
-                    len(full_body),
-                    _MAX_CACHED_BODY_BYTES,
-                )
+        # Lock освобождаем ПОСЛЕ записи в кэш: иначе параллельный запрос в
+        # окне «lock снят, кэш ещё не записан» выполнился бы повторно.
+        await _release(redis_client, lock_key, f"status {status_code}")
 
-            # Lock освобождаем ПОСЛЕ записи в кэш. Если бы делали наоборот,
-            # параллельный запрос (попавший в окно "lock освобождён, кэш
-            # ещё не записан") пошёл бы выполняться вторично.
-            try:
-                await redis_client.delete(lock_key)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("idempotency lock DEL failed: %s", e)
 
-            # Возвращаем новый Response с уже прочитанным телом —
-            # старый body_iterator исчерпан.
-            # raw_headers, а не dict(response.headers): dict схлопывал
-            # повторяющиеся Set-Cookie в один (терялись куки).
-            replay = Response(
-                content=full_body,
-                status_code=response.status_code,
-                media_type=response.media_type,
-            )
-            replay.raw_headers = [
-                (k, v) for k, v in response.raw_headers if k.lower() != b"content-length"
-            ] + [(b"content-length", str(len(full_body)).encode())]
-            return replay
-
-        # Неуспешный ответ не кэшируем, но lock освобождаем — клиент
-        # должен иметь возможность повторить запрос корректно.
-        try:
-            await redis_client.delete(lock_key)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("idempotency lock DEL (non-2xx) failed: %s", e)
-        return response
+async def _release(redis_client, lock_key: str, reason: str) -> None:
+    try:
+        await redis_client.delete(lock_key)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("idempotency lock DEL (%s) failed: %s", reason, e)
