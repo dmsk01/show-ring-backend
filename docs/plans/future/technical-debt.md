@@ -188,7 +188,8 @@ SMS — подключить Yandex SmartCaptcha (данные в РФ; доба
 **CSP: стили.** `style-src 'unsafe-inline'` оставлен из-за MUI/emotion.
 Ужесточить: nonce в emotion-кэш (`AppRouterCacheProvider options.nonce`)
 и отказ от атрибутов `style` — заметная переделка, выигрыш невелик.
-Полезнее — эндпоинт `report-uri` для сбора нарушений CSP в проде.
+Нарушения CSP уже собираются (`/csp-report`, счётчик `csp_violation` в
+метриках админки) — по ним видно, есть ли смысл ужесточать.
 
 **Метрики.** Счётчики живут в Redis поминутно (`app/services/security_metrics.py`).
 Если появится Prometheus/Grafana — отдать те же счётчики в формате
