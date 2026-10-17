@@ -175,5 +175,5 @@ Router (HTTP) → Service (логика) → Repository (SQL) → Model (ORM)
 | PostgreSQL | Основное хранилище данных | `postgres:16` |
 | RabbitMQ | Очереди задач, события | `rabbitmq:3-management` |
 | Redis | Rate limiting, кэш, WS pub/sub | `redis:7-alpine` |
-| MinIO | S3-совместимое файловое хранилище | `minio/minio` |
+| MinIO | S3-совместимое файловое хранилище | `pgsty/minio` (форк; официальный заархивирован) |
 | MailPit | SMTP-заглушка для разработки | `axllent/mailpit` |
