@@ -1,0 +1,15 @@
+# Pull-деплой Show Ring (deploy/auto-deploy.sh). Ставится вместе с
+# show-ring-deploy.timer — docs/deployment-linux.md, шаг 15.
+[Unit]
+Description=Show Ring: деплой новых коммитов main с зелёным CI
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Пользователь, которому принадлежат /opt/show-ring-* и который состоит в
+# группе docker (шаг 5.1). Поменяй, если клонировал под другим.
+User=deploy
+ExecStart=/opt/show-ring-backend/deploy/auto-deploy.sh
+# Приватные репозитории: токен только на чтение (см. шапку auto-deploy.sh).
+# Environment=GITHUB_TOKEN=github_pat_...

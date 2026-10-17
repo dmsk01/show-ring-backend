@@ -295,19 +295,37 @@ sudo systemctl restart docker          # действует на контейн�
 
 - **Если репозитории публичные** — ничего настраивать не надо, клонируй по HTTPS
   (это сделаем в шаге 7). Переходи к Части II.
-- **Если репозитории приватные** — серверу нужен доступ. Самый простой способ —
-  завести на сервере SSH-ключ и добавить его в GitHub:
+- **Если репозитории приватные** — серверу нужен доступ **только на чтение и только
+  к этим двум репозиториям**. Для этого у GitHub есть *deploy keys* — ключ,
+  привязанный к одному репозиторию. Ключ в настройках **аккаунта** (Settings → SSH
+  keys) для сервера не подходит: он даёт запись во все твои репозитории, и взлом
+  сервера стал бы взломом всего кода.
+
+  Репозиториев два, а GitHub не разрешает один deploy key на два репозитория —
+  заводим два ключа:
 
 ```bash
-ssh-keygen -t ed25519 -C "show-ring-server"   # три раза Enter (без пароля на ключ)
-cat ~/.ssh/id_ed25519.pub                     # покажет публичный ключ — скопируй ВСЮ строку
+ssh-keygen -t ed25519 -f ~/.ssh/show-ring-backend  -N "" -C "server: backend"
+ssh-keygen -t ed25519 -f ~/.ssh/show-ring-frontend -N "" -C "server: frontend"
+cat ~/.ssh/show-ring-backend.pub     # скопируй ВСЮ строку
 ```
-Затем на сайте GitHub: **Settings → SSH and GPG keys → New SSH key**, вставь
-скопированную строку, сохрани. Проверь связь:
+На GitHub: **репозиторий show-ring-backend → Settings → Deploy keys → Add deploy key**,
+вставь строку, галочку **Allow write access НЕ ставь**. То же для фронта с
+`show-ring-frontend.pub`. Затем объясни SSH, какой ключ для какого репозитория:
 ```bash
-ssh -T git@github.com     # при первом разе спросит fingerprint — напечатай yes
+cat >> ~/.ssh/config <<'EOF'
+Host github-backend
+  HostName github.com
+  IdentityFile ~/.ssh/show-ring-backend
+Host github-frontend
+  HostName github.com
+  IdentityFile ~/.ssh/show-ring-frontend
+EOF
+ssh -T git@github-backend     # при первом разе спросит fingerprint — напечатай yes
 ```
-Ответ `Hi <логин>! You've successfully authenticated...` означает, что доступ есть.
+Ответ `Hi dmsk01/show-ring-backend! You've successfully authenticated...` — доступ
+есть. Клонировать тогда так: `git clone git@github-backend:dmsk01/show-ring-backend.git`
+(и `git@github-frontend:…` для фронта).
 
 ---
 
@@ -328,10 +346,13 @@ sudo git clone https://github.com/dmsk01/show-ring-backend.git
 sudo git clone https://github.com/dmsk01/show-ring-frontend.git
 ```
 
-**Если приватные (по SSH, требует шаг 6):**
+**Если приватные (по SSH, требует шаг 6):** клонируем **без `sudo`** — иначе git
+возьмёт SSH-настройки root, а не твои deploy keys:
 ```bash
-sudo git clone git@github.com:dmsk01/show-ring-backend.git
-sudo git clone git@github.com:dmsk01/show-ring-frontend.git
+sudo mkdir -p /opt/show-ring-backend /opt/show-ring-frontend
+sudo chown $USER:$USER /opt/show-ring-backend /opt/show-ring-frontend
+git clone git@github-backend:dmsk01/show-ring-backend.git /opt/show-ring-backend
+git clone git@github-frontend:dmsk01/show-ring-frontend.git /opt/show-ring-frontend
 ```
 
 Чтобы дальше не воевать с правами, сделай каталог своим и зайди в бэкенд:
@@ -608,7 +629,7 @@ rm ~/show-ring-backup-key.txt                                # убрать кл
 > `git pull --ff-only` и упадёт, если на сервере есть незакоммиченные правки
 > в отслеживаемых файлах. `.env` это не затрагивает (он в `.gitignore`).
 
-Чтобы обновление шло само на каждый `git push` — см. следующий шаг.
+Чтобы обновление шло само после каждого `git push` с зелёным CI — см. следующий шаг.
 
 ### Особый случай: обновление сменило идентификаторы БД/хранилища
 
@@ -645,60 +666,60 @@ dc exec api python -m scripts.seed_references
 
 ---
 
-## 15. Автодеплой на каждый push (self-hosted runner) — опционально
+## 15. Автодеплой после зелёного CI — опционально
 
-Чтобы не запускать `deploy.sh` руками, повесь его на GitHub Actions. Так как
-сервер за NAT (без белого IP), вместо «GitHub заходит по SSH» используем
-**self-hosted runner**: агент GitHub живёт НА сервере, держит исходящее
-соединение к GitHub и на каждый push в `main` сам запускает `deploy.sh`
-локально. Наружу ничего открывать не нужно, секреты деплоя в GitHub класть
-не нужно.
+Чтобы не запускать `deploy.sh` руками, сервер может сам проверять GitHub раз в
+5 минут: если в `main` любого из двух репозиториев появился новый коммит и его
+проверки (lint, test…) прошли, он перематывает код ровно на этот коммит и
+пересобирает стек. Это делает `deploy/auto-deploy.sh` по таймеру systemd.
 
-Workflow'ы уже в репозиториях (`.github/workflows/ci.yml`, job `deploy`,
-`runs-on: [self-hosted, show-ring]`). Остаётся зарегистрировать раннер. Раннер
-привязан к **одному** репозиторию, а репо у нас два — значит ставим **два**
-раннера на этом же сервере (в разных папках), оба с меткой `show-ring`.
+Почему так, а не через GitHub Actions на сервере (self-hosted runner): runner
+выполняет код из коммита, который его запустил. В публичном репозитории кто угодно
+может прислать PR из форка с изменённым workflow — и выполнить свой код на сервере,
+где лежит `.env` со всеми паролями. Здесь сервер только **читает** GitHub: никаких
+входящих подключений, токенов в GitHub и чужого кода.
 
-### Установка раннера (повторить для каждого репо)
-
-На GitHub: **репозиторий → Settings → Actions → Runners → New self-hosted
-runner → Linux**. GitHub покажет команды с одноразовым токеном — выполни их
-на сервере. Схема (подставь ССЫЛКУ и ТОКЕН с той страницы):
+### Установка (один раз)
 
 ```bash
-# Раннер для бэкенда
-mkdir -p ~/actions-runner-backend && cd ~/actions-runner-backend
-curl -o actions-runner.tar.gz -L <ССЫЛКА_СО_СТРАНИЦЫ_GITHUB>
-tar xzf actions-runner.tar.gz
-./config.sh --url https://github.com/dmsk01/show-ring-backend \
-  --token <ТОКЕН_СО_СТРАНИЦЫ> --labels show-ring --unattended
-sudo ./svc.sh install     # как systemd-сервис (автозапуск после ребута)
-sudo ./svc.sh start
+chmod +x /opt/show-ring-backend/deploy/auto-deploy.sh
+sudo cp /opt/show-ring-backend/deploy/systemd/show-ring-deploy.* /etc/systemd/system/
 ```
+В `/etc/systemd/system/show-ring-deploy.service` строка `User=deploy` — пользователь,
+которому принадлежат `/opt/show-ring-*` и который в группе `docker` (шаг 5.1). Если
+клонировал под другим — поправь (`sudo nano /etc/systemd/system/show-ring-deploy.service`).
 
-Повтори в `~/actions-runner-frontend` с URL/токеном репозитория
-`show-ring-frontend` (метка та же — `show-ring`).
-
-> `--labels show-ring` обязателен: workflow ищет раннер именно по этой метке.
-> Раннер работает под твоим пользователем — у него уже есть доступ к Docker
-> (шаг 4) и к каталогам в `/opt`.
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now show-ring-deploy.timer
+systemctl list-timers show-ring-deploy.timer    # когда следующий запуск
+```
 
 ### Как теперь выглядит обновление
 
 ```bash
-git push        # со своей машины, в любой из двух репо
+git push        # со своей машины, в любой из двух репозиториев
 ```
+GitHub прогонит проверки, а сервер в течение 5 минут после их успеха сам обновится.
+Красный CI — сервер ничего не трогает и ждёт следующего коммита.
 
-GitHub прогонит lint/test (в облаке), и если зелено — раннер на сервере сам
-выполнит `deploy.sh`. Прогресс виден во вкладке **Actions** репозитория.
-Параллельные деплои сериализуются (в `deploy.sh` стоит `flock`).
-
-### Если раннер отвалился
+Что делал таймер и почему (в том числе «CI ещё идёт», «CI failure — не деплою»):
 ```bash
-cd ~/actions-runner-backend && sudo ./svc.sh status   # статус сервиса
-sudo ./svc.sh start                                    # поднять заново
+journalctl -u show-ring-deploy -n 50 --no-pager
+sudo systemctl start show-ring-deploy        # проверить прямо сейчас, не ждать 5 минут
 ```
-Ручной `deploy.sh` (шаг 14) работает всегда, независимо от раннера.
+Выключить автодеплой: `sudo systemctl disable --now show-ring-deploy.timer`. Ручной
+`deploy.sh` (шаг 14) работает всегда.
+
+> **Приватные репозитории.** Статус CI таймер берёт из API GitHub без авторизации —
+> для приватных репозиториев он вернёт ошибку. Создай fine-grained токен (GitHub →
+> Settings → Developer settings → Fine-grained tokens) только на эти два репозитория
+> с правами **Contents: Read** и **Checks: Read** и впиши его в unit-файл:
+> `Environment=GITHUB_TOKEN=github_pat_…` (строка там уже есть, закомментированная).
+
+> **Защита `main`** уже включена: в ветку попадает только код с зелёными
+> проверками. Не давай права записи в репозитории посторонним — всё, что попало в
+> `main`, через 5 минут работает на сервере.
 
 ---
 

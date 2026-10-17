@@ -1,11 +1,10 @@
 # CI/CD pipeline для Show Ring (GitHub Actions).
 #
-# Стадии: lint → test → deploy.
-# - lint/test гоняются на каждый push и pull request (облачные раннеры).
-# - deploy — только push в main, на self-hosted runner'е (на самом
-#   прод-сервере): тянет оба репо и пересобирает стек локально через
-#   deploy/deploy.sh. Реестр (ghcr) НЕ используется — образы собираются
-#   на сервере, как и задумано в docker-compose.prod.yml.
+# Стадии: lint, test, audit — на каждый push и pull request.
+# Деплоя здесь нет: сервер сам забирает коммиты main с зелёным CI
+# (deploy/auto-deploy.sh по systemd-таймеру). Self-hosted runner на проде
+# убран — в публичном репозитории это путь для чужого кода на сервер
+# (аудит безопасности 03.10.2026, № 3).
 #
 # Тонкость: интеграционные тесты требуют ЖИВЫЕ Postgres + Redis (иначе
 # conftest.py делает skip) и накатанные миграции (conftest только
@@ -97,19 +96,3 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install pip-audit
       - run: pip-audit -r constraints.txt --no-deps --disable-pip --progress-spinner off
-
-  deploy:
-    needs: [lint, test]
-    if: github.ref == 'refs/heads/main'
-    # self-hosted runner стоит на ПРОД-СЕРВЕРЕ (метка show-ring). Он держит
-    # ИСХОДЯЩЕЕ соединение к GitHub, поэтому работает за NAT — входящий SSH
-    # и секреты деплоя в репозитории не нужны. Деплой идёт против рабочих
-    # копий в /opt (там лежит .env с секретами), а не против checkout'а
-    # раннера — поэтому actions/checkout здесь намеренно НЕ нужен.
-    # ВНИМАНИЕ: путь ниже — под реальную раскладку сервера (/opt/show-ring-
-    # backend). Сам deploy.sh самолокализуется и пути не хардкодит; здесь
-    # хардкод только до точки входа. Поменяешь каталог — поправь и тут.
-    runs-on: [self-hosted, show-ring]
-    steps:
-      - name: Pull repos & rebuild stack
-        run: bash /opt/show-ring-backend/deploy/deploy.sh
