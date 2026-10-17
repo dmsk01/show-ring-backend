@@ -16,6 +16,11 @@ Idempotency-Key middleware (этап 14).
   мог бы прислать тот же ключ для разных операций;
 - TTL обязателен — без него Redis распух бы вечно.
 
+Сбой Redis по умолчанию — fail-open: запрос выполняется без защиты от
+повтора (лучше, чем отказать во всём API). Для путей из
+settings.idempotency_required_paths — fail-closed: 503, клиент повторит
+позже с тем же ключом. Двойная оплата хуже, чем «попробуйте ещё раз».
+
 In-flight lock (SETNX) защищает от ДВОЙНОЙ обработки при параллельных
 запросах с одним ключом: первый запрос ставит ключ idem:lock:..., второй
 получает 409 (Conflict). Без lock'а оба запроса пошли бы в handler и
@@ -133,6 +138,19 @@ def _lock_key(
     return f"idem:lock:{identity}:{method}:{path}:{key}:{body_hash}"
 
 
+def _fail_closed(path: str) -> bool:
+    """Путь из idempotency_required_paths: без Redis не выполнять."""
+    return any(path.startswith(p) for p in settings.idempotency_required_paths)
+
+
+def _unavailable() -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Сервис временно недоступен, повторите запрос позже"},
+        headers={"Retry-After": "5"},
+    )
+
+
 class IdempotencyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         if request.method not in _UNSAFE_METHODS:
@@ -142,9 +160,15 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         # фиксируем в локальную переменную — единый снимок на весь запрос.
         redis_client = redis_state.redis_client
         key = request.headers.get(_HEADER)
-        if not key or redis_client is None:
+        if not key:
             return await call_next(request)
         if request.url.path.startswith(_EXCLUDED_PATH_PREFIXES):
+            return await call_next(request)
+        fail_closed = _fail_closed(request.url.path)
+        if redis_client is None:
+            if fail_closed:
+                logger.warning("idempotency fail-closed: Redis client missing")
+                return _unavailable()
             return await call_next(request)
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > _MAX_REQUEST_BODY_BYTES:
@@ -166,6 +190,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             cached = await redis_client.get(cache_key)
         except Exception as e:  # noqa: BLE001 — fail-open при сбое Redis
             logger.warning("idempotency cache GET failed: %s", e)
+            if fail_closed:
+                return _unavailable()
             cached = None
 
         if cached is not None:
@@ -198,6 +224,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             )
         except Exception as e:  # noqa: BLE001 — fail-open
             logger.warning("idempotency lock SETNX failed: %s", e)
+            if fail_closed:
+                return _unavailable()
             acquired = True  # без Redis работаем как раньше
 
         if not acquired:
