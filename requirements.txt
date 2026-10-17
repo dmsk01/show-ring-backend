@@ -10,7 +10,7 @@ uvicorn[standard]>=0.32.0
 sqlalchemy[asyncio]>=2.0.36
 asyncpg>=0.30.0
 alembic>=1.14.0
-pydantic>=2.10.0
+pydantic>=2.14.1
 pydantic-settings>=2.6.0
 python-dotenv>=1.0.0
 
@@ -28,7 +28,7 @@ aiofiles>=24.1.0                # Async файловые операции
 python-magic>=0.4.27            # Magic bytes определение типов файлов (libmagic)
 
 # --- Этап 8: RabbitMQ + PDF ---
-aio-pika>=9.5.0                 # RabbitMQ async клиент
+aio-pika>=10.1.1                 # RabbitMQ async клиент
 reportlab>=4.2.0                # Программная генерация PDF
 docxtpl>=0.18.0                # DOCX-шаблоны с Jinja-плейсхолдерами (официальные документы РКФ)
 # weasyprint>=62.0              # HTML→PDF (альтернатива reportlab, тяжёлые системные зависимости)
