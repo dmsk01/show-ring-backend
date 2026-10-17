@@ -29,6 +29,7 @@ from app.config import settings
 from app.database import async_session_factory
 from app.logging_config import setup_logging
 from app.redis import close_redis, init_redis
+from app.services.file_storage import close_s3, init_s3
 from app.services.rabbit_dlx import declare_workflow_queue
 from worker.handlers.ad_handler import (
     AD_EVENTS_QUEUE,
@@ -441,7 +442,16 @@ def main() -> None:
         "ads": run_ad_events,
         "outbox": run_outbox,
     }[args.mode]
-    asyncio.run(coro())
+    asyncio.run(_run_with_s3(coro))
+
+
+async def _run_with_s3(coro) -> None:
+    """Общий S3-клиент на время работы воркера (ревью 2026-10-06, BE-36)."""
+    await init_s3()
+    try:
+        await coro()
+    finally:
+        await close_s3()
 
 
 if __name__ == "__main__":

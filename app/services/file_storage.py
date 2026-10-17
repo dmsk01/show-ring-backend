@@ -4,9 +4,11 @@
 Архитектура:
 - Используем aioboto3 — async-обёртку над boto3. Не делаем sync-вызовы
   в FastAPI: иначе блокируем event loop при загрузке больших файлов.
-- Singleton-сессия (один aioboto3.Session() на процесс), client
-  создаётся per-request — это рекомендация aiobotocore: client держит
-  TCP-соединения, лучше открывать как async-context.
+- Singleton-сессия (один aioboto3.Session() на процесс) и один
+  долгоживущий S3-клиент на процесс (ревью 2026-10-06, BE-36): он держит
+  пул TCP-соединений к MinIO, и запросы переиспользуют их вместо нового
+  клиента (и нового рукопожатия) на каждый вызов. Клиент открывается в
+  lifespan API и при старте воркера (init_s3/close_s3).
 - Magic bytes валидация: проверяем СИГНАТУРУ файла (первые байты),
   а не доверяем Content-Type, который клиент может подделать.
 
@@ -23,11 +25,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncIterator
+from contextlib import (
+    AbstractAsyncContextManager,
+    AsyncExitStack,
+    asynccontextmanager,
+)
 from dataclasses import dataclass
 from typing import Any, cast
 
 import aioboto3
+from aiobotocore.config import AioConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import HTTPException, UploadFile, status
 from PIL import Image
@@ -81,18 +89,13 @@ _session = aioboto3.Session()
 _upload_semaphore = asyncio.Semaphore(settings.upload_max_concurrency)
 
 
-def _s3_client() -> AbstractAsyncContextManager[Any]:
+def _new_client() -> AbstractAsyncContextManager[Any]:
     """
-    Контекстный менеджер с S3-клиентом. Использование:
-        async with _s3_client() as s3:
-            await s3.put_object(...)
-    Каждый клиент закрывает свои TCP-коннекты при выходе из контекста.
+    Новый S3-клиент как async-context: соединения закрываются при выходе.
 
     cast нужен, потому что aioboto3 Session.client() имеет неполные
     type-stubs и pyright видит его как абстрактный объект без
-    __aenter__/__aexit__. Реально это AbstractAsyncContextManager —
-    приводим тип явно, чтобы все `async with _s3_client()` ниже
-    проходили проверку типов.
+    __aenter__/__aexit__. Реально это AbstractAsyncContextManager.
     """
     return cast(
         AbstractAsyncContextManager[Any],
@@ -102,8 +105,61 @@ def _s3_client() -> AbstractAsyncContextManager[Any]:
             aws_access_key_id=settings.s3_access_key,
             aws_secret_access_key=settings.s3_secret_key,
             region_name=settings.s3_region,
+            # Пул соединений общий на процесс: iter_file держит соединение
+            # всё время стрима, а загрузок одновременно до
+            # upload_max_concurrency — дефолтных 10 соединений мало.
+            config=AioConfig(max_pool_connections=settings.s3_max_pool_connections),
         ),
     )
+
+
+# Долгоживущий клиент процесса (BE-36). aiobotocore привязывает клиент
+# (его aiohttp-сессию) к event loop'у, в котором он открыт, поэтому
+# запоминаем loop и в чужом loop'е клиент не отдаём.
+_shared_client: Any | None = None
+_shared_loop: asyncio.AbstractEventLoop | None = None
+_shared_stack: AsyncExitStack | None = None
+
+
+async def init_s3() -> None:
+    """Открыть общий S3-клиент. Сеть не трогает: соединения — по запросу."""
+    global _shared_client, _shared_loop, _shared_stack
+    if _shared_client is not None:
+        return
+    stack = AsyncExitStack()
+    _shared_client = await stack.enter_async_context(_new_client())
+    _shared_stack = stack
+    _shared_loop = asyncio.get_running_loop()
+
+
+async def close_s3() -> None:
+    """Закрыть общий S3-клиент и его пул соединений."""
+    global _shared_client, _shared_loop, _shared_stack
+    stack = _shared_stack
+    _shared_client = _shared_loop = _shared_stack = None
+    if stack is not None:
+        try:
+            await stack.aclose()
+        except Exception as e:  # noqa: BLE001 — остановку не прерываем
+            logger.warning("S3 client close failed: %s", e)
+
+
+@asynccontextmanager
+async def _s3_client() -> AsyncIterator[Any]:
+    """
+    S3-клиент для одной операции:
+        async with _s3_client() as s3:
+            await s3.put_object(...)
+
+    Отдаёт общий клиент процесса, если он открыт в текущем event loop'е;
+    выход из контекста его НЕ закрывает. Иначе (скрипты, тесты, вызов до
+    init_s3) — временный клиент, который закрывается при выходе.
+    """
+    if _shared_client is not None and _shared_loop is asyncio.get_running_loop():
+        yield _shared_client
+        return
+    async with _new_client() as s3:
+        yield s3
 
 
 async def upload_file(

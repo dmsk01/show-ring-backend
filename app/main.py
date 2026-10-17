@@ -45,6 +45,7 @@ from app.routers.admin import moderation as admin_moderation
 from app.routers.admin import upload_quotas as admin_upload_quotas
 from app.routers.admin import security as admin_security
 from app.redis import init_redis, close_redis
+from app.services.file_storage import close_s3, init_s3
 from app.services.rabbit import rabbit_service
 from app.middleware.metrics import MetricsMiddleware
 from app.services.scheduler import start_scheduler, stop_scheduler
@@ -76,6 +77,7 @@ async def lifespan(app: FastAPI):
         app.state.db_available = False
         logger.warning("DB unavailable at startup: %s", e)
     await init_redis()
+    await init_s3()
     # RabbitMQ подключаем с graceful fallback: если брокер недоступен,
     # API всё равно поднимается — задачи документов будут создаваться
     # в БД, но публикация в очередь упадёт с warning'ом (см.
@@ -115,6 +117,7 @@ async def shutdown_resources() -> None:
     except Exception as e:
         logger.warning("RabbitMQ close failed: %s", e)
     await close_redis()
+    await close_s3()
     await engine.dispose()
 
 
