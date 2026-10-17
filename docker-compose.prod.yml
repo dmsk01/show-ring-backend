@@ -201,6 +201,9 @@ services:
       BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
       BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      # Публичный ключ age (age1…): дампы и архивы файлов шифруются, offsite
+      # получает только зашифрованное. Приватный ключ — НЕ на сервере.
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
     volumes:
       # bind-mount: бэкапы видны с хоста как ./backups без docker-команд.
       - ./backups:/backups
