@@ -59,18 +59,18 @@ async def _generate_variants(
     if src is None:
         raise ValueError("file_not_found")
 
-    # Идемпотентность: сносим прежние варианты (БД + MinIO), чтобы повтор
-    # задачи не плодил дубли.
+    # Идемпотентность: прежние варианты заменяем новыми (повтор задачи и
+    # перегенерация после смены водяного знака не плодят дубли). Строки БД
+    # удаляем в той же транзакции, а объекты MinIO — только после коммита:
+    # если генерация упадёт, откат вернёт строки, и они должны указывать на
+    # живые файлы.
     existing = (
         await db.execute(
             select(FileVariant).where(FileVariant.file_id == file_id)
         )
     ).scalars().all()
+    old_keys = [v.s3_key for v in existing]
     for v in existing:
-        try:
-            await file_storage.delete_file(v.s3_key)
-        except Exception:  # noqa: BLE001
-            logger.warning("variant cleanup: delete %s failed", v.s3_key)
         await db.delete(v)
     await db.flush()
 
@@ -94,4 +94,7 @@ async def _generate_variants(
         await db.flush()
         out_ids.append(str(variant.id))
     await db.commit()
+    for key in old_keys:
+        # delete_file сам глушит ошибки хранилища (best-effort).
+        await file_storage.delete_file(key)
     return out_ids
