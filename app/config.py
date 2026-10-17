@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     # оставляем False по умолчанию.
     smtp_use_tls: bool = False
     smtp_from_email: str = "noreply@show-ring.local"
-    smtp_from_name: str = "Show Ring"
+    smtp_from_name: str = "BisShow"
 
     # APScheduler: включать ли встроенный планировщик. На dev удобно
     # держать выключенным, чтобы тестовые задания не запускались на
