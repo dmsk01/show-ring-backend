@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, NotFound
 from app.models.ad import AdCampaign, CampaignStatus
 from app.models.audit import ModerationLog
 from app.models.classified import Classified, ClassifiedStatus
@@ -63,7 +64,7 @@ async def moderate_classified(
 ) -> Classified:
     obj = await db.get(Classified, classified_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     prev_status = obj.status
     # approve → возвращаем в active; reject → закрываем со статусом closed.
     # closed — мягкая блокировка: данные остаются, но из списков скрыты.
@@ -106,7 +107,7 @@ async def moderate_campaign(
     """
     obj = await db.get(AdCampaign, campaign_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     prev_status = obj.status
     if approve:
         obj.status = CampaignStatus.active
@@ -140,7 +141,7 @@ async def verify_kennel(
 ) -> Kennel:
     obj = await db.get(Kennel, kennel_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     obj.is_verified = is_verified
     await _log_action(
         db,
@@ -176,14 +177,14 @@ async def block_user(
     """
     obj = await db.get(User, user_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # ИСПРАВЛЕНО (bug_204): запрещаем admin'у блокировать самого себя.
     # Без проверки админ мог случайным PUT /admin/users/<свой_id>/block
     # выключить себе is_active=False и потерять доступ навсегда (если
     # он единственный admin — только восстановление через прямой SQL).
     # Разблокировку самого себя не запрещаем — она безопасна.
     if user_id == actor_id and is_active is False:
-        raise ValueError("cannot_block_self")
+        raise Conflict("cannot_block_self")
     obj.is_active = is_active
     if not is_active:
         # Отзываем все живые refresh-токены пользователя одним UPDATE.
@@ -226,7 +227,7 @@ async def update_user_role(
     """
     user = await db.get(User, user_id)
     if user is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
 
     stmt = select(UserRole).where(
         UserRole.user_id == user_id, UserRole.role == role
@@ -242,13 +243,13 @@ async def update_user_role(
     #    последний оставшийся) разрушит управление платформой.
     if not grant and role == RoleEnum.admin and existing is not None:
         if user_id == granted_by:
-            raise ValueError("cannot_revoke_self_admin")
+            raise Conflict("cannot_revoke_self_admin")
         count_stmt = select(func.count()).select_from(UserRole).where(
             UserRole.role == RoleEnum.admin
         )
         admin_count = int((await db.execute(count_stmt)).scalar_one())
         if admin_count <= 1:
-            raise ValueError("last_admin_protected")
+            raise Conflict("last_admin_protected")
 
     if grant and existing is None:
         db.add(UserRole(user_id=user_id, role=role, granted_by=granted_by))

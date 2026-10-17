@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.errors import DomainError, NotFound
 from app.models.dog import Dog
 from app.models.kennel import Kennel
 from app.models.reference import Breed, BreedGroup, Grade, ShowClass, ShowRank
@@ -303,15 +304,15 @@ async def build_diploma_context(
 ) -> dict:
     entry = await db.get(ShowEntry, entry_id)
     if entry is None:
-        raise ValueError("entry_not_found")
+        raise DomainError("entry_not_found")
     show = await db.get(Show, entry.show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     rank = await db.get(ShowRank, show.rank_id)
     bulk = await _load_bulk(db, [entry], with_results=True, with_parents=False)
     dog = bulk.dogs.get(entry.dog_id)
     if dog is None:
-        raise ValueError("dog_not_found")
+        raise DomainError("dog_not_found")
     return _shape_diploma_context(_diploma_input(show, rank, entry, dog, bulk))
 
 
@@ -419,7 +420,7 @@ async def build_ring_sheets_context(
     """
     show = await db.get(Show, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     rank = await db.get(ShowRank, show.rank_id)
     show_title = show.name + (f" ранга {rank.name}" if rank else "")
 
@@ -671,7 +672,7 @@ async def build_catalog_context(
 ) -> dict:
     show = await db.get(Show, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     rank = await db.get(ShowRank, show.rank_id)
 
     # Судьи и их назначения — пачкой (review 2026-06-01: было по db.get
@@ -807,7 +808,7 @@ async def build_documents_readiness(
     """Список записей с проблемами, мешающими корректной печати документов."""
     show = await db.get(Show, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     entries = (
         await db.execute(select(ShowEntry).where(ShowEntry.show_id == show_id))
     ).scalars().all()
@@ -897,7 +898,7 @@ async def build_certificates_context(
     """
     show = await db.get(Show, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     rank = await db.get(ShowRank, show.rank_id)
     show_title = show.name + (f" ранга {rank.name}" if rank else "")
     date_long = _fmt_date_long(show.date_start)

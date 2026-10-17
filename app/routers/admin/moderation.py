@@ -8,9 +8,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,23 +38,6 @@ router = APIRouter(
     tags=["admin"],
     dependencies=[Depends(require_any_role("admin"))],
 )
-
-
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code == "not_found":
-        raise HTTPException(404, code)
-    # bug_204 fix: self-block / self-demote / last-admin отдаём 409,
-    # потому что это не "невалидный запрос" (400), а конфликт с
-    # инвариантами системы — клиенту понятнее, что "запрос валиден,
-    # но нельзя из текущего состояния".
-    if code in {
-        "cannot_block_self",
-        "cannot_revoke_self_admin",
-        "last_admin_protected",
-    }:
-        raise HTTPException(409, code)
-    raise HTTPException(400, code)
 
 
 # ---------------------------------------------------------------------
@@ -107,16 +89,13 @@ async def moderate_classified(
     db: AsyncSession = Depends(get_db),
     actor: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.moderate_classified(
-            db,
-            classified_id,
-            body.approve,
-            body.reason,
-            actor_id=actor.id,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.moderate_classified(
+        db,
+        classified_id,
+        body.approve,
+        body.reason,
+        actor_id=actor.id,
+    )
     return {"id": obj.id, "status": obj.status.value}
 
 
@@ -182,12 +161,9 @@ async def moderate_campaign(
     db: AsyncSession = Depends(get_db),
     actor: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.moderate_campaign(
-            db, campaign_id, body.approve, body.reason, actor_id=actor.id
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.moderate_campaign(
+        db, campaign_id, body.approve, body.reason, actor_id=actor.id
+    )
     return CampaignResponse.model_validate(obj)
 
 
@@ -238,12 +214,9 @@ async def verify_kennel(
     db: AsyncSession = Depends(get_db),
     actor: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.verify_kennel(
-            db, kennel_id, body.is_verified, actor_id=actor.id
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.verify_kennel(
+        db, kennel_id, body.is_verified, actor_id=actor.id
+    )
     return {"id": obj.id, "is_verified": obj.is_verified}
 
 
@@ -307,12 +280,9 @@ async def block_user(
     db: AsyncSession = Depends(get_db),
     actor: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.block_user(
-            db, user_id, body.is_active, actor_id=actor.id
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.block_user(
+        db, user_id, body.is_active, actor_id=actor.id
+    )
     return {"id": obj.id, "is_active": obj.is_active}
 
 
@@ -326,10 +296,7 @@ async def update_user_role(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_current_user),
 ):
-    try:
-        roles = await svc.update_user_role(
-            db, user_id, body.role, body.grant, granted_by=admin.id
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    roles = await svc.update_user_role(
+        db, user_id, body.role, body.grant, granted_by=admin.id
+    )
     return {"id": str(user_id), "roles": [r.value for r in roles]}

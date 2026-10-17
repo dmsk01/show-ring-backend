@@ -23,6 +23,7 @@ import json
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, Forbidden, NotFound, Unprocessable
 from app.utils.dates import today_local
 from app.config import settings
 from app.models.ad import AdBanner, AdCampaign, AdEventType, CampaignStatus
@@ -87,7 +88,7 @@ def _ensure_owner(
     campaign: AdCampaign, user_id: uuid.UUID, is_admin: bool
 ) -> None:
     if campaign.advertiser_id != user_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
 
 # ---------------------------------------------------------------------
@@ -112,7 +113,7 @@ async def update_campaign(
 ) -> AdCampaign:
     obj = await repo.get_campaign(db, campaign_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_owner(obj, user_id, is_admin)
 
     # Кросс-проверки на MERGED-значениях (ревью 2026-10-06, BE-05):
@@ -120,10 +121,10 @@ async def update_campaign(
     new_start = fields.get("date_start", obj.date_start)
     new_end = fields.get("date_end", obj.date_end)
     if new_start is None or new_end is None or new_end < new_start:
-        raise ValueError("invalid_dates")
+        raise Unprocessable("invalid_dates")
     new_budget = fields.get("budget", obj.budget)
     if new_budget is None or new_budget < obj.spent:
-        raise ValueError("budget_below_spent")
+        raise Unprocessable("budget_below_spent")
 
     # Модерация: первую активацию делает admin; владелец может вернуть в
     # показ только уже одобренную кампанию (например, после паузы).
@@ -132,7 +133,7 @@ async def update_campaign(
             if obj.approved_at is None:
                 obj.approved_at = datetime.now(timezone.utc)
         elif obj.approved_at is None:
-            raise ValueError("moderation_required")
+            raise Forbidden("moderation_required")
 
     for k, v in fields.items():
         setattr(obj, k, v)
@@ -150,7 +151,7 @@ async def create_banner(
 ) -> AdBanner:
     campaign = await repo.get_campaign(db, campaign_id)
     if campaign is None:
-        raise ValueError("campaign_not_found")
+        raise NotFound("campaign_not_found")
     _ensure_owner(campaign, user_id, is_admin)
     return await repo.create_banner(db, campaign_id=campaign_id, **fields)
 
@@ -164,10 +165,10 @@ async def update_banner(
 ) -> AdBanner:
     banner = await repo.get_banner(db, banner_id)
     if banner is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     campaign = await repo.get_campaign(db, banner.campaign_id)
     if campaign is None:
-        raise ValueError("campaign_not_found")
+        raise NotFound("campaign_not_found")
     _ensure_owner(campaign, user_id, is_admin)
     for k, v in fields.items():
         setattr(banner, k, v)
@@ -184,7 +185,7 @@ async def delete_campaign(
 ) -> None:
     obj = await repo.get_campaign(db, campaign_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_owner(obj, user_id, is_admin)
     # CASCADE: удаление кампании уносит её баннеры (ad_banners), а с ними
     # — все их события (ad_events).
@@ -200,11 +201,11 @@ async def delete_banner(
 ) -> None:
     banner = await repo.get_banner(db, banner_id)
     if banner is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Право — у владельца кампании баннера (или admin), как в update_banner.
     campaign = await repo.get_campaign(db, banner.campaign_id)
     if campaign is None:
-        raise ValueError("campaign_not_found")
+        raise NotFound("campaign_not_found")
     _ensure_owner(campaign, user_id, is_admin)
     # CASCADE уносит события баннера (ad_events).
     await db.delete(banner)
@@ -310,13 +311,13 @@ async def record_event(
 
     banner = await repo.get_banner(db, banner_id)
     if banner is None:
-        raise ValueError("banner_not_found")
+        raise NotFound("banner_not_found")
     if not banner.is_active:
-        raise ValueError("banner_inactive")
+        raise Conflict("banner_inactive")
 
     campaign = await repo.get_campaign(db, banner.campaign_id)
     if campaign is None:
-        raise ValueError("campaign_not_found")
+        raise NotFound("campaign_not_found")
 
     # bug_214 audit 2026-05-28: schema требует budget>0 при создании,
     # но через прямой UPDATE/миграцию/админский reset кампания может
@@ -386,7 +387,7 @@ async def stats_for_campaign(
     """
     campaign = await repo.get_campaign(db, campaign_id)
     if campaign is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_owner(campaign, user_id, is_admin)
 
     impressions, clicks = await repo.campaign_totals(db, campaign_id)
@@ -411,7 +412,7 @@ async def daily_stats(
 ) -> list[dict]:
     campaign = await repo.get_campaign(db, campaign_id)
     if campaign is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_owner(campaign, user_id, is_admin)
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)

@@ -20,6 +20,7 @@ from typing import Iterable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, Forbidden, NotFound, Unprocessable
 from app.models.dog import Dog
 from app.models.reference import Breed, ShowClass, ShowRank
 from app.models.result import DogTitle, ShowResult
@@ -97,7 +98,7 @@ _RESULTS_EDITABLE_STATUSES = (ShowStatus.in_progress, ShowStatus.registration_cl
 
 def _ensure_results_window(show: Show) -> None:
     if show.status not in _RESULTS_EDITABLE_STATUSES:
-        raise ValueError("show_not_in_progress")
+        raise Unprocessable("show_not_in_progress")
 
 
 def _ensure_admitted(show: Show, entry: ShowEntry) -> None:
@@ -107,7 +108,7 @@ def _ensure_admitted(show: Show, entry: ShowEntry) -> None:
         AttendanceStatus.absent,
         AttendanceStatus.rejected,
     ):
-        raise ValueError("entry_not_admitted")
+        raise Conflict("entry_not_admitted")
 
 
 async def _ensure_can_edit(
@@ -123,15 +124,15 @@ async def _ensure_can_edit(
     """
     ctx = await repo.get_entry_context(db, show_entry_id)
     if ctx is None:
-        raise ValueError("entry_not_found")
+        raise NotFound("entry_not_found")
     entry, dog, breed = ctx
     # Подгружаем выставку с judges (нужно для _can_modify_results).
     show = await show_repo.get_show_with_relations(db, entry.show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_results_window(show)
     if not _can_modify_results(show, user_id, is_admin, breed):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     _ensure_admitted(show, entry)
     return show, entry, dog, breed
 
@@ -323,15 +324,15 @@ async def upsert_class_result(
     # Подгрузим контекст ринга: класс, ранг, оценка, animal_type.
     cls = await db.get(ShowClass, entry.show_class_id)
     if cls is None:
-        raise ValueError("show_class_not_found")
+        raise NotFound("show_class_not_found")
     rank = await db.get(ShowRank, show.rank_id)
     if rank is None:
-        raise ValueError("show_rank_not_found")
+        raise NotFound("show_rank_not_found")
     grade = (
         await repo.get_grade(db, grade_id) if grade_id is not None else None
     )
     if grade_id is not None and grade is None:
-        raise ValueError("grade_not_found")
+        raise NotFound("grade_not_found")
 
     # Одно место в классе (с учётом пола) — у одной собаки (BE-26): два
     # «первых места» давали два CW/CAC.
@@ -344,7 +345,7 @@ async def upsert_class_result(
         placement=placement,
         exclude_entry_id=entry.id,
     ):
-        raise ValueError("placement_taken")
+        raise Conflict("placement_taken")
 
     # UPSERT — если результат уже был, обновляем поля; иначе создаём.
     result = await repo.get_result_by_entry(db, show_entry_id)
@@ -425,21 +426,21 @@ async def delete_result(
     """
     result = await repo.get_result(db, result_id)
     if result is None:
-        raise ValueError("result_not_found")
+        raise NotFound("result_not_found")
     entry = await db.get(ShowEntry, result.show_entry_id)
     # Привязка к выставке из URL — как в роутере update_result (bug_208):
     # результат чужой выставки здесь невидим, отдаём 404, не 403.
     if entry is None or entry.show_id != show_id:
-        raise ValueError("result_not_found")
+        raise NotFound("result_not_found")
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_results_window(show)
     # Судья удаляет результаты только своих пород (как и вводит, BE-26).
     ctx = await repo.get_entry_context(db, entry.id)
     breed = ctx[2] if ctx is not None else None
     if not _can_modify_results(show, user_id, is_admin, breed):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
     # Сначала отзываем титулы, потом удаляем сам результат — порядок не
     # критичен (FK на show_results у dog_titles нет), но логически titles
@@ -476,15 +477,15 @@ async def set_best_of_breed(
     """
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # BE-03: тот же статус-гейт, что у ввода результата ринга.
     _ensure_results_window(show)
     if not _can_modify_results(show, user_id, is_admin):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
     rank = await db.get(ShowRank, show.rank_id)
     if rank is None:
-        raise ValueError("show_rank_not_found")
+        raise NotFound("show_rank_not_found")
 
     # Снимаем флаги BOB/best_male/best_female/best_junior/best_veteran
     # с прежних победителей в этой породе (если кто-то был).
@@ -531,14 +532,14 @@ async def set_best_of_breed(
         # Валидация: запись принадлежит выставке и породе.
         ctx = await repo.get_entry_context(db, entry_id)
         if ctx is None:
-            raise ValueError("entry_not_found")
+            raise NotFound("entry_not_found")
         entry, dog, breed = ctx
         if entry.show_id != show_id or dog.breed_id != breed_id:
-            raise ValueError("entry_breed_mismatch")
+            raise Unprocessable("entry_breed_mismatch")
         _ensure_admitted(show, entry)
         result = await repo.get_result_by_entry(db, entry_id)
         if result is None:
-            raise ValueError("result_not_found")
+            raise NotFound("result_not_found")
         setattr(result, attr, True)
         return result, entry, breed
 
@@ -585,7 +586,7 @@ async def _resolve_animal_type(
     """Достаёт animal_type_id для собаки через её породу."""
     ctx = await repo.get_entry_context(db, entry_id)
     if ctx is None:
-        raise ValueError("entry_not_found")
+        raise NotFound("entry_not_found")
     _entry, _dog, breed = ctx
     return breed.animal_type_id
 
@@ -605,10 +606,10 @@ async def set_best_in_group(
     """
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_results_window(show)
     if not _can_modify_results(show, user_id, is_admin):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
     # Снимаем флаг BIG с предыдущих победителей этой группы.
     # ИСПРАВЛЕНО (bug_019 ultrareview): также сбрасываем
@@ -633,20 +634,20 @@ async def set_best_in_group(
 
     ctx = await repo.get_entry_context(db, winner_entry_id)
     if ctx is None:
-        raise ValueError("entry_not_found")
+        raise NotFound("entry_not_found")
     entry, _dog, breed = ctx
     if entry.show_id != show_id:
-        raise ValueError("entry_show_mismatch")
+        raise Unprocessable("entry_show_mismatch")
     if breed.breed_group_id != breed_group_id:
-        raise ValueError("entry_group_mismatch")
+        raise Unprocessable("entry_group_mismatch")
     _ensure_admitted(show, entry)
 
     winner = await repo.get_result_by_entry(db, winner_entry_id)
     if winner is None:
-        raise ValueError("result_not_found")
+        raise NotFound("result_not_found")
     if not winner.is_best_of_breed:
         # BIG присуждается только BOB-победителю породы.
-        raise ValueError("winner_must_be_bob")
+        raise Unprocessable("winner_must_be_bob")
     winner.is_best_in_group = True
 
     big_award = await show_rules.get_big_title(db, breed.animal_type_id)
@@ -678,10 +679,10 @@ async def set_best_in_show(
     """
     show = await show_repo.get_show_with_relations(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _ensure_results_window(show)
     if not _can_modify_results(show, user_id, is_admin):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
     # Снимаем BIS с предыдущего победителя выставки.
     # ИСПРАВЛЕНО (bug_209 audit 2026-05-28): for_update=True для
@@ -698,17 +699,17 @@ async def set_best_in_show(
 
     ctx = await repo.get_entry_context(db, winner_entry_id)
     if ctx is None:
-        raise ValueError("entry_not_found")
+        raise NotFound("entry_not_found")
     entry, _dog, breed = ctx
     if entry.show_id != show_id:
-        raise ValueError("entry_show_mismatch")
+        raise Unprocessable("entry_show_mismatch")
     _ensure_admitted(show, entry)
 
     winner = await repo.get_result_by_entry(db, winner_entry_id)
     if winner is None:
-        raise ValueError("result_not_found")
+        raise NotFound("result_not_found")
     if not winner.is_best_in_group:
-        raise ValueError("winner_must_be_big")
+        raise Unprocessable("winner_must_be_big")
     winner.is_best_in_show = True
 
     bis_award = await show_rules.get_bis_title(db, breed.animal_type_id)

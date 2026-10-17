@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import uuid
-from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
@@ -48,20 +47,6 @@ router = APIRouter(prefix="/ads", tags=["ads"])
 # helper в app.dependencies.is_admin. Алиас для совместимости с
 # вызовами внутри файла.
 _is_admin = is_admin
-
-
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    not_found = {"not_found", "campaign_not_found", "banner_not_found"}
-    if code in not_found:
-        raise HTTPException(404, code)
-    if code in ("forbidden", "moderation_required"):
-        raise HTTPException(403, code)
-    if code in ("invalid_dates", "budget_below_spent"):
-        raise HTTPException(422, code)
-    if code == "banner_inactive":
-        raise HTTPException(409, code)
-    raise HTTPException(400, code)
 
 
 # ---------------------------------------------------------------------
@@ -112,16 +97,13 @@ async def update_campaign(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.update_campaign(
-            db,
-            campaign_id=campaign_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.update_campaign(
+        db,
+        campaign_id=campaign_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(exclude_unset=True),
+    )
     return CampaignResponse.model_validate(obj)
 
 
@@ -135,15 +117,12 @@ async def delete_campaign(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_campaign(
-            db,
-            campaign_id=campaign_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_campaign(
+        db,
+        campaign_id=campaign_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -163,16 +142,13 @@ async def create_banner(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.create_banner(
-            db,
-            campaign_id=campaign_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.create_banner(
+        db,
+        campaign_id=campaign_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(),
+    )
     return BannerResponse.model_validate(obj)
 
 
@@ -187,16 +163,13 @@ async def update_banner(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.update_banner(
-            db,
-            banner_id=banner_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.update_banner(
+        db,
+        banner_id=banner_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(exclude_unset=True),
+    )
     return BannerResponse.model_validate(obj)
 
 
@@ -210,15 +183,12 @@ async def delete_banner(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_banner(
-            db,
-            banner_id=banner_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_banner(
+        db,
+        banner_id=banner_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -326,18 +296,15 @@ async def record_event(
     # Если на этапе 11 нужно будет привязывать user_id к событиям —
     # сделаем optional_current_user dependency.
 
-    try:
-        accepted = await svc.record_event(
-            db,
-            banner_id=body.banner_id,
-            event_type=body.event_type,
-            user_id=user_id,
-            ip=ip,
-            user_agent=user_agent,
-            page_url=body.page_url,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    accepted = await svc.record_event(
+        db,
+        banner_id=body.banner_id,
+        event_type=body.event_type,
+        user_id=user_id,
+        ip=ip,
+        user_agent=user_agent,
+        page_url=body.page_url,
+    )
     return {"accepted": accepted}
 
 
@@ -356,15 +323,12 @@ async def campaign_stats(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        data = await svc.stats_for_campaign(
-            db,
-            campaign_id=campaign_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    data = await svc.stats_for_campaign(
+        db,
+        campaign_id=campaign_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+    )
     return CampaignStats(**data)
 
 
@@ -379,14 +343,11 @@ async def campaign_daily_stats(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        rows = await svc.daily_stats(
-            db,
-            campaign_id=campaign_id,
-            user_id=user.id,
-            is_admin=_is_admin(user),
-            days=days,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    rows = await svc.daily_stats(
+        db,
+        campaign_id=campaign_id,
+        user_id=user.id,
+        is_admin=_is_admin(user),
+        days=days,
+    )
     return [DailyStat(**r) for r in rows]

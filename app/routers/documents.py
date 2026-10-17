@@ -17,13 +17,13 @@
 from __future__ import annotations
 
 import uuid
-from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user, user_rate_limit
+from app.errors import Forbidden, NotFound
 from app.models.user import User
 from app.repositories import show as show_repo
 from app.schemas.task import DocumentKind, TaskResponse
@@ -39,20 +39,10 @@ router = APIRouter(prefix="/shows", tags=["documents"])
 _DOCS_LIMIT = user_rate_limit("documents:generate", limit=10, window=3600)
 
 
-
 def _is_organizer_or_admin(user: User, organizer_id: uuid.UUID) -> bool:
     if any(r.role.value == "admin" for r in user.roles):
         return True
     return user.id == organizer_id
-
-
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code == "not_found":
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    raise HTTPException(400, code)
 
 
 async def _ensure_organizer(
@@ -60,9 +50,9 @@ async def _ensure_organizer(
 ) -> None:
     show = await show_repo.get_show(db, show_id)
     if show is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     if not _is_organizer_or_admin(user, show.organizer_id):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
 
 async def _publish_task(
@@ -99,10 +89,7 @@ async def generate_catalog(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db, user, DocumentKind.CATALOG, {"show_id": str(show_id)}
     )
@@ -120,10 +107,7 @@ async def generate_diplomas(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db, user, DocumentKind.DIPLOMAS_BATCH, {"show_id": str(show_id)}
     )
@@ -142,10 +126,7 @@ async def generate_diploma(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db,
         user,
@@ -172,10 +153,7 @@ async def generate_official_catalog(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db, user, DocumentKind.CATALOG_OFFICIAL,
         {"show_id": str(show_id)},
@@ -194,10 +172,7 @@ async def generate_official_diplomas(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db, user, DocumentKind.DIPLOMAS_BATCH_OFFICIAL,
         {"show_id": str(show_id)},
@@ -217,10 +192,7 @@ async def generate_official_diploma(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db, user, DocumentKind.DIPLOMA_OFFICIAL,
         {"show_id": str(show_id), "entry_id": str(entry_id)},
@@ -240,10 +212,7 @@ async def generate_official_ring_sheets(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     payload = {"show_id": str(show_id)}
     if ring_id is not None:
         payload["ring_id"] = str(ring_id)
@@ -264,10 +233,7 @@ async def generate_official_certificates(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db, user, DocumentKind.CERTIFICATES_OFFICIAL,
         {"show_id": str(show_id)},
@@ -287,10 +253,7 @@ async def generate_official_entry_certificates(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
     return await _publish_task(
         db, user, DocumentKind.CERTIFICATES_OFFICIAL,
         {"show_id": str(show_id), "entry_id": str(entry_id)},
@@ -314,25 +277,19 @@ async def get_official_context(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-    except ValueError as e:
-        _raise_for_error(e)
-    try:
-        if kind == "catalog":
-            ctx = await document_official.build_catalog_context(db, show_id)
-        elif kind == "ring-sheets":
-            ctx = await document_official.build_ring_sheets_context(
-                db, show_id, ring_id
-            )
-        elif kind == "diploma":
-            if entry_id is None:
-                raise HTTPException(400, "entry_id required for diploma")
-            ctx = await document_official.build_diploma_context(db, entry_id)
-        else:
-            raise HTTPException(404, "unknown document kind")
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
+    if kind == "catalog":
+        ctx = await document_official.build_catalog_context(db, show_id)
+    elif kind == "ring-sheets":
+        ctx = await document_official.build_ring_sheets_context(
+            db, show_id, ring_id
+        )
+    elif kind == "diploma":
+        if entry_id is None:
+            raise HTTPException(400, "entry_id required for diploma")
+        ctx = await document_official.build_diploma_context(db, entry_id)
+    else:
+        raise HTTPException(404, "unknown document kind")
     return to_jsonable(ctx)
 
 
@@ -345,9 +302,6 @@ async def get_documents_readiness(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await _ensure_organizer(db, show_id, user)
-        data = await document_official.build_documents_readiness(db, show_id)
-    except ValueError as e:
-        _raise_for_error(e)
+    await _ensure_organizer(db, show_id, user)
+    data = await document_official.build_documents_readiness(db, show_id)
     return data

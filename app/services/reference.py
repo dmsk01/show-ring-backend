@@ -19,6 +19,7 @@ import uuid
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, NotFound, Unprocessable
 from app.models.reference import (
     AnimalType,
     Breed,
@@ -60,7 +61,7 @@ async def create_animal_type(db: AsyncSession, **fields) -> AnimalType:
         # UNIQUE по code. Откатываем — иначе сессия в "PendingRollback"
         # и следующий запрос свалится.
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def update_animal_type(
@@ -68,7 +69,7 @@ async def update_animal_type(
 ) -> AnimalType:
     obj = await repo.get_animal_type(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _apply_update(obj, fields)
     try:
         await db.commit()
@@ -76,17 +77,17 @@ async def update_animal_type(
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def delete_animal_type(db: AsyncSession, id_: uuid.UUID) -> None:
     obj = await repo.get_animal_type(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Защита от каскадного сноса: на animal_type ссылаются все остальные
     # справочники. Удалять без подчищенных зависимостей нельзя.
     if await repo.animal_type_has_dependents(db, id_):
-        raise ValueError("ref_in_use")
+        raise Conflict("ref_in_use")
     await db.delete(obj)
     await db.commit()
 
@@ -100,14 +101,14 @@ async def create_breed_group(db: AsyncSession, **fields) -> BreedGroup:
     # Проверяем, что animal_type существует, до INSERT — иначе IntegrityError
     # от FK был бы менее информативный.
     if await repo.get_animal_type(db, fields["animal_type_id"]) is None:
-        raise ValueError("animal_type_not_found")
+        raise NotFound("animal_type_not_found")
     try:
         obj = await repo.create_breed_group(db, **fields)
         await db.commit()
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def update_breed_group(
@@ -115,7 +116,7 @@ async def update_breed_group(
 ) -> BreedGroup:
     obj = await repo.get_breed_group(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     _apply_update(obj, fields)
     try:
         await db.commit()
@@ -123,18 +124,18 @@ async def update_breed_group(
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def delete_breed_group(db: AsyncSession, id_: uuid.UUID) -> None:
     obj = await repo.get_breed_group(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # На уровне модели FK breeds.breed_group_id = SET NULL, но мы
     # хотим явный запрет: пусть админ сначала переназначит породы.
     # Это безопаснее (случайное удаление группы не "обнулит" 50 пород).
     if await repo.breed_group_has_breeds(db, id_):
-        raise ValueError("ref_in_use")
+        raise Conflict("ref_in_use")
     await db.delete(obj)
     await db.commit()
 
@@ -146,34 +147,34 @@ async def delete_breed_group(db: AsyncSession, id_: uuid.UUID) -> None:
 
 async def create_breed(db: AsyncSession, **fields) -> Breed:
     if await repo.get_animal_type(db, fields["animal_type_id"]) is None:
-        raise ValueError("animal_type_not_found")
+        raise NotFound("animal_type_not_found")
     if fields.get("breed_group_id") is not None:
         group = await repo.get_breed_group(db, fields["breed_group_id"])
         if group is None:
-            raise ValueError("breed_group_not_found")
+            raise NotFound("breed_group_not_found")
         # Группа должна принадлежать тому же виду — иначе у нас "лабрадор
         # в группе кошек". База этого сама не проверит, делаем здесь.
         if group.animal_type_id != fields["animal_type_id"]:
-            raise ValueError("animal_type_mismatch")
+            raise Unprocessable("animal_type_mismatch")
     try:
         obj = await repo.create_breed(db, **fields)
         await db.commit()
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def update_breed(db: AsyncSession, id_: uuid.UUID, fields: dict) -> Breed:
     obj = await repo.get_breed(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     if "breed_group_id" in fields and fields["breed_group_id"] is not None:
         group = await repo.get_breed_group(db, fields["breed_group_id"])
         if group is None:
-            raise ValueError("breed_group_not_found")
+            raise NotFound("breed_group_not_found")
         if group.animal_type_id != obj.animal_type_id:
-            raise ValueError("animal_type_mismatch")
+            raise Unprocessable("animal_type_mismatch")
     _apply_update(obj, fields)
     try:
         await db.commit()
@@ -181,13 +182,13 @@ async def update_breed(db: AsyncSession, id_: uuid.UUID, fields: dict) -> Breed:
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def delete_breed(db: AsyncSession, id_: uuid.UUID) -> None:
     obj = await repo.get_breed(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # На этапе 4 здесь добавится проверка: нельзя удалить породу,
     # если есть собаки этой породы (EXISTS из таблицы dogs).
     # Пока такой таблицы нет — оставляем заглушку в виде комментария.
@@ -208,7 +209,7 @@ async def _create_simple(
 ):
     if check_animal_type:
         if await repo.get_animal_type(db, fields["animal_type_id"]) is None:
-            raise ValueError("animal_type_not_found")
+            raise NotFound("animal_type_not_found")
     obj = model_cls(**fields)
     db.add(obj)
     try:
@@ -217,7 +218,7 @@ async def _create_simple(
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def _update_simple(
@@ -232,7 +233,7 @@ async def _update_simple(
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_code")
+        raise Conflict("duplicate_code")
 
 
 async def _delete_simple(db: AsyncSession, obj) -> None:
@@ -252,14 +253,14 @@ async def create_show_class(db: AsyncSession, **fields):
 async def update_show_class(db: AsyncSession, id_: uuid.UUID, fields: dict):
     obj = await repo.get_show_class(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     return await _update_simple(db, obj, fields)
 
 
 async def delete_show_class(db: AsyncSession, id_: uuid.UUID):
     obj = await repo.get_show_class(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _delete_simple(db, obj)
 
 
@@ -270,14 +271,14 @@ async def create_show_rank(db: AsyncSession, **fields):
 async def update_show_rank(db: AsyncSession, id_: uuid.UUID, fields: dict):
     obj = await repo.get_show_rank(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     return await _update_simple(db, obj, fields)
 
 
 async def delete_show_rank(db: AsyncSession, id_: uuid.UUID):
     obj = await repo.get_show_rank(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _delete_simple(db, obj)
 
 
@@ -288,14 +289,14 @@ async def create_title(db: AsyncSession, **fields):
 async def update_title(db: AsyncSession, id_: uuid.UUID, fields: dict):
     obj = await repo.get_title(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     return await _update_simple(db, obj, fields)
 
 
 async def delete_title(db: AsyncSession, id_: uuid.UUID):
     obj = await repo.get_title(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _delete_simple(db, obj)
 
 
@@ -306,12 +307,12 @@ async def create_grade(db: AsyncSession, **fields):
 async def update_grade(db: AsyncSession, id_: uuid.UUID, fields: dict):
     obj = await repo.get_grade(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     return await _update_simple(db, obj, fields)
 
 
 async def delete_grade(db: AsyncSession, id_: uuid.UUID):
     obj = await repo.get_grade(db, id_)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _delete_simple(db, obj)
