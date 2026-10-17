@@ -20,6 +20,8 @@ env/
 
 # IDE
 .idea/
+# Локальные настройки Claude Code (пути, разрешения) — у каждого свои.
+.claude/settings.local.json
 .vscode/
 *.swp
 *.swo

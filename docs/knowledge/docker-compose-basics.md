@@ -21,7 +21,7 @@
 postgres:  image: postgres:17-alpine
 redis:     image: redis:8-alpine
 rabbitmq:  image: rabbitmq:3-management-alpine
-minio:     image: minio/minio
+minio:     image: pgsty/minio   # форк: официальный MinIO заархивирован
 ```
 
 Их собрали авторы Postgres/Redis и выложили в публичный реестр — мы просто качаем готовое.
