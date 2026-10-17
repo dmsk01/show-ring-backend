@@ -4,6 +4,9 @@
 #
 # Версии Python-пакетов закреплены в constraints.txt
 # (scripts/update_constraints.sh): Dependabot предлагает обновления по нему.
+#
+# Мажорные версии не предлагаются: каждая — отдельная миграция, не PR
+# «вслепую». Обновления безопасности приходят независимо от этих правил.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -14,17 +17,41 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # aiobotocore закрепляет точную версию botocore: boto3/botocore/
+      # s3transfer поднимаются только вместе с ним (update_constraints.sh).
+      - dependency-name: boto3
+      - dependency-name: botocore
+      - dependency-name: s3transfer
 
   # Образы в docker-compose*.yml (minio/mc/certbot закреплены по digest).
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Мажорная версия PostgreSQL несовместима с томом данных (нужен
+      # pg_upgrade или дамп/восстановление), Python — смена интерпретатора.
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directories: [/, /deploy/backup]
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
