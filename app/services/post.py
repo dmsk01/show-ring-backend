@@ -22,6 +22,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Forbidden, NotFound
 from app.models.post import Post
 from app.models.user import User
 from app.repositories import post as repo
@@ -66,10 +67,10 @@ async def update_post(
     ) -> Post:
     obj = await repo.get_by_id(db, post_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Аудит L1: organizer правит только свои посты; admin — любые.
     if obj.author_id != actor.user_id and not actor.is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
     data = dict(fields)
     if "content" in data and data["content"] is not None:
@@ -97,9 +98,9 @@ async def delete_post(
     ) -> None:
     obj = await repo.get_by_id(db, post_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Аудит L1: organizer удаляет только свои посты; admin — любые.
     if obj.author_id != actor.user_id and not actor.is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     await db.delete(obj)
     await db.commit()

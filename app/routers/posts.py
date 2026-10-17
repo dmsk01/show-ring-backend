@@ -50,15 +50,6 @@ router = APIRouter(prefix="/posts", tags=["posts"])
 _require_writer = require_any_role("admin", "organizer")
 
 
-def _error_status(code: str) -> int:
-    """ValueError-код сервиса → HTTP-статус."""
-    if code == "not_found":
-        return status.HTTP_404_NOT_FOUND
-    if code == "forbidden":
-        return status.HTTP_403_FORBIDDEN
-    return status.HTTP_400_BAD_REQUEST
-
-
 @router.get("", response_model=PostPage, summary="Список постов (пагинация)")
 async def list_posts(
     request: Request,
@@ -155,15 +146,12 @@ async def update_post(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        post = await svc.update_post(
-            db,
-            post_id,
-            body.model_dump(exclude_unset=True),
-            actor=Actor.of(user),
-        )
-    except ValueError as e:
-        raise HTTPException(_error_status(str(e)), str(e))
+    post = await svc.update_post(
+        db,
+        post_id,
+        body.model_dump(exclude_unset=True),
+        actor=Actor.of(user),
+    )
     return to_response(post)
 
 
@@ -178,9 +166,6 @@ async def delete_post(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_post(
-            db, post_id, actor=Actor.of(user)
-        )
-    except ValueError as e:
-        raise HTTPException(_error_status(str(e)), str(e))
+    await svc.delete_post(
+        db, post_id, actor=Actor.of(user)
+    )
