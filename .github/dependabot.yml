@@ -20,8 +20,11 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
-      # aiobotocore закрепляет точную версию botocore: boto3/botocore/
-      # s3transfer поднимаются только вместе с ним (update_constraints.sh).
+      # Цепочка aioboto3 → aiobotocore → botocore закреплена точными
+      # версиями: boto3/botocore/s3transfer/aiobotocore/aioboto3 поднимаются
+      # только вместе (scripts/update_constraints.sh), не по одному.
+      - dependency-name: aioboto3
+      - dependency-name: aiobotocore
       - dependency-name: boto3
       - dependency-name: botocore
       - dependency-name: s3transfer
