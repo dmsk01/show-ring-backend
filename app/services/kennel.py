@@ -16,6 +16,7 @@ import uuid
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, Forbidden, NotFound
 from app.models.kennel import Kennel
 from app.repositories import kennel as repo
 
@@ -31,7 +32,7 @@ async def create_kennel(
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_prefix")
+        raise Conflict("duplicate_prefix")
 
 
 async def update_kennel(
@@ -43,11 +44,11 @@ async def update_kennel(
 ) -> Kennel:
     obj = await repo.get_kennel(db, kennel_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Только владелец или admin может править. Проверяем здесь, а не
     # в роутере, чтобы любой callsite не мог случайно обойти проверку.
     if obj.owner_id != requester_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     for k, v in fields.items():
         setattr(obj, k, v)
     try:
@@ -56,7 +57,7 @@ async def update_kennel(
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_prefix")
+        raise Conflict("duplicate_prefix")
 
 
 async def delete_kennel(
@@ -67,9 +68,9 @@ async def delete_kennel(
 ) -> None:
     obj = await repo.get_kennel(db, kennel_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     if obj.owner_id != requester_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     # FK dog.kennel_id SET NULL — собаки останутся в БД без питомника.
     # Это сознательно: мы не теряем исторических данных о собаках.
     await db.delete(obj)

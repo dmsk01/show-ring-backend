@@ -15,6 +15,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Forbidden, NotFound, Unprocessable
 from app.models.dog import SexEnum
 from app.models.litter import Litter
 from app.repositories import dog as dog_repo
@@ -32,9 +33,9 @@ async def _check_kennel_owner(
 ) -> None:
     kennel = await kennel_repo.get_kennel(db, kennel_id)
     if kennel is None:
-        raise ValueError("kennel_not_found")
+        raise NotFound("kennel_not_found")
     if kennel.owner_id != requester_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
 
 async def _validate_parents(
@@ -46,23 +47,23 @@ async def _validate_parents(
     if father_id is not None:
         father = await dog_repo.get_dog(db, father_id)
         if father is None:
-            raise ValueError("father_not_found")
+            raise NotFound("father_not_found")
         if father.sex != SexEnum.male:
-            raise ValueError("father_must_be_male")
+            raise Unprocessable("father_must_be_male")
         if father.breed_id != breed_id:
             # Жёсткая проверка: помёт зарегистрирован под одной породой,
             # родители должны быть той же. В реальном РКФ-учёте
             # межпородные помёты — отдельная процедура и обычно не
             # попадают в публичную доску.
-            raise ValueError("father_breed_mismatch")
+            raise Unprocessable("father_breed_mismatch")
     if mother_id is not None:
         mother = await dog_repo.get_dog(db, mother_id)
         if mother is None:
-            raise ValueError("mother_not_found")
+            raise NotFound("mother_not_found")
         if mother.sex != SexEnum.female:
-            raise ValueError("mother_must_be_female")
+            raise Unprocessable("mother_must_be_female")
         if mother.breed_id != breed_id:
-            raise ValueError("mother_breed_mismatch")
+            raise Unprocessable("mother_breed_mismatch")
 
 
 async def create_litter(
@@ -135,7 +136,7 @@ async def update_litter(
 ) -> Litter:
     obj = await repo.get_litter(db, litter_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
 
     # Право: только владелец питомника (или admin).
     await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
@@ -165,7 +166,7 @@ async def delete_litter(
 ) -> None:
     obj = await repo.get_litter(db, litter_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Право (как в update_litter): владелец питомника помёта или admin.
     await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
     # dogs.litter_id и classifieds.litter_id → SET NULL: щенки и

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import uuid
-from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,22 +67,6 @@ async def _build_litter(db: AsyncSession, litter: Litter) -> LitterResponse:
     return (await _build_litters(db, [litter]))[0]
 
 
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code in ("not_found", "kennel_not_found", "father_not_found", "mother_not_found"):
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    if code in (
-        "father_must_be_male",
-        "mother_must_be_female",
-        "father_breed_mismatch",
-        "mother_breed_mismatch",
-    ):
-        raise HTTPException(422, code)
-    raise HTTPException(400, code)
-
-
 @router.post(
     "",
     response_model=LitterResponse,
@@ -95,15 +78,12 @@ async def create_litter(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        litter = await svc.create_litter(
-            db,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    litter = await svc.create_litter(
+        db,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(),
+    )
     return await _build_litter(db, litter)
 
 
@@ -185,16 +165,13 @@ async def update_litter(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        litter = await svc.update_litter(
-            db,
-            litter_id=litter_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    litter = await svc.update_litter(
+        db,
+        litter_id=litter_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(exclude_unset=True),
+    )
     return await _build_litter(db, litter)
 
 
@@ -208,12 +185,9 @@ async def delete_litter(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_litter(
-            db,
-            litter_id=litter_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_litter(
+        db,
+        litter_id=litter_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )

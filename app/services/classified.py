@@ -17,6 +17,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Forbidden, NotFound, Unprocessable
 from app.models.classified import Classified, ClassifiedStatus
 from app.models.file import UploadedFile
 from app.repositories import classified as repo
@@ -44,7 +45,7 @@ async def _verify_files_owned(
     for img in images:
         f = await db.get(UploadedFile, img["file_id"])
         if f is None or f.uploaded_by != requester_id:
-            raise ValueError("file_forbidden")
+            raise Forbidden("file_forbidden")
 
 
 async def _check_owner(
@@ -53,7 +54,7 @@ async def _check_owner(
     is_admin: bool,
 ) -> None:
     if classified.author_id != requester_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
 
 # ИСПРАВЛЕНО (bug_210 audit 2026-05-28): без этой проверки клиент мог
@@ -88,7 +89,7 @@ def _validate_status_transition(
         return
     allowed = _USER_STATUS_TRANSITIONS.get(old, set())
     if new not in allowed:
-        raise ValueError("status_transition_forbidden")
+        raise Unprocessable("status_transition_forbidden")
 
 
 async def create_classified(
@@ -149,7 +150,7 @@ async def update_classified(
 ) -> Classified:
     obj = await repo.get_classified(db, classified_id, with_images=True)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _check_owner(obj, requester_id, is_admin)
 
     # bug_210: смена статуса — отдельная политика. Проверяем ДО setattr,
@@ -222,7 +223,7 @@ async def add_images(
     """
     obj = await repo.get_classified(db, classified_id, with_images=True)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _check_owner(obj, requester_id, is_admin)
     # bug_212/216: проверяем ownership каждого file_id.
     await _verify_files_owned(db, images, requester_id, is_admin)
@@ -263,7 +264,7 @@ async def close_classified(
     """
     obj = await repo.get_classified(db, classified_id, with_images=False)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _check_owner(obj, requester_id, is_admin)
     if hard:
         await db.delete(obj)
