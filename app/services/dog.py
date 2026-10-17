@@ -18,6 +18,7 @@ import uuid
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Conflict, Forbidden, NotFound, Unprocessable
 from app.policies import can_manage_dog
 from app.models.dog import Dog, SexEnum
 from app.models.kennel import Kennel
@@ -41,26 +42,26 @@ async def _validate_parents(
     if father_id is not None:
         father = await repo.get_dog(db, father_id)
         if father is None:
-            raise ValueError("father_not_found")
+            raise NotFound("father_not_found")
         if father.sex != SexEnum.male:
-            raise ValueError("father_must_be_male")
+            raise Unprocessable("father_must_be_male")
         if self_id is not None and father.id == self_id:
-            raise ValueError("self_parent_forbidden")
+            raise Unprocessable("self_parent_forbidden")
     if mother_id is not None:
         mother = await repo.get_dog(db, mother_id)
         if mother is None:
-            raise ValueError("mother_not_found")
+            raise NotFound("mother_not_found")
         if mother.sex != SexEnum.female:
-            raise ValueError("mother_must_be_female")
+            raise Unprocessable("mother_must_be_female")
         if self_id is not None and mother.id == self_id:
-            raise ValueError("self_parent_forbidden")
+            raise Unprocessable("self_parent_forbidden")
     # Родитель не может быть потомком самой собаки (на любой глубине) —
     # иначе родословная замыкается в цикл. Только для существующей собаки:
     # у новой (create) потомков ещё нет.
     if self_id is not None:
         for parent_id in (father_id, mother_id):
             if parent_id is not None and await repo.is_ancestor(db, self_id, parent_id):
-                raise ValueError("pedigree_cycle")
+                raise Unprocessable("pedigree_cycle")
 
 
 async def _check_kennel_owner(
@@ -71,9 +72,9 @@ async def _check_kennel_owner(
 ) -> Kennel:
     kennel = await kennel_repo.get_kennel(db, kennel_id)
     if kennel is None:
-        raise ValueError("kennel_not_found")
+        raise NotFound("kennel_not_found")
     if kennel.owner_id != requester_id and not is_admin:
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     return kennel
 
 
@@ -94,7 +95,7 @@ async def _check_can_manage_dog(
     """
     # Правило — app/policies.can_manage_dog (BE-33): одно на все операции.
     if not await can_manage_dog(db, dog, requester_id, is_admin=is_admin):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
 
 
 async def create_dog(
@@ -126,7 +127,7 @@ async def create_dog(
         await db.rollback()
         # Скорее всего UNIQUE rkf_number. Не указываем точно поле в
         # detail, чтобы не раскрывать структуру БД лишний раз.
-        raise ValueError("duplicate_unique_field")
+        raise Conflict("duplicate_unique_field")
 
 
 async def update_dog(
@@ -138,7 +139,7 @@ async def update_dog(
 ) -> Dog:
     obj = await repo.get_dog(db, dog_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Право на правку: владелец собаки (owner_id), владелец питомника
     # или admin — см. _check_can_manage_dog.
     await _check_can_manage_dog(db, obj, requester_id, is_admin)
@@ -164,7 +165,7 @@ async def update_dog(
         return obj
     except IntegrityError:
         await db.rollback()
-        raise ValueError("duplicate_unique_field")
+        raise Conflict("duplicate_unique_field")
 
 
 async def delete_dog(
@@ -175,7 +176,7 @@ async def delete_dog(
 ) -> None:
     obj = await repo.get_dog(db, dog_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Право (как в update_dog): владелец собаки, владелец питомника
     # или admin.
     await _check_can_manage_dog(db, obj, requester_id, is_admin)
@@ -183,7 +184,7 @@ async def delete_dog(
     # закрытую/идущую/завершённую выставку или титул) — часть каталогов и
     # документов РКФ. Её не удаляем; БД страхует FK RESTRICT.
     if await repo.has_show_history(db, dog_id):
-        raise ValueError("dog_has_show_history")
+        raise Conflict("dog_has_show_history")
     # Записи на ещё открытые (draft/registration_open/cancelled) выставки
     # снимаем явно — каскада больше нет. Фото (dog_photos) удаляются
     # каскадом; ссылки детей/помётов на собаку-родителя → SET NULL.
@@ -206,7 +207,7 @@ async def add_images(
     """
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _check_can_manage_dog(db, dog, requester_id, is_admin)
 
     try:
@@ -222,7 +223,7 @@ async def add_images(
     except IntegrityError:
         await db.rollback()
         # UNIQUE(dog_id, file_id) — файл уже привязан.
-        raise ValueError("duplicate_unique_field")
+        raise Conflict("duplicate_unique_field")
     return dog
 
 
@@ -240,12 +241,12 @@ async def delete_image(
     """
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     await _check_can_manage_dog(db, dog, requester_id, is_admin)
 
     photo = await repo.get_dog_photo(db, dog_id, file_id)
     if photo is None:
-        raise ValueError("photo_not_found")
+        raise NotFound("photo_not_found")
 
     was_primary = photo.is_primary
     await repo.delete_dog_photo(db, photo)
@@ -296,7 +297,7 @@ async def list_descendants(
     """Прямые потомки (одно поколение) + второй родитель каждого."""
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     children = await repo.list_children(db, dog_id)
     avatars = await _relatives_photos(db, children)
     other_ids = [
@@ -317,7 +318,7 @@ async def list_siblings(db: AsyncSession, dog_id: uuid.UUID) -> list[DogSibling]
     """Сибсы: полнородные (оба родителя общие) и полукровные (один общий)."""
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     siblings = await repo.list_siblings(db, dog)
     avatars = await _relatives_photos(db, siblings)
     result = []
@@ -356,23 +357,23 @@ async def add_descendant(
     """
     parent = await repo.get_dog(db, parent_id)
     if parent is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     child = await repo.get_dog(db, child_id)
     if child is None:
-        raise ValueError("child_not_found")
+        raise NotFound("child_not_found")
     await _check_can_manage_dog(db, child, requester_id, is_admin)
 
     if child.id == parent.id:
-        raise ValueError("self_parent_forbidden")
+        raise Unprocessable("self_parent_forbidden")
     slot = _parent_slot(parent)
     current = getattr(child, slot)
     if current is not None and current != parent.id:
-        raise ValueError("parent_already_set")
+        raise Conflict("parent_already_set")
     if current is None:
         # Потомок не может быть предком своего родителя — иначе петля в
         # родословной (CTE её переживёт, но данные станут бессмысленными).
         if await repo.is_ancestor(db, child.id, parent.id):
-            raise ValueError("pedigree_cycle")
+            raise Unprocessable("pedigree_cycle")
         setattr(child, slot, parent.id)
         await db.commit()
         await db.refresh(child)
@@ -390,11 +391,11 @@ async def remove_descendant(
     """Разрывает связь родитель → потомок (очищает слот у потомка)."""
     parent = await repo.get_dog(db, parent_id)
     if parent is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     child = await repo.get_dog(db, child_id)
     slot = _parent_slot(parent)
     if child is None or getattr(child, slot) != parent.id:
-        raise ValueError("descendant_not_found")
+        raise NotFound("descendant_not_found")
     await _check_can_manage_dog(db, child, requester_id, is_admin)
     setattr(child, slot, None)
     await db.commit()

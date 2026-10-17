@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import NoReturn
 
 from fastapi import (
     APIRouter,
@@ -51,15 +50,6 @@ from app.services.ws_manager import ws_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/support", tags=["support"])
-
-
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code == "not_found":
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    raise HTTPException(400, code)
 
 
 # ---------------------------------------------------------------------
@@ -131,10 +121,7 @@ async def change_ticket_status(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.change_status(db, ticket_id, user, body.status)
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.change_status(db, ticket_id, user, body.status)
     return TicketResponse.model_validate(obj)
 
 
@@ -149,12 +136,9 @@ async def assign_ticket(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        obj = await svc.assign_operator(
-            db, ticket_id, user, body.assigned_to_id
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.assign_operator(
+        db, ticket_id, user, body.assigned_to_id
+    )
     return TicketResponse.model_validate(obj)
 
 
@@ -202,10 +186,7 @@ async def post_message_rest(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        msg = await svc.post_message(db, ticket_id, user, body.body)
-    except ValueError as e:
-        _raise_for_error(e)
+    msg = await svc.post_message(db, ticket_id, user, body.body)
     # Распространяем в WS-клиентов, чтобы открытые чаты подхватили.
     await ws_manager.publish(
         ticket_id,
