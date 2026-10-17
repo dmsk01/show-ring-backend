@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Literal, NoReturn
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
@@ -83,17 +83,6 @@ async def _sync_contacts_consent(
     await db.commit()
 
 
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code == "not_found":
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    if code == "duplicate_prefix":
-        raise HTTPException(409, code)
-    raise HTTPException(400, code)
-
-
 @router.post(
     "",
     response_model=KennelResponse,
@@ -108,10 +97,7 @@ async def create_kennel(
     user: User = Depends(get_current_user),
 ):
     # owner_id берём из текущего юзера — не доверяем клиенту.
-    try:
-        kennel = await svc.create_kennel(db, owner_id=user.id, **body.model_dump())
-    except ValueError as e:
-        _raise_for_error(e)
+    kennel = await svc.create_kennel(db, owner_id=user.id, **body.model_dump())
     if kennel.contacts_public:
         await _sync_contacts_consent(db, request, kennel, user)
     # Новый питомник — счётчики нулевые.
@@ -223,16 +209,13 @@ async def update_kennel(
         current = await repo.get_kennel(db, kennel_id)
         if current is not None and current.owner_id != user.id:
             raise HTTPException(403, "consent_owner_only")
-    try:
-        kennel = await svc.update_kennel(
-            db,
-            kennel_id=kennel_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=fields,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    kennel = await svc.update_kennel(
+        db,
+        kennel_id=kennel_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=fields,
+    )
     if "contacts_public" in fields:
         await _sync_contacts_consent(db, request, kennel, user)
     counts = await repo.counts_by_kennels(db, [kennel.id])
@@ -249,12 +232,9 @@ async def delete_kennel(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_kennel(
-            db,
-            kennel_id=kennel_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_kennel(
+        db,
+        kennel_id=kennel_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )

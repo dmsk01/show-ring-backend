@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
-from typing import Literal, NoReturn
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
@@ -54,22 +54,6 @@ router = APIRouter(prefix="/classifieds", tags=["classifieds"])
 # app.dependencies.is_admin. Алиас остаётся, чтобы не править все
 # call-site'ы внутри файла.
 _is_admin = is_admin
-
-
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code == "not_found":
-        raise HTTPException(404, code)
-    # bug_212/216: file_forbidden — попытка прицепить чужой файл.
-    # Тот же класс ошибки, что и обычный forbidden, поэтому 403.
-    if code in ("forbidden", "file_forbidden"):
-        raise HTTPException(403, code)
-    # bug_210: специальный код для запрещённого перехода статуса —
-    # 422 (unprocessable), а не 400, потому что это semantic validation
-    # ошибка, а не malformed input.
-    if code == "status_transition_forbidden":
-        raise HTTPException(422, code)
-    raise HTTPException(400, code)
 
 
 def _public(obj: Classified, viewer: User | None) -> ClassifiedResponse:
@@ -353,16 +337,13 @@ async def update_classified(
         current = await repo.get_classified(db, classified_id)
         if current is not None and current.author_id != user.id:
             raise HTTPException(403, "consent_owner_only")
-    try:
-        obj = await svc.update_classified(
-            db,
-            classified_id=classified_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=fields,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    obj = await svc.update_classified(
+        db,
+        classified_id=classified_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=fields,
+    )
     if "contacts_public" in fields:
         await _sync_contacts_consent(db, request, obj)
     return obj
@@ -386,16 +367,13 @@ async def add_images(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.add_images(
-            db,
-            classified_id=classified_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            images=[img.model_dump() for img in body],
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.add_images(
+        db,
+        classified_id=classified_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        images=[img.model_dump() for img in body],
+    )
 
 
 @router.delete(
@@ -415,13 +393,10 @@ async def close_classified(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.close_classified(
-            db,
-            classified_id=classified_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            hard=hard,
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.close_classified(
+        db,
+        classified_id=classified_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        hard=hard,
+    )
