@@ -48,6 +48,7 @@ from app.schemas.show import (
     ShowUpdate,
 )
 from app.services import show as svc
+from app.policies import Actor
 
 router = APIRouter(prefix="/shows", tags=["shows"])
 
@@ -183,8 +184,7 @@ async def update_show(
     return await svc.update_show(
         db,
         show_id=show_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(exclude_unset=True),
     )
 
@@ -203,8 +203,7 @@ async def change_status(
     return await svc.change_status(
         db,
         show_id=show_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         target=body.status,
     )
 
@@ -222,8 +221,7 @@ async def delete_show(
     await svc.delete_show(
         db,
         show_id=show_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -247,8 +245,7 @@ async def add_judge(
     return await svc.add_judge(
         db,
         show_id=show_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         judge_id=body.judge_id,
         breed_id=body.breed_id,
         breed_group_id=body.breed_group_id,
@@ -284,8 +281,7 @@ async def remove_judge(
         db,
         show_id=show_id,
         judge_record_id=judge_record_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -309,8 +305,7 @@ async def add_ring(
     return await svc.add_ring(
         db,
         show_id=show_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(),
     )
 
@@ -345,8 +340,7 @@ async def update_ring(
         db,
         show_id=show_id,
         ring_id=ring_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(exclude_unset=True),
     )
 
@@ -366,8 +360,7 @@ async def delete_ring(
         db,
         show_id=show_id,
         ring_id=ring_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -434,8 +427,7 @@ async def create_entry(
     return await svc.register_entry(
         db,
         show_id=show_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         dog_id=body.dog_id,
         show_class_id=body.show_class_id,
         handler_id=body.handler_id,
@@ -576,8 +568,7 @@ async def cancel_entry(
         db,
         show_id=show_id,
         entry_id=entry_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )
 
 
@@ -597,8 +588,7 @@ async def update_entry(
         db,
         show_id=show_id,
         entry_id=entry_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         show_class_id=body.show_class_id,
         handler_id=body.handler_id,
         notes=body.notes,

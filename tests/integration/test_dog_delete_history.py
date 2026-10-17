@@ -24,6 +24,7 @@ from app.models.reference import Breed, ShowClass, ShowRank
 from app.models.show import Show, ShowEntry, ShowStatus
 from app.models.user import User
 from app.services import dog as dog_svc
+from app.policies import Actor
 
 
 async def _first(db_session, model):
@@ -72,7 +73,7 @@ async def test_dog_with_show_history_cannot_be_deleted(db_session, status):
     owner, dog, entry = await _dog_with_entry(db_session, status)
     with pytest.raises(ValueError, match="dog_has_show_history"):
         await dog_svc.delete_dog(
-            db_session, dog_id=dog.id, requester_id=owner.id, is_admin=False
+            db_session, dog_id=dog.id, actor=Actor(owner.id)
         )
     assert await db_session.get(ShowEntry, entry.id) is not None
 
@@ -81,7 +82,7 @@ async def test_dog_with_only_open_registrations_is_deleted(db_session):
     owner, dog, entry = await _dog_with_entry(db_session, ShowStatus.registration_open)
     entry_id, dog_id = entry.id, dog.id
     await dog_svc.delete_dog(
-        db_session, dog_id=dog_id, requester_id=owner.id, is_admin=False
+        db_session, dog_id=dog_id, actor=Actor(owner.id)
     )
     db_session.expire_all()
     assert await db_session.get(Dog, dog_id) is None

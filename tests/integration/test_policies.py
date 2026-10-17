@@ -18,7 +18,7 @@ from app.models.dog import Dog, SexEnum
 from app.models.kennel import Kennel
 from app.models.reference import Breed
 from app.models.user import User
-from app.policies import can_manage_dog
+from app.policies import Actor, can_manage_dog
 
 
 async def _user(db_session) -> User:
@@ -45,7 +45,7 @@ async def test_can_manage_dog(db_session):
     db_session.add(dog)
     await db_session.commit()
 
-    assert await can_manage_dog(db_session, dog, owner.id, is_admin=False)
-    assert await can_manage_dog(db_session, dog, breeder.id, is_admin=False)
-    assert await can_manage_dog(db_session, dog, stranger.id, is_admin=True)
-    assert not await can_manage_dog(db_session, dog, stranger.id, is_admin=False)
+    assert await can_manage_dog(db_session, dog, Actor(owner.id))
+    assert await can_manage_dog(db_session, dog, Actor(breeder.id))
+    assert await can_manage_dog(db_session, dog, Actor(stranger.id, frozenset({"admin"})))
+    assert not await can_manage_dog(db_session, dog, Actor(stranger.id))

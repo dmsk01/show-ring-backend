@@ -34,6 +34,7 @@ from app.models.ad import AdBanner, AdCampaign, AdEventType, CampaignStatus
 from app import redis as redis_state
 from app.repositories import ad as repo
 from app.services.rabbit import rabbit_service
+from app.policies import Actor
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +86,8 @@ def _hash_user_agent(user_agent: str | None) -> str | None:
 
 
 def _ensure_owner(
-    campaign: AdCampaign, user_id: uuid.UUID, is_admin: bool
-) -> None:
-    if campaign.advertiser_id != user_id and not is_admin:
+    campaign: AdCampaign, actor: Actor, ) -> None:
+    if campaign.advertiser_id != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
 
 
@@ -107,14 +107,13 @@ async def create_campaign(
 async def update_campaign(
     db: AsyncSession,
     campaign_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> AdCampaign:
     obj = await repo.get_campaign(db, campaign_id)
     if obj is None:
         raise NotFound("not_found")
-    _ensure_owner(obj, user_id, is_admin)
+    _ensure_owner(obj, actor)
 
     # Кросс-проверки на MERGED-значениях (ревью 2026-10-06, BE-05):
     # CampaignUpdate — частичная схема без валидатора дат CampaignBase.
@@ -129,7 +128,7 @@ async def update_campaign(
     # Модерация: первую активацию делает admin; владелец может вернуть в
     # показ только уже одобренную кампанию (например, после паузы).
     if fields.get("status") == CampaignStatus.active:
-        if is_admin:
+        if actor.is_admin:
             if obj.approved_at is None:
                 obj.approved_at = datetime.now(timezone.utc)
         elif obj.approved_at is None:
@@ -145,23 +144,21 @@ async def update_campaign(
 async def create_banner(
     db: AsyncSession,
     campaign_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> AdBanner:
     campaign = await repo.get_campaign(db, campaign_id)
     if campaign is None:
         raise NotFound("campaign_not_found")
-    _ensure_owner(campaign, user_id, is_admin)
+    _ensure_owner(campaign, actor)
     return await repo.create_banner(db, campaign_id=campaign_id, **fields)
 
 
 async def update_banner(
     db: AsyncSession,
     banner_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> AdBanner:
     banner = await repo.get_banner(db, banner_id)
     if banner is None:
@@ -169,7 +166,7 @@ async def update_banner(
     campaign = await repo.get_campaign(db, banner.campaign_id)
     if campaign is None:
         raise NotFound("campaign_not_found")
-    _ensure_owner(campaign, user_id, is_admin)
+    _ensure_owner(campaign, actor)
     for k, v in fields.items():
         setattr(banner, k, v)
     await db.commit()
@@ -180,13 +177,12 @@ async def update_banner(
 async def delete_campaign(
     db: AsyncSession,
     campaign_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     obj = await repo.get_campaign(db, campaign_id)
     if obj is None:
         raise NotFound("not_found")
-    _ensure_owner(obj, user_id, is_admin)
+    _ensure_owner(obj, actor)
     # CASCADE: удаление кампании уносит её баннеры (ad_banners), а с ними
     # — все их события (ad_events).
     await db.delete(obj)
@@ -196,9 +192,8 @@ async def delete_campaign(
 async def delete_banner(
     db: AsyncSession,
     banner_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     banner = await repo.get_banner(db, banner_id)
     if banner is None:
         raise NotFound("not_found")
@@ -206,7 +201,7 @@ async def delete_banner(
     campaign = await repo.get_campaign(db, banner.campaign_id)
     if campaign is None:
         raise NotFound("campaign_not_found")
-    _ensure_owner(campaign, user_id, is_admin)
+    _ensure_owner(campaign, actor)
     # CASCADE уносит события баннера (ad_events).
     await db.delete(banner)
     await db.commit()
@@ -378,17 +373,16 @@ async def record_event(
 async def stats_for_campaign(
     db: AsyncSession,
     campaign_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-) -> dict:
+    actor: Actor,
+    ) -> dict:
     """
     Возвращает агрегированную статистику с проверкой владельца:
-    cm.advertiser_id == user_id (или admin).
+    cm.advertiser_id == actor.user_id (или admin).
     """
     campaign = await repo.get_campaign(db, campaign_id)
     if campaign is None:
         raise NotFound("not_found")
-    _ensure_owner(campaign, user_id, is_admin)
+    _ensure_owner(campaign, actor)
 
     impressions, clicks = await repo.campaign_totals(db, campaign_id)
     ctr = (clicks / impressions) if impressions > 0 else 0.0
@@ -406,14 +400,13 @@ async def stats_for_campaign(
 async def daily_stats(
     db: AsyncSession,
     campaign_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    days: int = 30,
+    actor: Actor,
+        days: int = 30,
 ) -> list[dict]:
     campaign = await repo.get_campaign(db, campaign_id)
     if campaign is None:
         raise NotFound("not_found")
-    _ensure_owner(campaign, user_id, is_admin)
+    _ensure_owner(campaign, actor)
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     return await repo.daily_stats(db, campaign_id, start, end)

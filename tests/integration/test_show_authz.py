@@ -21,6 +21,7 @@ from app.models.reference import ShowRank
 from app.models.show import Show, ShowStatus
 from app.models.user import RoleEnum, User, UserRole
 from app.services import show as svc
+from app.policies import Actor
 
 PASSWORD = "secret123"
 
@@ -115,7 +116,7 @@ async def test_update_show_rejects_start_after_end(db_session):
     show, organizer = await _db_show(db_session)
     with pytest.raises(ValueError, match="invalid_dates"):
         await svc.update_show(
-            db_session, show.id, organizer.id, False,
+            db_session, show.id, Actor(organizer.id),
             fields={"date_start": (date.today() + timedelta(days=20))},
         )
 
@@ -125,7 +126,7 @@ async def test_update_show_rejects_deadline_after_start(db_session):
     show, organizer = await _db_show(db_session)
     with pytest.raises(ValueError, match="invalid_dates"):
         await svc.update_show(
-            db_session, show.id, organizer.id, False,
+            db_session, show.id, Actor(organizer.id),
             fields={
                 "registration_deadline": (date.today() + timedelta(days=15))
             },
@@ -136,7 +137,7 @@ async def test_update_show_valid_dates_pass(db_session):
     """Согласованный сдвиг дат проходит."""
     show, organizer = await _db_show(db_session)
     updated = await svc.update_show(
-        db_session, show.id, organizer.id, False,
+        db_session, show.id, Actor(organizer.id),
         fields={
             "date_start": date.today() + timedelta(days=12),
             "date_end": date.today() + timedelta(days=13),

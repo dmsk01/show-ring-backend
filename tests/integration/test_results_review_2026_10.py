@@ -24,6 +24,7 @@ from app.models.result import DogTitle
 from app.models.show import Show, ShowEntry, ShowJudge, ShowStatus
 from app.models.user import User
 from app.services import result as result_svc
+from app.policies import Actor
 
 
 async def _first(db_session, model, *where):
@@ -91,7 +92,7 @@ async def _upsert(db_session, entry, user, *, is_admin=False, **fields):
     params = dict(grade_id=None, placement=None, critique=None)
     params.update(fields)
     return await result_svc.upsert_class_result(
-        db_session, show_entry_id=entry.id, user_id=user.id, is_admin=is_admin,
+        db_session, show_entry_id=entry.id, actor=Actor(user.id, frozenset({"admin"}) if is_admin else frozenset()),
         **params,
     )
 
@@ -151,5 +152,5 @@ async def test_judge_cannot_delete_other_breed_result(db_session):
     with pytest.raises(ValueError, match="forbidden"):
         await result_svc.delete_result(
             db_session, show_id=show.id, result_id=result.id,
-            user_id=judge.id, is_admin=False,
+            actor=Actor(judge.id),
         )

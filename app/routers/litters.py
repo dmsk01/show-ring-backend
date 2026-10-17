@@ -24,12 +24,9 @@ from app.schemas.litter import (
     LitterUpdate,
 )
 from app.services import litter as svc
+from app.policies import Actor
 
 router = APIRouter(prefix="/litters", tags=["litters"])
-
-
-def _is_admin(user: User) -> bool:
-    return any(r.role.value == "admin" for r in user.roles)
 
 
 async def _build_litters(
@@ -80,8 +77,7 @@ async def create_litter(
 ):
     litter = await svc.create_litter(
         db,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(),
     )
     return await _build_litter(db, litter)
@@ -168,8 +164,7 @@ async def update_litter(
     litter = await svc.update_litter(
         db,
         litter_id=litter_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
         fields=body.model_dump(exclude_unset=True),
     )
     return await _build_litter(db, litter)
@@ -188,6 +183,5 @@ async def delete_litter(
     await svc.delete_litter(
         db,
         litter_id=litter_id,
-        requester_id=user.id,
-        is_admin=_is_admin(user),
+        actor=Actor.of(user),
     )

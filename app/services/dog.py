@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import Conflict, Forbidden, NotFound, Unprocessable
-from app.policies import can_manage_dog
+from app.policies import Actor, can_manage_dog
 from app.models.dog import Dog, SexEnum
 from app.models.kennel import Kennel
 from app.repositories import dog as repo
@@ -67,13 +67,12 @@ async def _validate_parents(
 async def _check_kennel_owner(
     db: AsyncSession,
     kennel_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> Kennel:
+    actor: Actor,
+    ) -> Kennel:
     kennel = await kennel_repo.get_kennel(db, kennel_id)
     if kennel is None:
         raise NotFound("kennel_not_found")
-    if kennel.owner_id != requester_id and not is_admin:
+    if kennel.owner_id != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
     return kennel
 
@@ -81,9 +80,8 @@ async def _check_kennel_owner(
 async def _check_can_manage_dog(
     db: AsyncSession,
     dog: Dog,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     """
     Единое право на управление карточкой собаки (update/delete/фото):
     прямой владелец (Dog.owner_id), владелец питомника собаки или admin.
@@ -94,21 +92,20 @@ async def _check_can_manage_dog(
     карточку. Симметрично _check_can_register_dog в services/show.py.
     """
     # Правило — app/policies.can_manage_dog (BE-33): одно на все операции.
-    if not await can_manage_dog(db, dog, requester_id, is_admin=is_admin):
+    if not await can_manage_dog(db, dog, actor):
         raise Forbidden("forbidden")
 
 
 async def create_dog(
     db: AsyncSession,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Dog:
     # Если собаку привязывают к питомнику — проверяем, что заводчик
     # имеет на это право (его питомник). Без питомника — пропускаем.
     if fields.get("kennel_id"):
         await _check_kennel_owner(
-            db, fields["kennel_id"], requester_id, is_admin
+            db, fields["kennel_id"], actor
         )
     await _validate_parents(
         db, fields.get("father_id"), fields.get("mother_id")
@@ -117,7 +114,7 @@ async def create_dog(
     # наличия питомника. Это даёт прямую связь dog → user для «моих собак»
     # и проверки записи на выставку. owner_id не приходит из тела запроса
     # (его нет в DogCreate), поэтому подменить чужого владельца нельзя.
-    fields["owner_id"] = requester_id
+    fields["owner_id"] = actor.user_id
     try:
         obj = await repo.create_dog(db, **fields)
         await db.commit()
@@ -133,21 +130,20 @@ async def create_dog(
 async def update_dog(
     db: AsyncSession,
     dog_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Dog:
     obj = await repo.get_dog(db, dog_id)
     if obj is None:
         raise NotFound("not_found")
     # Право на правку: владелец собаки (owner_id), владелец питомника
     # или admin — см. _check_can_manage_dog.
-    await _check_can_manage_dog(db, obj, requester_id, is_admin)
+    await _check_can_manage_dog(db, obj, actor)
 
     if "kennel_id" in fields and fields["kennel_id"] is not None:
         # Перенос в другой питомник — нужно право на новый питомник тоже.
         await _check_kennel_owner(
-            db, fields["kennel_id"], requester_id, is_admin
+            db, fields["kennel_id"], actor
         )
 
     await _validate_parents(
@@ -171,15 +167,14 @@ async def update_dog(
 async def delete_dog(
     db: AsyncSession,
     dog_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     obj = await repo.get_dog(db, dog_id)
     if obj is None:
         raise NotFound("not_found")
     # Право (как в update_dog): владелец собаки, владелец питомника
     # или admin.
-    await _check_can_manage_dog(db, obj, requester_id, is_admin)
+    await _check_can_manage_dog(db, obj, actor)
     # Ревью 2026-10-06, BE-10: собака с историей выставок (запись на
     # закрытую/идущую/завершённую выставку или титул) — часть каталогов и
     # документов РКФ. Её не удаляем; БД страхует FK RESTRICT.
@@ -196,9 +191,8 @@ async def delete_dog(
 async def add_images(
     db: AsyncSession,
     dog_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    images: list[dict],
+    actor: Actor,
+        images: list[dict],
 ) -> Dog:
     """
     Привязывает уже загруженные файлы к собаке (этап 18). Право — владелец
@@ -208,7 +202,7 @@ async def add_images(
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
         raise NotFound("not_found")
-    await _check_can_manage_dog(db, dog, requester_id, is_admin)
+    await _check_can_manage_dog(db, dog, actor)
 
     try:
         for img in images:
@@ -231,9 +225,8 @@ async def delete_image(
     db: AsyncSession,
     dog_id: uuid.UUID,
     file_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> Dog:
+    actor: Actor,
+    ) -> Dog:
     """
     Открепляет фото от собаки — удаляет только связь dog_photos, сам файл в
     хранилище не трогаем (этап 18). Право — владелец собаки, владелец
@@ -242,7 +235,7 @@ async def delete_image(
     dog = await repo.get_dog(db, dog_id)
     if dog is None:
         raise NotFound("not_found")
-    await _check_can_manage_dog(db, dog, requester_id, is_admin)
+    await _check_can_manage_dog(db, dog, actor)
 
     photo = await repo.get_dog_photo(db, dog_id, file_id)
     if photo is None:
@@ -346,9 +339,8 @@ async def add_descendant(
     db: AsyncSession,
     parent_id: uuid.UUID,
     child_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> DogDescendant:
+    actor: Actor,
+    ) -> DogDescendant:
     """
     Делает child потомком parent: child.father_id/mother_id = parent.id.
     Меняется карточка ПОТОМКА, поэтому право — на управление потомком.
@@ -361,7 +353,7 @@ async def add_descendant(
     child = await repo.get_dog(db, child_id)
     if child is None:
         raise NotFound("child_not_found")
-    await _check_can_manage_dog(db, child, requester_id, is_admin)
+    await _check_can_manage_dog(db, child, actor)
 
     if child.id == parent.id:
         raise Unprocessable("self_parent_forbidden")
@@ -385,9 +377,8 @@ async def remove_descendant(
     db: AsyncSession,
     parent_id: uuid.UUID,
     child_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     """Разрывает связь родитель → потомок (очищает слот у потомка)."""
     parent = await repo.get_dog(db, parent_id)
     if parent is None:
@@ -396,7 +387,7 @@ async def remove_descendant(
     slot = _parent_slot(parent)
     if child is None or getattr(child, slot) != parent.id:
         raise NotFound("descendant_not_found")
-    await _check_can_manage_dog(db, child, requester_id, is_admin)
+    await _check_can_manage_dog(db, child, actor)
     setattr(child, slot, None)
     await db.commit()
 

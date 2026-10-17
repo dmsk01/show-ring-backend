@@ -45,6 +45,7 @@ from app.services import checkin_rules as rules
 from app.services import dog_document
 from app.utils import checkin_token
 from app.utils.names import full_name
+from app.policies import Actor
 
 
 def display_name(user: User | None) -> str:
@@ -61,17 +62,16 @@ async def get_show(db: AsyncSession, show_id: uuid.UUID) -> Show:
     return show
 
 
-def ensure_organizer(show: Show, user_id: uuid.UUID, is_admin: bool) -> None:
-    if not is_admin and show.organizer_id != user_id:
+def ensure_organizer(show: Show, actor: Actor, ) -> None:
+    if not actor.is_admin and show.organizer_id != actor.user_id:
         raise Forbidden("forbidden")
 
 
 async def ensure_desk_access(
-    db: AsyncSession, show: Show, user_id: uuid.UUID, is_admin: bool
-) -> None:
-    if is_admin or show.organizer_id == user_id:
+    db: AsyncSession, show: Show, actor: Actor, ) -> None:
+    if actor.is_admin or show.organizer_id == actor.user_id:
         return
-    if await repo.is_staff(db, show.id, user_id):
+    if await repo.is_staff(db, show.id, actor.user_id):
         return
     raise Forbidden("forbidden")
 
@@ -82,10 +82,10 @@ def ensure_enabled(show: Show) -> None:
 
 
 async def set_enabled(
-    db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID, is_admin: bool, enabled: bool
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor, enabled: bool
 ) -> Show:
     show = await get_show(db, show_id)
-    ensure_organizer(show, user_id, is_admin)
+    ensure_organizer(show, actor)
     if show.status in (ShowStatus.completed, ShowStatus.cancelled):
         raise Conflict("show_locked")
     show.checkin_enabled = enabled
@@ -102,24 +102,22 @@ def _staff_response(staff: ShowStaff, user: User) -> ShowStaffResponse:
 
 
 async def list_staff(
-    db: AsyncSession, show_id: uuid.UUID, user_id: uuid.UUID, is_admin: bool
-) -> list[ShowStaffResponse]:
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor, ) -> list[ShowStaffResponse]:
     show = await get_show(db, show_id)
-    ensure_organizer(show, user_id, is_admin)
+    ensure_organizer(show, actor)
     return [_staff_response(s, u) for s, u in await repo.list_staff(db, show_id)]
 
 
 async def add_staff(
     db: AsyncSession,
     show_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    *,
+    actor: Actor,
+        *,
     email: str | None,
     phone: str | None,
 ) -> ShowStaffResponse:
     show = await get_show(db, show_id)
-    ensure_organizer(show, requester_id, is_admin)
+    ensure_organizer(show, actor)
     if email is not None:
         user = await user_repo.get_user_by_email(db, email)
     else:
@@ -132,7 +130,7 @@ async def add_staff(
         raise Conflict("already_staff")
     staff = ShowStaff(
         show_id=show.id, user_id=user.id, role=ShowStaffRole.registrar,
-        added_by=requester_id,
+        added_by=actor.user_id,
     )
     db.add(staff)
     try:
@@ -148,11 +146,10 @@ async def add_staff(
 
 
 async def remove_staff(
-    db: AsyncSession, show_id: uuid.UUID, requester_id: uuid.UUID, is_admin: bool,
-    user_id: uuid.UUID,
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor,     user_id: uuid.UUID,
 ) -> None:
     show = await get_show(db, show_id)
-    ensure_organizer(show, requester_id, is_admin)
+    ensure_organizer(show, actor)
     if await repo.delete_staff(db, show_id, user_id) == 0:
         raise NotFound("staff_not_found")
     await db.commit()
@@ -250,10 +247,10 @@ async def get_ticket(db: AsyncSession, show_id: uuid.UUID, user: User) -> Ticket
 
 
 async def _desk_show(
-    db: AsyncSession, show_id: uuid.UUID, user: User, is_admin: bool, *, onsite: bool
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor, *, onsite: bool
 ) -> Show:
     show = await get_show(db, show_id)
-    await ensure_desk_access(db, show, user.id, is_admin)
+    await ensure_desk_access(db, show, actor)
     ensure_enabled(show)
     if onsite and show.status not in rules.ONSITE_STATUSES:
         raise Conflict("invalid_show_status")
@@ -261,9 +258,9 @@ async def _desk_show(
 
 
 async def scan(
-    db: AsyncSession, show_id: uuid.UUID, user: User, is_admin: bool, token: str
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor, token: str
 ) -> ParticipantCard:
-    show = await _desk_show(db, show_id, user, is_admin, onsite=True)
+    show = await _desk_show(db, show_id, actor, onsite=True)
     try:
         token_show_id, participant_id = checkin_token.parse_token(token)
     except checkin_token.InvalidCheckinToken:
@@ -284,9 +281,9 @@ async def scan(
 
 
 async def search(
-    db: AsyncSession, show_id: uuid.UUID, user: User, is_admin: bool, q: str
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor, q: str
 ) -> list[EntryCard]:
-    show = await _desk_show(db, show_id, user, is_admin, onsite=True)
+    show = await _desk_show(db, show_id, actor, onsite=True)
     if len(q.strip()) < 2 and not q.strip().isdigit():
         return []
     return await build_entry_cards(db, show, await repo.search_entries(db, show.id, q))
@@ -296,11 +293,10 @@ async def add_checks(
     db: AsyncSession,
     show_id: uuid.UUID,
     entry_id: uuid.UUID,
-    user: User,
-    is_admin: bool,
-    checks: list[EntryCheckCreate],
+    actor: Actor,
+        checks: list[EntryCheckCreate],
 ) -> EntryCard:
-    show = await _desk_show(db, show_id, user, is_admin, onsite=False)
+    show = await _desk_show(db, show_id, actor, onsite=False)
     for c in checks:
         if show.status not in rules.allowed_statuses_for(c.kind):
             raise Conflict("invalid_show_status")
@@ -318,7 +314,7 @@ async def add_checks(
         db.add(EntryCheck(
             entry_id=entry.id, kind=c.kind, result=c.result,
             comment=(c.comment or "").strip() or None,
-            document_id=c.document_id, performed_by=user.id,
+            document_id=c.document_id, performed_by=actor.user_id,
         ))
     await db.flush()
     latest = {c.kind: c.result for c in await repo.list_checks(db, [entry.id])}
@@ -332,10 +328,9 @@ async def add_checks(
 
 
 async def list_entry_checks(
-    db: AsyncSession, show_id: uuid.UUID, entry_id: uuid.UUID, user: User, is_admin: bool
-) -> list[EntryCheckResponse]:
+    db: AsyncSession, show_id: uuid.UUID, entry_id: uuid.UUID, actor: Actor, ) -> list[EntryCheckResponse]:
     show = await get_show(db, show_id)
-    await ensure_desk_access(db, show, user.id, is_admin)
+    await ensure_desk_access(db, show, actor)
     entry = await show_repo.get_show_entry(db, entry_id)
     if entry is None or entry.show_id != show.id:
         raise NotFound("entry_not_found")
@@ -345,10 +340,9 @@ async def list_entry_checks(
 
 
 async def summary(
-    db: AsyncSession, show_id: uuid.UUID, user: User, is_admin: bool
-) -> CheckinSummary:
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor, ) -> CheckinSummary:
     show = await get_show(db, show_id)
-    await ensure_desk_access(db, show, user.id, is_admin)
+    await ensure_desk_access(db, show, actor)
     counts = await repo.attendance_counts(db, show.id)
     return CheckinSummary(
         total=sum(counts.values()),
@@ -357,9 +351,8 @@ async def summary(
 
 
 async def precheck_queue(
-    db: AsyncSession, show_id: uuid.UUID, user: User, is_admin: bool
-) -> list[EntryCard]:
+    db: AsyncSession, show_id: uuid.UUID, actor: Actor, ) -> list[EntryCard]:
     show = await get_show(db, show_id)
-    await ensure_desk_access(db, show, user.id, is_admin)
+    await ensure_desk_access(db, show, actor)
     ensure_enabled(show)
     return await build_entry_cards(db, show, await repo.precheck_queue(db, show.id))

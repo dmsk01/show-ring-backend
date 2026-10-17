@@ -22,14 +22,14 @@ from app.models.classified import Classified, ClassifiedStatus
 from app.models.file import UploadedFile
 from app.repositories import classified as repo
 from app.services import moderation as moderation_svc
+from app.policies import Actor
 
 
 async def _verify_files_owned(
     db: AsyncSession,
     images: list[dict],
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     """
     bug_212/216 audit 2026-05-28: каждый file_id, привязываемый к
     объявлению, должен принадлежать requester'у. Раньше можно было
@@ -40,20 +40,19 @@ async def _verify_files_owned(
     Админ-исключение: модератор/админ может прицепить любой файл
     (например, при ручном фиксе чужого объявления).
     """
-    if is_admin or not images:
+    if actor.is_admin or not images:
         return
     for img in images:
         f = await db.get(UploadedFile, img["file_id"])
-        if f is None or f.uploaded_by != requester_id:
+        if f is None or f.uploaded_by != actor.user_id:
             raise Forbidden("file_forbidden")
 
 
 async def _check_owner(
     classified: Classified,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
-    if classified.author_id != requester_id and not is_admin:
+    actor: Actor,
+    ) -> None:
+    if classified.author_id != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
 
 
@@ -94,9 +93,8 @@ def _validate_status_transition(
 
 async def create_classified(
     db: AsyncSession,
-    author_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Classified:
     """
     Создаёт объявление и при наличии — привязывает к нему изображения.
@@ -114,12 +112,12 @@ async def create_classified(
     # bug_212/216: каждый file_id должен принадлежать автору. Админ-bypass
     # тот же, что в update/add_images — модератор вправе прицепить любой
     # файл при ручном создании/фиксе объявления.
-    await _verify_files_owned(db, images, author_id, is_admin=is_admin)
+    await _verify_files_owned(db, images, actor)
     # Явный статус перебивает дефолт модели (active): не-админ → на модерацию.
     fields["status"] = (
-        ClassifiedStatus.active if is_admin else ClassifiedStatus.moderation
+        ClassifiedStatus.active if actor.is_admin else ClassifiedStatus.moderation
     )
-    obj = await repo.create_classified(db, author_id=author_id, **fields)
+    obj = await repo.create_classified(db, author_id=actor.user_id, **fields)
 
     for img in images:
         await repo.add_image(
@@ -144,14 +142,13 @@ async def create_classified(
 async def update_classified(
     db: AsyncSession,
     classified_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Classified:
     obj = await repo.get_classified(db, classified_id, with_images=True)
     if obj is None:
         raise NotFound("not_found")
-    await _check_owner(obj, requester_id, is_admin)
+    await _check_owner(obj, actor)
 
     # bug_210: смена статуса — отдельная политика. Проверяем ДО setattr,
     # чтобы не запачкать ORM-объект промежуточным новым значением (в
@@ -160,7 +157,7 @@ async def update_classified(
     prev_status = obj.status
     new_status = fields.get("status")
     if new_status is not None:
-        _validate_status_transition(obj.status, new_status, is_admin)
+        _validate_status_transition(obj.status, new_status, actor.is_admin)
 
     for k, v in fields.items():
         setattr(obj, k, v)
@@ -176,7 +173,7 @@ async def update_classified(
     # правка контента: повторная модерация из-за него не нужна.
     content_changed = any(k not in ("status", "contacts_public") for k in fields)
     if (
-        not is_admin
+        not actor.is_admin
         and content_changed
         and prev_status == ClassifiedStatus.active
         and obj.status == ClassifiedStatus.active
@@ -184,7 +181,7 @@ async def update_classified(
         obj.status = ClassifiedStatus.moderation
         await moderation_svc._log_action(
             db,
-            actor_id=requester_id,
+            actor_id=actor.user_id,
             action="classified.resubmit",
             target_type="classified",
             target_id=classified_id,
@@ -203,9 +200,8 @@ async def update_classified(
 async def add_images(
     db: AsyncSession,
     classified_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    images: list[dict],
+    actor: Actor,
+        images: list[dict],
 ) -> Classified:
     """
     Добавляет изображения к существующему объявлению. Только автор
@@ -224,9 +220,9 @@ async def add_images(
     obj = await repo.get_classified(db, classified_id, with_images=True)
     if obj is None:
         raise NotFound("not_found")
-    await _check_owner(obj, requester_id, is_admin)
+    await _check_owner(obj, actor)
     # bug_212/216: проверяем ownership каждого file_id.
-    await _verify_files_owned(db, images, requester_id, is_admin)
+    await _verify_files_owned(db, images, actor)
 
     for img in images:
         await repo.add_image(
@@ -246,9 +242,8 @@ async def add_images(
 async def close_classified(
     db: AsyncSession,
     classified_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    hard: bool = False,
+    actor: Actor,
+        hard: bool = False,
 ) -> None:
     """
     Удаление объявления в двух режимах:
@@ -265,7 +260,7 @@ async def close_classified(
     obj = await repo.get_classified(db, classified_id, with_images=False)
     if obj is None:
         raise NotFound("not_found")
-    await _check_owner(obj, requester_id, is_admin)
+    await _check_owner(obj, actor)
     if hard:
         await db.delete(obj)
     else:

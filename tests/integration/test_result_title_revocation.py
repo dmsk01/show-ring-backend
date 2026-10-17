@@ -23,6 +23,7 @@ from app.models.result import DogTitle
 from app.models.show import Show, ShowEntry, ShowStatus
 from app.models.user import User
 from app.services import result as result_svc
+from app.policies import Actor
 
 
 async def _first(db_session, model, **filters):
@@ -97,8 +98,7 @@ async def test_correcting_result_revokes_stale_class_titles(db_session):
     result = await result_svc.upsert_class_result(
         db_session,
         show_entry_id=entry.id,
-        user_id=judge.id,
-        is_admin=False,
+        actor=Actor(judge.id),
         grade_id=excellent.id,
         placement=1,
         critique=None,
@@ -115,8 +115,7 @@ async def test_correcting_result_revokes_stale_class_titles(db_session):
     result = await result_svc.upsert_class_result(
         db_session,
         show_entry_id=entry.id,
-        user_id=judge.id,
-        is_admin=False,
+        actor=Actor(judge.id),
         grade_id=very_good.id,
         placement=None,
         critique=None,

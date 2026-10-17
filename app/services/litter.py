@@ -23,18 +23,18 @@ from app.repositories import kennel as kennel_repo
 from app.repositories import litter as repo
 from app.schemas.notification import EventMessage
 from app.services import notification as notif_svc
+from app.policies import Actor
 
 
 async def _check_kennel_owner(
     db: AsyncSession,
     kennel_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     kennel = await kennel_repo.get_kennel(db, kennel_id)
     if kennel is None:
         raise NotFound("kennel_not_found")
-    if kennel.owner_id != requester_id and not is_admin:
+    if kennel.owner_id != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
 
 
@@ -68,12 +68,11 @@ async def _validate_parents(
 
 async def create_litter(
     db: AsyncSession,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Litter:
     await _check_kennel_owner(
-        db, fields["kennel_id"], requester_id, is_admin
+        db, fields["kennel_id"], actor
     )
     await _validate_parents(
         db,
@@ -103,7 +102,7 @@ async def create_litter(
         EventMessage(
             event_type="litter.announced",
             routing_key=f"litter.announced.breed.{obj.breed_id}",
-            actor_id=requester_id,
+            actor_id=actor.user_id,
             payload={
                 "litter_id": str(obj.id),
                 "kennel_name": kennel.name if kennel else "",
@@ -130,16 +129,15 @@ async def create_litter(
 async def update_litter(
     db: AsyncSession,
     litter_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Litter:
     obj = await repo.get_litter(db, litter_id)
     if obj is None:
         raise NotFound("not_found")
 
     # Право: только владелец питомника (или admin).
-    await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
+    await _check_kennel_owner(db, obj.kennel_id, actor)
 
     # Если меняются родители — проверяем заново на текущей породе помёта.
     if "father_id" in fields or "mother_id" in fields:
@@ -161,14 +159,13 @@ async def update_litter(
 async def delete_litter(
     db: AsyncSession,
     litter_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     obj = await repo.get_litter(db, litter_id)
     if obj is None:
         raise NotFound("not_found")
     # Право (как в update_litter): владелец питомника помёта или admin.
-    await _check_kennel_owner(db, obj.kennel_id, requester_id, is_admin)
+    await _check_kennel_owner(db, obj.kennel_id, actor)
     # dogs.litter_id и classifieds.litter_id → SET NULL: щенки и
     # объявления переживают удаление помёта, теряя лишь привязку к нему.
     await db.delete(obj)

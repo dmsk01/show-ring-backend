@@ -28,6 +28,7 @@ from app.models.show import AttendanceStatus, Show, ShowEntry, ShowStatus
 from app.repositories import result as repo
 from app.repositories import show as show_repo
 from app.services import show_rules
+from app.policies import Actor
 
 
 # ---------------------------------------------------------------------
@@ -48,7 +49,7 @@ def _judge_covers(j, breed: Breed | None) -> bool:
 
 
 def _can_modify_results(
-    show: Show, user_id: uuid.UUID, is_admin: bool, breed: Breed | None = None
+    show: Show, actor: Actor, breed: Breed | None = None
 ) -> bool:
     """
     Право ввода/правки результатов:
@@ -58,10 +59,10 @@ def _can_modify_results(
       breed=None — проверка уровня выставки (BIG/BIS): достаточно любого
       назначения.
     """
-    if is_admin or show.organizer_id == user_id:
+    if actor.is_admin or show.organizer_id == actor.user_id:
         return True
     return any(
-        j.judge_id == user_id and _judge_covers(j, breed) for j in show.judges
+        j.judge_id == actor.user_id and _judge_covers(j, breed) for j in show.judges
     )
 
 
@@ -114,9 +115,8 @@ def _ensure_admitted(show: Show, entry: ShowEntry) -> None:
 async def _ensure_can_edit(
     db: AsyncSession,
     show_entry_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-) -> tuple[Show, ShowEntry, Dog, Breed]:
+    actor: Actor,
+    ) -> tuple[Show, ShowEntry, Dog, Breed]:
     """
     Проверки контекста: запись существует, выставка в правильном статусе,
     пользователь имеет право вводить результаты.
@@ -131,7 +131,7 @@ async def _ensure_can_edit(
     if show is None:
         raise NotFound("not_found")
     _ensure_results_window(show)
-    if not _can_modify_results(show, user_id, is_admin, breed):
+    if not _can_modify_results(show, actor, breed):
         raise Forbidden("forbidden")
     _ensure_admitted(show, entry)
     return show, entry, dog, breed
@@ -297,9 +297,8 @@ async def upsert_class_result(
     db: AsyncSession,
     *,
     show_entry_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    grade_id: uuid.UUID | None,
+    actor: Actor,
+        grade_id: uuid.UUID | None,
     placement: int | None,
     critique: str | None,
     clear: frozenset[str] | set[str] = frozenset(),
@@ -317,9 +316,9 @@ async def upsert_class_result(
     Возвращает обновлённый ShowResult.
     """
     show, entry, dog, breed = await _ensure_can_edit(
-        db, show_entry_id, user_id, is_admin
+        db, show_entry_id, actor
     )
-    judge_id = _resolve_judge_id(show, user_id, breed)
+    judge_id = _resolve_judge_id(show, actor.user_id, breed)
 
     # Подгрузим контекст ринга: класс, ранг, оценка, animal_type.
     cls = await db.get(ShowClass, entry.show_class_id)
@@ -407,9 +406,8 @@ async def delete_result(
     *,
     show_id: uuid.UUID,
     result_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     """
     Удаляет результат записи и отзывает выданные на этой выставке титулы
     собаки.
@@ -439,7 +437,7 @@ async def delete_result(
     # Судья удаляет результаты только своих пород (как и вводит, BE-26).
     ctx = await repo.get_entry_context(db, entry.id)
     breed = ctx[2] if ctx is not None else None
-    if not _can_modify_results(show, user_id, is_admin, breed):
+    if not _can_modify_results(show, actor, breed):
         raise Forbidden("forbidden")
 
     # Сначала отзываем титулы, потом удаляем сам результат — порядок не
@@ -461,9 +459,8 @@ async def set_best_of_breed(
     db: AsyncSession,
     *,
     show_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    breed_id: uuid.UUID,
+    actor: Actor,
+        breed_id: uuid.UUID,
     winner_entry_id: uuid.UUID,
     best_male_entry_id: uuid.UUID | None,
     best_female_entry_id: uuid.UUID | None,
@@ -480,7 +477,7 @@ async def set_best_of_breed(
         raise NotFound("not_found")
     # BE-03: тот же статус-гейт, что у ввода результата ринга.
     _ensure_results_window(show)
-    if not _can_modify_results(show, user_id, is_admin):
+    if not _can_modify_results(show, actor):
         raise Forbidden("forbidden")
 
     rank = await db.get(ShowRank, show.rank_id)
@@ -595,9 +592,8 @@ async def set_best_in_group(
     db: AsyncSession,
     *,
     show_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    breed_group_id: uuid.UUID,
+    actor: Actor,
+        breed_group_id: uuid.UUID,
     winner_entry_id: uuid.UUID,
 ) -> ShowResult:
     """
@@ -608,7 +604,7 @@ async def set_best_in_group(
     if show is None:
         raise NotFound("not_found")
     _ensure_results_window(show)
-    if not _can_modify_results(show, user_id, is_admin):
+    if not _can_modify_results(show, actor):
         raise Forbidden("forbidden")
 
     # Снимаем флаг BIG с предыдущих победителей этой группы.
@@ -669,9 +665,8 @@ async def set_best_in_show(
     db: AsyncSession,
     *,
     show_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-    winner_entry_id: uuid.UUID,
+    actor: Actor,
+        winner_entry_id: uuid.UUID,
 ) -> ShowResult:
     """
     Выбор BIS — главного победителя выставки. Победитель должен быть
@@ -681,7 +676,7 @@ async def set_best_in_show(
     if show is None:
         raise NotFound("not_found")
     _ensure_results_window(show)
-    if not _can_modify_results(show, user_id, is_admin):
+    if not _can_modify_results(show, actor):
         raise Forbidden("forbidden")
 
     # Снимаем BIS с предыдущего победителя выставки.
@@ -736,9 +731,8 @@ async def publish_results(
     db: AsyncSession,
     *,
     show_id: uuid.UUID,
-    user_id: uuid.UUID,
-    is_admin: bool,
-) -> Show:
+    actor: Actor,
+    ) -> Show:
     """
     Публикация результатов = смена статуса выставки на completed.
 
@@ -755,7 +749,6 @@ async def publish_results(
     return await show_svc.change_status(
         db,
         show_id=show_id,
-        requester_id=user_id,
-        is_admin=is_admin,
+        actor=actor,
         target=ShowStatus.completed,
     )

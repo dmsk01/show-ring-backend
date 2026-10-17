@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, is_admin
+from app.dependencies import get_current_user
 from app.middleware.progressive_ban import check_rate_limit
 from app.models.user import User
 from app.redis import get_redis
@@ -33,6 +33,7 @@ from app.schemas.checkin import (
 )
 from app.schemas.show import ShowResponse
 from app.services import checkin as svc
+from app.policies import Actor
 
 router = APIRouter(prefix="/shows", tags=["checkin"])
 
@@ -48,7 +49,7 @@ async def update_checkin_settings(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.set_enabled(db, show_id, user.id, is_admin(user), body.enabled)
+    return await svc.set_enabled(db, show_id, Actor.of(user), body.enabled)
 
 
 @router.get("/staff/my", response_model=list[ShowResponse], summary="Выставки, где я регистратор")
@@ -65,7 +66,7 @@ async def list_staff(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.list_staff(db, show_id, user.id, is_admin(user))
+    return await svc.list_staff(db, show_id, Actor.of(user))
 
 
 @router.post(
@@ -81,7 +82,7 @@ async def add_staff(
     user: User = Depends(get_current_user),
 ):
     return await svc.add_staff(
-        db, show_id, user.id, is_admin(user),
+        db, show_id, Actor.of(user),
         email=str(body.email) if body.email else None, phone=body.phone,
     )
 
@@ -97,7 +98,7 @@ async def remove_staff(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await svc.remove_staff(db, show_id, user.id, is_admin(user), user_id)
+    await svc.remove_staff(db, show_id, Actor.of(user), user_id)
 
 
 _SEARCH_RATE_LIMIT = 60
@@ -120,7 +121,7 @@ async def scan(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.scan(db, show_id, user, is_admin(user), body.token)
+    return await svc.scan(db, show_id, Actor.of(user), body.token)
 
 
 @router.get("/{show_id}/checkin/search", response_model=list[EntryCard], summary="Поиск на стойке")
@@ -134,7 +135,7 @@ async def search(
 ):
     # Перебор ПДн (телефоны, чипы) — ограничиваем частоту.
     await check_rate_limit(request, _SEARCH_RATE_LIMIT, _SEARCH_RATE_WINDOW, redis)
-    return await svc.search(db, show_id, user, is_admin(user), q)
+    return await svc.search(db, show_id, Actor.of(user), q)
 
 
 @router.post(
@@ -149,7 +150,7 @@ async def add_checks(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.add_checks(db, show_id, entry_id, user, is_admin(user), body.checks)
+    return await svc.add_checks(db, show_id, entry_id, Actor.of(user), body.checks)
 
 
 @router.get(
@@ -163,7 +164,7 @@ async def list_checks(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.list_entry_checks(db, show_id, entry_id, user, is_admin(user))
+    return await svc.list_entry_checks(db, show_id, entry_id, Actor.of(user))
 
 
 @router.get("/{show_id}/checkin/summary", response_model=CheckinSummary, summary="Сводка стойки")
@@ -172,7 +173,7 @@ async def summary(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.summary(db, show_id, user, is_admin(user))
+    return await svc.summary(db, show_id, Actor.of(user))
 
 
 @router.get(
@@ -185,4 +186,4 @@ async def precheck_queue(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await svc.precheck_queue(db, show_id, user, is_admin(user))
+    return await svc.precheck_queue(db, show_id, Actor.of(user))

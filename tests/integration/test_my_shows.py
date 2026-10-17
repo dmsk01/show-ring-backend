@@ -13,6 +13,7 @@ from app.models.show import Show, ShowEntry, ShowStatus
 from app.models.user import User
 from app.repositories import show as repo
 from app.services import show as svc
+from app.policies import Actor
 
 
 async def _breed(db_session):
@@ -139,7 +140,7 @@ async def test_update_entry_changes_notes_and_keeps_catalog(db_session):
 
     updated = await svc.update_entry(
         db_session, show_id=show.id, entry_id=entry.id,
-        requester_id=user.id, is_admin=False,
+        actor=Actor(user.id),
         show_class_id=None, handler_id=None, notes="new note",
         today=date.today(),
     )
@@ -167,7 +168,7 @@ async def test_update_entry_forbidden_for_other_user(db_session):
     with pytest.raises(ValueError, match="forbidden"):
         await svc.update_entry(
             db_session, show_id=show.id, entry_id=entry.id,
-            requester_id=other.id, is_admin=False,
+            actor=Actor(other.id),
             show_class_id=None, handler_id=None, notes="x",
             today=date.today(),
         )
@@ -192,7 +193,7 @@ async def test_update_entry_locked_when_registration_closed(db_session):
     with pytest.raises(ValueError, match="registration_locked"):
         await svc.update_entry(
             db_session, show_id=show.id, entry_id=entry.id,
-            requester_id=user.id, is_admin=False,
+            actor=Actor(user.id),
             show_class_id=None, handler_id=None, notes="x",
             today=date.today(),
         )

@@ -20,6 +20,7 @@ from app.models.reference import Breed, ShowClass, ShowRank
 from app.models.show import Show, ShowEntry, ShowStatus
 from app.models.user import RoleEnum, User, UserRole
 from app.services import show as show_svc
+from app.policies import Actor
 
 PASSWORD = "secret123"
 
@@ -78,7 +79,7 @@ async def test_organizer_cancels_foreign_entry_after_registration_closed(db_sess
     )
     await show_svc.cancel_entry(
         db_session, show_id=show.id, entry_id=entry.id,
-        requester_id=organizer.id, is_admin=False,
+        actor=Actor(organizer.id),
     )
     assert await db_session.get(ShowEntry, entry.id) is None
 
@@ -89,7 +90,7 @@ async def test_organizer_cancels_foreign_entry_while_registration_open(db_sessio
     )
     await show_svc.cancel_entry(
         db_session, show_id=show.id, entry_id=entry.id,
-        requester_id=organizer.id, is_admin=False,
+        actor=Actor(organizer.id),
     )
     assert await db_session.get(ShowEntry, entry.id) is None
 
@@ -101,7 +102,7 @@ async def test_participant_cannot_cancel_after_registration_closed(db_session):
     with pytest.raises(ValueError, match="registration_locked"):
         await show_svc.cancel_entry(
             db_session, show_id=show.id, entry_id=entry.id,
-            requester_id=participant.id, is_admin=False,
+            actor=Actor(participant.id),
         )
 
 
@@ -113,7 +114,7 @@ async def test_stranger_cannot_cancel_entry(db_session):
     with pytest.raises(ValueError, match="forbidden"):
         await show_svc.cancel_entry(
             db_session, show_id=show.id, entry_id=entry.id,
-            requester_id=stranger.id, is_admin=False,
+            actor=Actor(stranger.id),
         )
 
 
@@ -245,13 +246,12 @@ async def test_moving_show_date_rejected_when_entry_class_no_longer_fits(db_sess
 
     with pytest.raises(ValueError, match="entries_class_mismatch"):
         await show_svc.update_show(
-            db_session, show_id=show.id, requester_id=organizer.id,
-            is_admin=False,
+            db_session, show_id=show.id, actor=Actor(organizer.id),
             fields={"date_start": show_date + timedelta(days=120)},
         )
     # Перенос в пределах класса — разрешён.
     updated = await show_svc.update_show(
-        db_session, show_id=show.id, requester_id=organizer.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(organizer.id),
         fields={"date_start": show_date + timedelta(days=5)},
     )
     assert updated.date_start == show_date + timedelta(days=5)

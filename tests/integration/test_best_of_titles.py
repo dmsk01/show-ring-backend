@@ -24,6 +24,7 @@ from app.models.result import DogTitle, ShowResult
 from app.models.show import AttendanceStatus, Show, ShowEntry, ShowStatus
 from app.models.user import User
 from app.services import result as result_svc
+from app.policies import Actor
 
 
 async def _first(db_session, model, *where):
@@ -104,8 +105,7 @@ async def _setup(db_session, *, status=ShowStatus.in_progress, checkin=False):
     await db_session.commit()
     for e in entries:
         await result_svc.upsert_class_result(
-            db_session, show_entry_id=e.id, user_id=organizer.id,
-            is_admin=False, grade_id=None, placement=None, critique=None,
+            db_session, show_entry_id=e.id, actor=Actor(organizer.id), grade_id=None, placement=None, critique=None,
         )
     show.status = status
     await db_session.commit()
@@ -114,7 +114,7 @@ async def _setup(db_session, *, status=ShowStatus.in_progress, checkin=False):
 
 async def _bob(db_session, show, organizer, breed, entry):
     return await result_svc.set_best_of_breed(
-        db_session, show_id=show.id, user_id=organizer.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(organizer.id),
         breed_id=breed.id, winner_entry_id=entry.id,
         best_male_entry_id=None, best_female_entry_id=None,
         best_junior_entry_id=None, best_veteran_entry_id=None,
@@ -126,11 +126,11 @@ async def test_reelecting_bob_revokes_previous_winner_titles(db_session):
 
     await _bob(db_session, show, org, breed, entries[0])
     await result_svc.set_best_in_group(
-        db_session, show_id=show.id, user_id=org.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(org.id),
         breed_group_id=breed.breed_group_id, winner_entry_id=entries[0].id,
     )
     await result_svc.set_best_in_show(
-        db_session, show_id=show.id, user_id=org.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(org.id),
         winner_entry_id=entries[0].id,
     )
     assert {"bob", "big", "bis"} <= await _codes(db_session, dogs[0].id, show.id)
@@ -147,18 +147,18 @@ async def test_reelecting_big_revokes_previous_big_and_bis(db_session):
     breed, show, org, dogs, entries = await _setup(db_session)
     await _bob(db_session, show, org, breed, entries[0])
     await result_svc.set_best_in_group(
-        db_session, show_id=show.id, user_id=org.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(org.id),
         breed_group_id=breed.breed_group_id, winner_entry_id=entries[0].id,
     )
     await result_svc.set_best_in_show(
-        db_session, show_id=show.id, user_id=org.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(org.id),
         winner_entry_id=entries[0].id,
     )
 
     # Повторный выбор того же BIG снимает и тут же возвращает BIG, но BIS
     # (уровнем выше) отзывается — инвариант BIS ⊆ BIG.
     await result_svc.set_best_in_group(
-        db_session, show_id=show.id, user_id=org.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(org.id),
         breed_group_id=breed.breed_group_id, winner_entry_id=entries[0].id,
     )
     codes = await _codes(db_session, dogs[0].id, show.id)
@@ -181,14 +181,14 @@ async def test_best_in_show_rejected_after_publication(db_session):
     breed, show, org, _dogs, entries = await _setup(db_session)
     await _bob(db_session, show, org, breed, entries[0])
     await result_svc.set_best_in_group(
-        db_session, show_id=show.id, user_id=org.id, is_admin=False,
+        db_session, show_id=show.id, actor=Actor(org.id),
         breed_group_id=breed.breed_group_id, winner_entry_id=entries[0].id,
     )
     show.status = ShowStatus.completed
     await db_session.commit()
     with pytest.raises(ValueError, match="show_not_in_progress"):
         await result_svc.set_best_in_show(
-            db_session, show_id=show.id, user_id=org.id, is_admin=False,
+            db_session, show_id=show.id, actor=Actor(org.id),
             winner_entry_id=entries[0].id,
         )
 

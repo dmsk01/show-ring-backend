@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import Conflict, Forbidden, NotFound
 from app.models.kennel import Kennel
 from app.repositories import kennel as repo
+from app.policies import Actor
 
 
 async def create_kennel(
@@ -38,16 +39,15 @@ async def create_kennel(
 async def update_kennel(
     db: AsyncSession,
     kennel_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-    fields: dict,
+    actor: Actor,
+        fields: dict,
 ) -> Kennel:
     obj = await repo.get_kennel(db, kennel_id)
     if obj is None:
         raise NotFound("not_found")
     # Только владелец или admin может править. Проверяем здесь, а не
     # в роутере, чтобы любой callsite не мог случайно обойти проверку.
-    if obj.owner_id != requester_id and not is_admin:
+    if obj.owner_id != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
     for k, v in fields.items():
         setattr(obj, k, v)
@@ -63,13 +63,12 @@ async def update_kennel(
 async def delete_kennel(
     db: AsyncSession,
     kennel_id: uuid.UUID,
-    requester_id: uuid.UUID,
-    is_admin: bool,
-) -> None:
+    actor: Actor,
+    ) -> None:
     obj = await repo.get_kennel(db, kennel_id)
     if obj is None:
         raise NotFound("not_found")
-    if obj.owner_id != requester_id and not is_admin:
+    if obj.owner_id != actor.user_id and not actor.is_admin:
         raise Forbidden("forbidden")
     # FK dog.kennel_id SET NULL — собаки останутся в БД без питомника.
     # Это сознательно: мы не теряем исторических данных о собаках.

@@ -19,6 +19,7 @@ from app.models.dog import Dog, SexEnum
 from app.models.reference import Breed
 from app.models.user import User
 from app.services import dog as svc
+from app.policies import Actor
 
 
 async def _breed(db_session) -> Breed:
@@ -53,7 +54,7 @@ async def test_owner_without_kennel_can_update_own_dog(db_session):
     dog = await _dog_without_kennel(db_session, owner)
 
     updated = await svc.update_dog(
-        db_session, dog.id, requester_id=owner.id, is_admin=False,
+        db_session, dog.id, actor=Actor(owner.id),
         fields={"name": "Исправленная Кличка"},
     )
     assert updated.name == "Исправленная Кличка"
@@ -64,7 +65,7 @@ async def test_owner_without_kennel_can_delete_own_dog(db_session):
     dog = await _dog_without_kennel(db_session, owner)
 
     await svc.delete_dog(
-        db_session, dog.id, requester_id=owner.id, is_admin=False
+        db_session, dog.id, actor=Actor(owner.id)
     )
     from app.repositories import dog as repo
     assert await repo.get_dog(db_session, dog.id) is None
@@ -77,10 +78,10 @@ async def test_stranger_still_forbidden(db_session):
 
     with pytest.raises(ValueError, match="forbidden"):
         await svc.update_dog(
-            db_session, dog.id, requester_id=stranger.id, is_admin=False,
+            db_session, dog.id, actor=Actor(stranger.id),
             fields={"name": "Чужая Правка"},
         )
     with pytest.raises(ValueError, match="forbidden"):
         await svc.delete_dog(
-            db_session, dog.id, requester_id=stranger.id, is_admin=False
+            db_session, dog.id, actor=Actor(stranger.id)
         )
