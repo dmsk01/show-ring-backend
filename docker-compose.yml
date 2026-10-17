@@ -171,6 +171,8 @@ services:
       # кладут хостнейм туннеля. FRONTEND_BASE_URL — база для ссылок в
       # письмах (verify-email и т.п.), строятся в app/services/auth.py.
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-[]}
+      # Пути, где idempotency без Redis отказывает (503), а не пропускает.
+      IDEMPOTENCY_REQUIRED_PATHS: ${IDEMPOTENCY_REQUIRED_PATHS:-[]}
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
       # Rate-limit логина. Дефолт 5/60 — прод-безопасно; e2e/CI-стек фронта
       # поднимает AUTH_LOGIN_RATE_LIMIT (напр. 100), чтобы пачка логинов
