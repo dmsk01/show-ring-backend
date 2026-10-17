@@ -22,6 +22,7 @@ from app.routers import (
     captcha,
     checkin,
     classifieds,
+    csp_report,
     documents,
     dog_documents,
     dogs,
@@ -254,6 +255,8 @@ app.include_router(admin_analytics.router)
 app.include_router(admin_analytics.show_report_router)
 app.include_router(admin_moderation.router)
 app.include_router(admin_security.router)
+# Отчёты браузера о нарушениях CSP (report-uri фронта).
+app.include_router(csp_report.router)
 # Этап 11: онлайн-поддержка (тикеты + WebSocket чат).
 app.include_router(support.router)
 # Этап 17: блог (публичный read + write для admin/organizer).

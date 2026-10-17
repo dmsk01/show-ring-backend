@@ -32,6 +32,7 @@ OTP_VERIFIED = "otp_verified"      # код из SMS введён верно
 CAPTCHA_FAILED = "captcha_failed"  # капча отвергнута
 LOGIN_FAILED = "login_failed"      # неверный пароль
 ACCOUNT_LOCKED = "account_locked"  # аккаунт заблокирован после серии ошибок
+CSP_VIOLATION = "csp_violation"    # браузер сообщил о нарушении CSP (/csp-report)
 
 ALL_EVENTS = (
     RATE_LIMITED,
@@ -42,6 +43,7 @@ ALL_EVENTS = (
     CAPTCHA_FAILED,
     LOGIN_FAILED,
     ACCOUNT_LOCKED,
+    CSP_VIOLATION,
 )
 
 _TTL_SECONDS = 2 * 86400
