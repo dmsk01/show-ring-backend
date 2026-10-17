@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     s3_secret_key: str = "show_ring_minio"
     s3_bucket: str = "show-ring-files"
     s3_region: str = "us-east-1"
+    # Размер пула соединений общего S3-клиента процесса (BE-36).
+    s3_max_pool_connections: int = 50
     # Максимальный размер загружаемого файла. Лимит чтобы не словить
     # OOM/диск-флуд: на CI/проде обычно ставится на reverse-proxy, но
     # дублируем на уровне приложения для defence-in-depth.
