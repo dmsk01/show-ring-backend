@@ -30,9 +30,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_user_optional
 from app.models.file import FileVariant, UploadedFile
 from app.models.user import User
+from app.policies import Actor, can_see_original
 from app.schemas.file import FileResponse, FileVariantResponse
 from app.services import file_storage, upload_quota
 from app.services.task_dispatch import create_and_enqueue_task
@@ -43,6 +44,8 @@ router = APIRouter(prefix="/files", tags=["files"])
 
 # Публичный файл/вариант по id неизменяем — кэш на год (ревью 2026-10-06, BE-24).
 _IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+# Вариант, который видят все, кроме загрузившего (с водяным знаком).
+_PUBLIC_VARIANT = "medium"
 
 
 
@@ -166,10 +169,19 @@ async def get_file_variant(
 @router.get(
     "/{file_id}",
     summary="Скачать/показать файл",
+    description=(
+        "Изображение: загрузившему и admin — оригинал, остальным — вариант "
+        "medium (до 1000 px) с водяным знаком; пока варианта нет — 404. "
+        "Остальные файлы — как есть."
+    ),
     # response_model отключён: возвращаем raw bytes, не JSON.
     response_class=Response,
 )
-async def get_file(file_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_file(
+    file_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    viewer: User | None = Depends(get_current_user_optional),
+):
     db_file = await db.get(UploadedFile, file_id)
     # is_public=False → приватный файл (сгенерированный документ с ПДн).
     # Отдаём 404 (а не 403), чтобы не раскрывать сам факт существования
@@ -177,22 +189,55 @@ async def get_file(file_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     # /tasks/{id}/download. См. UploadedFile.is_public (review 2026-06-01).
     if db_file is None or not db_file.is_public:
         raise HTTPException(status_code=404, detail="Файл не найден")
+
+    s3_key, content_type = db_file.s3_key, db_file.content_type
+    filename = db_file.original_filename or "file"
+    cache = _IMMUTABLE_CACHE
+    if content_type.startswith("image/"):
+        actor = Actor.of(viewer) if viewer is not None else None
+        if can_see_original(actor, db_file.uploaded_by):
+            # Ответ зависит от того, кто спрашивает: оригинал владельца не
+            # должен оседать в общих кэшах.
+            cache = "private, max-age=3600"
+        else:
+            # BE-24: чужим — вариант с водяным знаком.
+            variant = (
+                await db.execute(
+                    select(FileVariant).where(
+                        FileVariant.file_id == file_id,
+                        FileVariant.kind == _PUBLIC_VARIANT,
+                    )
+                )
+            ).scalar_one_or_none()
+            if variant is None:
+                # Вариант ещё не готов (воркер обработает за секунды) или
+                # обработка не удалась — оригинал не отдаём; не кэшируем,
+                # чтобы картинка появилась, как только вариант будет готов.
+                raise HTTPException(
+                    status_code=404,
+                    detail="Файл не найден",
+                    headers={"Cache-Control": "no-store"},
+                )
+            s3_key, content_type = variant.s3_key, variant.content_type
+            filename = filename.rsplit(".", 1)[0] + ".jpg"
+            # Не immutable: при смене водяного знака вариант пересоздаётся
+            # под тем же адресом /files/{id}.
+            cache = "public, max-age=86400"
+
     # Ревью 2026-10-06, BE-24: отдаём потоком, а не читаем файл (до 10 МБ)
     # целиком в память. Существование проверяем ДО ответа: ошибка внутри
     # генератора всплыла бы уже после отправки статуса 200.
-    await file_storage.stat_file(db_file.s3_key)
+    await file_storage.stat_file(s3_key)
     # ИСПРАВЛЕНО (bug_202): см. tasks.py — \r\n или " в original_filename
     # позволяли инжектировать произвольные HTTP-заголовки. RFC 6266
     # filename* = UTF-8''<percent-encoded> закрывает класс ошибки.
-    safe_name = quote(db_file.original_filename or "file", safe="")
+    safe_name = quote(filename, safe="")
     return StreamingResponse(
-        file_storage.iter_file(db_file.s3_key),
-        media_type=db_file.content_type,
+        file_storage.iter_file(s3_key),
+        media_type=content_type,
         headers={
             # inline — браузер отрендерит картинку (аватары/фото).
             "Content-Disposition": f"inline; filename*=UTF-8''{safe_name}",
-            # Содержимое по id неизменяемо (новая загрузка = новый id) —
-            # кэшируем надолго, браузер и nginx не дёргают MinIO повторно.
-            "Cache-Control": _IMMUTABLE_CACHE,
+            "Cache-Control": cache,
         },
     )

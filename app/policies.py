@@ -71,6 +71,15 @@ def is_organizer_of(actor: Actor, organizer_id: uuid.UUID | None) -> bool:
     return actor.is_admin or actor.owns(organizer_id)
 
 
+def can_see_original(actor: Actor | None, uploaded_by: uuid.UUID | None) -> bool:
+    """
+    Оригинал изображения (без водяного знака) — только загрузившему и admin
+    (BE-24). Остальным отдаётся вариант medium с водяным знаком: иначе фото
+    собак свободно скачивались в полном размере без знака.
+    """
+    return actor is not None and (actor.is_admin or actor.owns(uploaded_by))
+
+
 async def can_manage_dog(db: AsyncSession, dog: Dog, actor: Actor) -> bool:
     """
     Управлять собакой (редактировать, удалять, записывать на выставку) может

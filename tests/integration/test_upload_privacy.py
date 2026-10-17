@@ -84,9 +84,10 @@ async def test_public_file_is_streamed_with_cache_headers(client, db_session, mo
 
     from app.models.file import UploadedFile
 
+    # Не изображение: отдаётся как есть всем (фото — см. test_watermarked_images.py).
     f = UploadedFile(
-        uploaded_by=None, s3_key=f"dogs/{uuid.uuid4()}.jpg",
-        original_filename="dog.jpg", content_type="image/jpeg",
+        uploaded_by=None, s3_key=f"general/{uuid.uuid4()}.pdf",
+        original_filename="rules.pdf", content_type="application/pdf",
         size_bytes=6, is_public=True,
     )
     db_session.add(f)
@@ -105,5 +106,5 @@ async def test_public_file_is_streamed_with_cache_headers(client, db_session, mo
     r = await client.get(f"/files/{f.id}")
     assert r.status_code == 200, r.text
     assert r.content == b"abcdef"
-    assert r.headers["content-type"] == "image/jpeg"
+    assert r.headers["content-type"] == "application/pdf"
     assert "immutable" in r.headers["cache-control"]
