@@ -204,7 +204,7 @@ free -h                                # проверка: в строке Swap 
 | Переменная | Значение |
 |---|---|
 | `SECRET_KEY` | `openssl rand -hex 32` |
-| `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD` | `openssl rand -hex 24` (каждый свой) |
+| `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD`, `REDIS_PASSWORD` | `openssl rand -hex 24` (каждый свой) |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | `openssl rand -hex 16` / `openssl rand -hex 24` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USE_TLS`, `SMTP_USERNAME`, `SMTP_PASSWORD` | Из кабинета почтового сервиса. Порт 587 → `SMTP_USE_TLS=false`; порт 465 → `SMTP_USE_TLS=true` |
 | `SMTP_FROM_EMAIL` | Адрес отправителя на вашем домене, напр. `noreply@ваш-домен.ru` |

@@ -385,6 +385,7 @@ chmod 600 .env           # чтобы файл с секретами читал 
 openssl rand -hex 32     # → SECRET_KEY
 openssl rand -hex 24     # → POSTGRES_PASSWORD
 openssl rand -hex 24     # → RABBITMQ_PASSWORD
+openssl rand -hex 24     # → REDIS_PASSWORD
 openssl rand -hex 16     # → S3_ACCESS_KEY
 openssl rand -hex 24     # → S3_SECRET_KEY
 ```
@@ -400,6 +401,7 @@ nano .env
 | `SECRET_KEY` | вывод `openssl rand -hex 32`. При `DEBUG=false` приложение **не запустится**, если ключ короче 32 символов. |
 | `POSTGRES_PASSWORD` | случайная строка |
 | `RABBITMQ_PASSWORD` | случайная строка |
+| `REDIS_PASSWORD` | вывод `openssl rand -hex 24` (только hex — пароль подставляется в адрес Redis). Без него прод-стек не запустится. |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | случайные строки (доступ к внутреннему хранилищу файлов MinIO) |
 | `DEBUG` | `false` (уже стоит в шаблоне — не менять) |
 | `SCHEDULER_ENABLED` | `true` (фоновые задачи: дедлайны выставок и т.п.) |
