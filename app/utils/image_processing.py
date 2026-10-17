@@ -33,20 +33,54 @@ MAX_IMAGE_PIXELS = 50_000_000  # 50 Мп — с запасом для фото �
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
+# Водяной знак (BE-24): угловая надпись + бледная диагональная по центру —
+# угловую одну можно просто срезать кадрированием. Размеры — доли ширины
+# изображения, прозрачность — альфа 0..255.
+WATERMARK_CORNER_SCALE = 1 / 16
+WATERMARK_CORNER_ALPHA = 190
+WATERMARK_CENTER_SCALE = 1 / 5
+WATERMARK_CENTER_ALPHA = 48
+WATERMARK_CENTER_ANGLE = 30
+
+
+def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    # Встроенный масштабируемый шрифт Pillow (Aileron) — без файлов шрифтов
+    # в образе.
+    return ImageFont.load_default(size=max(10, size))
+
+
 def _apply_watermark(img: Image.Image, text: str) -> Image.Image:
-    """Полупрозрачный текст в правом нижнем углу. Возвращает новый RGB."""
+    """Водяной знак: угловой + диагональный по центру. Возвращает новый RGB."""
+    base = img.convert("RGBA")
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    font = ImageFont.load_default()
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    margin = max(6, img.width // 100)
-    x = img.width - tw - margin
-    y = img.height - th - margin
-    # Тень + светлый текст — читаемость на любом фоне.
-    draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, 130))
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 200))
-    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+    # 1. Угол: светлый текст с тенью — читается на любом фоне.
+    corner_size = max(10, int(img.width * WATERMARK_CORNER_SCALE))
+    font = _font(corner_size)
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    margin = max(8, img.width // 60)
+    x = int(img.width - (right - left) - margin - left)
+    y = int(img.height - (bottom - top) - margin - top)
+    shadow = max(1, corner_size // 24)
+    draw.text((x + shadow, y + shadow), text, font=font, fill=(0, 0, 0, 120))
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, WATERMARK_CORNER_ALPHA))
+
+    # 2. Центр: крупный бледный текст под углом.
+    big = _font(int(img.width * WATERMARK_CENTER_SCALE))
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=big)
+    stamp = Image.new(
+        "RGBA", (int(right - left) + 4, int(bottom - top) + 4), (0, 0, 0, 0)
+    )
+    ImageDraw.Draw(stamp).text(
+        (2 - left, 2 - top), text, font=big, fill=(255, 255, 255, WATERMARK_CENTER_ALPHA)
+    )
+    stamp = stamp.rotate(WATERMARK_CENTER_ANGLE, expand=True, resample=Image.Resampling.BICUBIC)
+    overlay.alpha_composite(
+        stamp,
+        ((img.width - stamp.width) // 2, (img.height - stamp.height) // 2),
+    )
+    return Image.alpha_composite(base, overlay).convert("RGB")
 
 
 def make_variant(
