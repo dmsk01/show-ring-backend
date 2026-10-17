@@ -84,6 +84,20 @@ jobs:
       - name: Run tests
         run: pytest -q -rs
 
+  # Известные уязвимости в закреплённых зависимостях (аудит безопасности
+  # 03.10.2026, № 12). constraints.txt содержит все пакеты с точными
+  # версиями, поэтому --no-deps --disable-pip: без установки, по списку.
+  # Вне обязательных проверок main — сигнал, а не блокировка.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install pip-audit
+      - run: pip-audit -r constraints.txt --no-deps --disable-pip --progress-spinner off
+
   deploy:
     needs: [lint, test]
     if: github.ref == 'refs/heads/main'
