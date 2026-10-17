@@ -3,8 +3,8 @@
 # Автодеплой Show Ring: обновляет оба репозитория (бэк + соседний фронт) и
 # пересобирает прод-стек. Запускается:
 #   - вручную:           <бэк>/deploy/deploy.sh
-#   - из GitHub Actions: self-hosted runner на этом же сервере
-#     (.github/workflows/ci.yml, job deploy) на каждый push в main.
+#   - автоматически:    deploy/auto-deploy.sh по systemd-таймеру, когда в
+#     main появился коммит с зелёным CI (docs/deployment-linux.md, шаг 15).
 #
 # Идемпотентно — гонять можно сколько угодно. Образы собираются ЛОКАЛЬНО
 # (как в docker-compose.prod.yml), реестр не нужен; Docker кеширует слои,
@@ -62,9 +62,18 @@ check_env() {
     fi
 }
 
-echo "==> [1/4] Обновляю репозитории (ff-only; рабочее дерево на сервере должно быть чистым)"
-git -C "$FRONTEND_DIR" pull --ff-only
-git -C "$BACKEND_DIR" pull --ff-only
+# Весь деплой — внутри main: git pull обновляет и ЭТОТ файл, а bash читает
+# скрипт по ходу выполнения. Функцию он разбирает целиком до вызова.
+main() {
+if [ -n "${SHOW_RING_SKIP_PULL:-}" ]; then
+    # auto-deploy.sh уже перемотал рабочие копии на коммиты с зелёным CI —
+    # pull подтянул бы что-то новее, ещё не проверенное.
+    echo "==> [1/4] Репозитории обновлены auto-deploy.sh — pull пропускаю"
+else
+    echo "==> [1/4] Обновляю репозитории (ff-only; рабочее дерево на сервере должно быть чистым)"
+    git -C "$FRONTEND_DIR" pull --ff-only
+    git -C "$BACKEND_DIR" pull --ff-only
+fi
 
 cd "$BACKEND_DIR"
 check_env
@@ -77,3 +86,6 @@ docker image prune -f
 
 echo "==> [4/4] Текущий статус:"
 compose ps
+}
+
+main "$@"; exit
