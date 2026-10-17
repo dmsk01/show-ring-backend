@@ -46,6 +46,7 @@ from app.routers.admin import upload_quotas as admin_upload_quotas
 from app.routers.admin import security as admin_security
 from app.redis import init_redis, close_redis
 from app.services.file_storage import close_s3, init_s3
+from app.services.ws_manager import notif_ws_manager, ws_manager
 from app.services.rabbit import rabbit_service
 from app.middleware.metrics import MetricsMiddleware
 from app.services.scheduler import start_scheduler, stop_scheduler
@@ -116,6 +117,9 @@ async def shutdown_resources() -> None:
         await rabbit_service.close()
     except Exception as e:
         logger.warning("RabbitMQ close failed: %s", e)
+    # Pub/Sub-соединения WebSocket-менеджеров — до закрытия клиента Redis.
+    for manager in (ws_manager, notif_ws_manager):
+        await manager.aclose()
     await close_redis()
     await close_s3()
     await engine.dispose()
