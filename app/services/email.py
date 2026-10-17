@@ -98,7 +98,7 @@ def render_email(
         # механизм, что использует Jinja для autoescape. text-fallback
         # оставляем как есть (это plain/text, без HTML-парсинга у клиента).
         return (
-            f"Show Ring: {template_name}",
+            f"BisShow: {template_name}",
             f"<p>Событие: {_html_escape(template_name)}</p>",
             f"Событие: {template_name}",
         )
@@ -126,7 +126,7 @@ def render_email(
 
     # Fallback subject — на случай если шаблон не задал блок.
     if not subject:
-        subject = f"Show Ring: {template_name}"
+        subject = f"BisShow: {template_name}"
     # Если text-fallback не задан, генерим из html через rude strip.
     # Это не идеальный конвертер, но лучше, чем пустой text/plain.
     if not text_body and html_body:
@@ -137,7 +137,7 @@ def render_email(
         html_body += (
             '\n<p style="color:#888;font-size:12px">'
             "Вы получили это письмо, потому что подписались на уведомления "
-            f'Show Ring. <a href="{_html_escape(url)}">Отписаться или '
+            f'BisShow. <a href="{_html_escape(url)}">Отписаться или '
             "изменить подписки</a>.</p>"
         )
         text_body += f"\n\nОтписаться или изменить подписки: {url}"

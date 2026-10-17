@@ -1538,7 +1538,7 @@ async def seed(db: AsyncSession) -> None:
             {
                 "title": title,
                 "slug": slug,
-                "description": title + ". Демо-материал блога Show Ring.",
+                "description": title + ". Демо-материал блога BisShow.",
                 "content": content,
                 "tags": tags,
                 "meta_keywords": tags,
@@ -1748,7 +1748,7 @@ async def seed(db: AsyncSession) -> None:
     )
     if not has_file:
         pdf = _make_pdf_bytes([
-            "Show Ring - demo catalog",
+            "BisShow - demo catalog",
             f"Show id: {catalog_show.id}",
             f"Date: {catalog_show.date_start.isoformat()}",
         ])

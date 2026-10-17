@@ -18,7 +18,7 @@ VARIANTS: list[tuple[str, int, bool]] = [
     ("medium", 1000, True),
 ]
 
-WATERMARK_TEXT = "Show Ring"
+WATERMARK_TEXT = "BisShow"
 JPEG_QUALITY = 85
 
 # Явный потолок числа пикселей — защита от decompression-bomb. Сильно

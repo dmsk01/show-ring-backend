@@ -41,7 +41,7 @@ async def test_telegram_and_email(monkeypatch):
     req = captured[0]
     assert req.url.path == "/bot123:abc/sendMessage"
     body = json.loads(req.content)
-    assert body == {"chat_id": "-100500", "text": "Show Ring — Тест"}
+    assert body == {"chat_id": "-100500", "text": "BisShow — Тест"}
     assert emails[0]["to_email"] == "ops@example.com"
 
 

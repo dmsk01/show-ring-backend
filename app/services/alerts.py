@@ -102,7 +102,7 @@ async def _evaluate(redis: Redis, now: datetime) -> list[Alert]:
 
 async def deliver(text: str) -> None:
     """Отправить сообщение во все настроенные каналы. Ошибки — в лог."""
-    message = f"Show Ring — {text}"
+    message = f"BisShow — {text}"
     security_logger.warning("security_alert %s", text)
 
     token, chat = settings.alert_telegram_bot_token, settings.alert_telegram_chat_id
@@ -121,7 +121,7 @@ async def deliver(text: str) -> None:
         try:
             await send_email(
                 to_email=settings.alert_email,
-                subject="Show Ring: оповещение безопасности",
+                subject="BisShow: оповещение безопасности",
                 html_body=f"<p>{message}</p>",
                 text_body=message,
             )
