@@ -21,6 +21,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.policies import Actor, is_organizer_of
 from app.database import get_db
 from app.dependencies import get_current_user, user_rate_limit
 from app.errors import Forbidden, NotFound
@@ -39,19 +40,13 @@ router = APIRouter(prefix="/shows", tags=["documents"])
 _DOCS_LIMIT = user_rate_limit("documents:generate", limit=10, window=3600)
 
 
-def _is_organizer_or_admin(user: User, organizer_id: uuid.UUID) -> bool:
-    if any(r.role.value == "admin" for r in user.roles):
-        return True
-    return user.id == organizer_id
-
-
 async def _ensure_organizer(
     db: AsyncSession, show_id: uuid.UUID, user: User
 ) -> None:
     show = await show_repo.get_show(db, show_id)
     if show is None:
         raise NotFound("not_found")
-    if not _is_organizer_or_admin(user, show.organizer_id):
+    if not is_organizer_of(Actor.of(user), show.organizer_id):
         raise Forbidden("forbidden")
 
 

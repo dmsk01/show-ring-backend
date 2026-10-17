@@ -25,6 +25,7 @@ from app.models.dog import Dog
 from app.repositories import kennel as kennel_repo
 
 if TYPE_CHECKING:
+    from app.models.support import SupportTicket
     from app.models.user import User
 
 
@@ -50,6 +51,24 @@ class Actor:
     def owns(self, owner_id: uuid.UUID | None) -> bool:
         """Объект принадлежит этому пользователю."""
         return owner_id is not None and owner_id == self.user_id
+
+
+def is_operator(actor: Actor) -> bool:
+    """Оператор поддержки. admin неявно тоже оператор — ему нужен доступ ко
+    всему для разбора инцидентов."""
+    return actor.has_role("operator")
+
+
+def can_access_ticket(ticket: SupportTicket, actor: Actor) -> bool:
+    """Доступ к тикету: автор, назначенный оператор, admin или operator."""
+    if actor.owns(ticket.user_id) or actor.owns(ticket.assigned_to_id):
+        return True
+    return is_operator(actor)
+
+
+def is_organizer_of(actor: Actor, organizer_id: uuid.UUID | None) -> bool:
+    """Организатор выставки (или admin)."""
+    return actor.is_admin or actor.owns(organizer_id)
 
 
 async def can_manage_dog(db: AsyncSession, dog: Dog, actor: Actor) -> bool:

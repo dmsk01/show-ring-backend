@@ -24,27 +24,18 @@ from app.models.support import (
 )
 from app.models.user import User
 from app.repositories import support as repo
+from app import policies
+from app.policies import Actor
 
 
 def is_operator(user: User) -> bool:
-    """
-    Есть ли у пользователя роль оператора. admin неявно тоже оператор —
-    у админа должен быть доступ ко всему для разруливания инцидентов.
-    """
-    return any(
-        r.role.value in ("operator", "admin") for r in user.roles
-    )
+    """Правило — в app/policies.py (BE-33); здесь обёртка для кода с User."""
+    return policies.is_operator(Actor.of(user))
 
 
 def can_access_ticket(ticket: SupportTicket, user: User) -> bool:
-    """
-    Доступ к тикету: автор, назначенный оператор, admin / operator.
-    """
-    if ticket.user_id == user.id:
-        return True
-    if ticket.assigned_to_id == user.id:
-        return True
-    return is_operator(user)
+    """Правило — в app/policies.py (BE-33); здесь обёртка для кода с User."""
+    return policies.can_access_ticket(ticket, Actor.of(user))
 
 
 async def create_ticket(

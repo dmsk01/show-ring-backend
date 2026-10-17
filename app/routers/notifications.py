@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import NoReturn
 
 from fastapi import (
     APIRouter,
@@ -43,15 +42,6 @@ from app.services.ws_manager import notif_ws_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["notifications"])
-
-
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code == "not_found":
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    raise HTTPException(400, code)
 
 
 # ---------------------------------------------------------------------
