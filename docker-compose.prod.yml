@@ -93,7 +93,13 @@ services:
   # nginx (/ → web, /api/ → api).
   web:
     logging: *default-logging
-    build: ../show-ring-frontend
+    build:
+      context: ../show-ring-frontend
+      # NEXT_PUBLIC_* Next.js встраивает при сборке — это build-arg'и, а не
+      # environment. Поменял в .env → нужна пересборка (deploy.sh её делает).
+      args:
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
+        NEXT_PUBLIC_SITE_INDEXING: ${NEXT_PUBLIC_SITE_INDEXING:-false}
     environment:
       # Фолбэк для SSR-запросов изнутри контейнера (минуя nginx);
       # браузерные запросы ходят относительным /api через nginx.

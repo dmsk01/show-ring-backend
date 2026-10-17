@@ -358,7 +358,9 @@ cd /opt/show-ring-backend
 - ✅ **Клонировать `show-ring-frontend` рядом** — единственный ручной шаг.
 - ✅ **Сборка** — автоматически, частью `docker compose up --build` (сервис `web`).
 - ❌ **Свой `.env` фронту задавать НЕ нужно** — образ собирается с рабочими
-  дефолтами, а `BACKEND_URL` задаётся в `docker-compose.prod.yml`.
+  дефолтами, а `BACKEND_URL` задаётся в `docker-compose.prod.yml`. Две настройки
+  фронта — адрес сайта и индексация роботами (`NEXT_PUBLIC_SITE_URL`,
+  `NEXT_PUBLIC_SITE_INDEXING`) — берутся из `.env` бэкенда при сборке.
 - ❌ **`npm install` / `npm run build` на сервере вручную запускать НЕ нужно** —
   всё происходит внутри Docker-сборки.
 - ✅ **Маршрутизация** — через nginx: `/` → фронт, `/api/` → бэкенд.
