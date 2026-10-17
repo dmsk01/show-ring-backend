@@ -15,6 +15,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import Forbidden, NotFound
 from app.models.support import (
     SupportMessage,
     SupportTicket,
@@ -83,9 +84,9 @@ async def change_status(
 ) -> SupportTicket:
     obj = await repo.get_ticket(db, ticket_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     if not is_operator(user):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     obj.status = target
     await db.commit()
     await db.refresh(obj)
@@ -100,10 +101,10 @@ async def assign_operator(
 ) -> SupportTicket:
     obj = await repo.get_ticket(db, ticket_id)
     if obj is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     # Только admin может назначать.
     if not any(r.role.value == "admin" for r in user.roles):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     obj.assigned_to_id = operator_id
     # Назначение оператора автоматически переводит тикет в in_progress
     # (если был open). Это удобно — оператор не забудет вручную.
@@ -126,9 +127,9 @@ async def post_message(
     """
     ticket = await repo.get_ticket(db, ticket_id)
     if ticket is None:
-        raise ValueError("not_found")
+        raise NotFound("not_found")
     if not can_access_ticket(ticket, user):
-        raise ValueError("forbidden")
+        raise Forbidden("forbidden")
     msg = await repo.add_message(
         db,
         ticket_id=ticket_id,

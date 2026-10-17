@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Literal, NoReturn
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,24 +45,6 @@ def _dog_response(dog: Dog, photos: list[DogPhoto]) -> DogResponse:
     return DogResponse.from_orm_with_photos(dog, photos)
 
 
-def _raise_for_error(err: ValueError) -> NoReturn:
-    code = str(err)
-    if code.endswith("not_found"):
-        raise HTTPException(404, code)
-    if code == "forbidden":
-        raise HTTPException(403, code)
-    if code in ("duplicate_unique_field", "parent_already_set", "dog_has_show_history"):
-        raise HTTPException(409, code)
-    if code in (
-        "father_must_be_male",
-        "mother_must_be_female",
-        "self_parent_forbidden",
-        "pedigree_cycle",
-    ):
-        raise HTTPException(422, code)
-    raise HTTPException(400, code)
-
-
 @router.post(
     "",
     response_model=DogResponse,
@@ -75,15 +57,12 @@ async def create_dog(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        dog = await svc.create_dog(
-            db,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    dog = await svc.create_dog(
+        db,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(),
+    )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
 
 
@@ -156,16 +135,13 @@ async def update_dog(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        dog = await svc.update_dog(
-            db,
-            dog_id=dog_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            fields=body.model_dump(exclude_unset=True),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    dog = await svc.update_dog(
+        db,
+        dog_id=dog_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        fields=body.model_dump(exclude_unset=True),
+    )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
 
 
@@ -179,15 +155,12 @@ async def delete_dog(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.delete_dog(
-            db,
-            dog_id=dog_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.delete_dog(
+        db,
+        dog_id=dog_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 @router.post(
@@ -207,16 +180,13 @@ async def add_dog_images(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        dog = await svc.add_images(
-            db,
-            dog_id=dog_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-            images=[img.model_dump() for img in body],
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    dog = await svc.add_images(
+        db,
+        dog_id=dog_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+        images=[img.model_dump() for img in body],
+    )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
 
 
@@ -237,16 +207,13 @@ async def delete_dog_image(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        dog = await svc.delete_image(
-            db,
-            dog_id=dog_id,
-            file_id=file_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    dog = await svc.delete_image(
+        db,
+        dog_id=dog_id,
+        file_id=file_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
     return _dog_response(dog, await repo.list_dog_photos(db, dog.id))
 
 
@@ -276,10 +243,7 @@ async def get_pedigree(
     ),
 )
 async def list_descendants(dog_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    try:
-        return await svc.list_descendants(db, dog_id)
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.list_descendants(db, dog_id)
 
 
 @router.post(
@@ -300,16 +264,13 @@ async def add_descendant(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        return await svc.add_descendant(
-            db,
-            parent_id=dog_id,
-            child_id=body.child_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.add_descendant(
+        db,
+        parent_id=dog_id,
+        child_id=body.child_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 @router.delete(
@@ -324,16 +285,13 @@ async def remove_descendant(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    try:
-        await svc.remove_descendant(
-            db,
-            parent_id=dog_id,
-            child_id=child_id,
-            requester_id=user.id,
-            is_admin=_is_admin(user),
-        )
-    except ValueError as e:
-        _raise_for_error(e)
+    await svc.remove_descendant(
+        db,
+        parent_id=dog_id,
+        child_id=child_id,
+        requester_id=user.id,
+        is_admin=_is_admin(user),
+    )
 
 
 @router.get(
@@ -346,10 +304,7 @@ async def remove_descendant(
     ),
 )
 async def list_siblings(dog_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    try:
-        return await svc.list_siblings(db, dog_id)
-    except ValueError as e:
-        _raise_for_error(e)
+    return await svc.list_siblings(db, dog_id)
 
 
 @router.get(

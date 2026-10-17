@@ -15,6 +15,7 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import NotFound
 from app.models.dog import Dog, DogDocument, DogDocumentKind
 from app.models.file import UploadedFile
 from app.repositories import checkin as checkin_repo
@@ -27,7 +28,7 @@ from app.services.dog import _check_can_manage_dog
 async def get_dog_or_404(db: AsyncSession, dog_id: uuid.UUID) -> Dog:
     dog = await dog_repo.get_dog(db, dog_id)
     if dog is None:
-        raise ValueError("dog_not_found")
+        raise NotFound("dog_not_found")
     return dog
 
 
