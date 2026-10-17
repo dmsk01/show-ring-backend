@@ -149,6 +149,10 @@ services:
       SECRET_KEY: ${SECRET_KEY}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
       DEBUG: ${DEBUG:-false}
+      # Отказ старта при опасной прод-конфигурации (app/config.py,
+      # production_problems). Раньше не прокидывалась: STRICT_CONFIG=true из
+      # .env.prod.example до контейнера не доходил, проверка только писала в лог.
+      STRICT_CONFIG: ${STRICT_CONFIG:-false}
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-false}
       # Auth-куки/CSRF: .env в образ не попадает (.dockerignore) — всё,
       # что должен видеть app.config.Settings, прокидываем явно.
