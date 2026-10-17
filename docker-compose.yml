@@ -24,7 +24,7 @@
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     # restart: unless-stopped — инфра-сервис должен сам подниматься после
     # перезапуска Docker Desktop/демона. Иначе api/worker (у них своя
     # restart-policy) оживут, а Postgres/Redis/Rabbit/MinIO — нет, и API
